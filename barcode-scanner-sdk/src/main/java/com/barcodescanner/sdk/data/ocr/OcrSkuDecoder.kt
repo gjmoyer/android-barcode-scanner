@@ -186,7 +186,6 @@ class OcrSkuDecoder(
                     validation.payloadWithoutChecksum
                 }
                 if (isSingleCheck && payload.length < MIN_SINGLE_DIGITS) continue
-                if (isSingleCheck && payload.length < MIN_SINGLE_DIGITS) continue
                 scored += Scored(digits, payload, box, plain, proximity)
             }
         }

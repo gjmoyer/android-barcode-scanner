@@ -1,0 +1,5 @@
+# User-supplied shelf photos are NOT committed (private labels, ~2 MB).
+# Drop PNGs named msi-<label>-<sku>.png here to run DeviceMsiTest on device;
+# with an empty dir the test passes vacuously. Synthetic fixtures
+# (databar-*.png) ARE committed.
+msi-*.png

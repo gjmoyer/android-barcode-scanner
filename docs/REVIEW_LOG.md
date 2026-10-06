@@ -204,3 +204,26 @@ Retest on user photos (transcribed OCR text; ML Kit inference itself needs a dev
 fused bars still exact on quakotml/starbucks; OCR accepts ondeg under MOD_11 and
 rejects everything under wrong policies; dixie/silkalm/yakult honestly silent.
 Unit tests: 10 (fake engine; ML Kit adapter is device-verified surface).
+
+## Pass 10 — on-device full-chain verification (2026-10-06, emulator-5554 API 37 arm64)
+New `DeviceMsiTest` (androidTest, full production chain: ML Kit + real zxing-cpp
+`.so` + MSI + OCR) with runner deps + `testInstrumentationRunner` in
+`build.gradle.kts`. Shelf photos stay user-local (`.gitignore`d `msi-*.png`,
+vacuous pass when absent); synthetic `databar-*.png` fixtures committed.
+Results (deterministic across runs):
+- `NATIVE_ZXING_AVAILABLE=true`; DataBar Omni/Ltd/Expanded all exact on device
+  (550–1150 ms; Expanded pays TryHarder).
+- MSI results match the JVM suite exactly (quakotml MOD_10_10, starbucks MOD_10;
+  same ondeg near-misses "024812"/"024"; dixie/silkalm/yakult silent) — validates
+  the JVM-first test strategy end to end.
+- ML Kit OCR reads better than the tesseract probe: dixie
+  "0087573 000-42000-15121 10-48 CT" and yakult "0828147 006-99235-00100"
+  exact; silkalm misreads one digit unstably ("0828593" vs true "0826593").
+- OCR selection correctly silent everywhere: dixie/yakult print numbers validate
+  under NO standard scheme (checksum census), silkalm misread fails checksum —
+  zero confident OCR false positives on device.
+- Cold-start note: the very first OCR run post-install returned 0 lines/photo
+  (model warm-up); warm runs return 4–13 lines. Decoder treats both identically.
+- Timings: MSI 180–760 ms, DataBar 550–1150 ms, full-chain worst case ~1.5 s
+  (timeout cap by design). TEMP-DIAG logs removed; duplicate single-check guard
+  removed. Suite: 50/50 JVM green.

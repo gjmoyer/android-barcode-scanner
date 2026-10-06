@@ -16,6 +16,7 @@ android {
         // API 21+, and all platform calls used (PreviewView, SystemClock, Bitmap,
         // YuvImage, repeatOnLifecycle via lifecycle-runtime) exist since API 28.
         minSdk = 28
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         consumerProguardFiles("consumer-rules.pro")
 
         // zxing-cpp native bridge. ABIs needed for Play distribution.
@@ -95,4 +96,9 @@ dependencies {
     testImplementation(libs.robolectric)
     testImplementation(libs.mockk)
     testImplementation(libs.coroutines.core)
+
+    androidTestImplementation("androidx.test:runner:1.7.0")
+    androidTestImplementation("androidx.test:rules:1.7.0")
+    androidTestImplementation("androidx.test.ext:junit:1.3.0")
+    androidTestImplementation(libs.coroutines.android)
 }
