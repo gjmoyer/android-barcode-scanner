@@ -68,17 +68,28 @@ val config = ScannerConfigBuilder()
     .only(Symbology.QR_CODE, Symbology.DATA_BAR_EXPANDED, Symbology.MSI_PLESSEY)
     .robustMode(true)                        // 4 orientations + extra MSI passes
     .msiChecksumPolicy(MsiChecksumPolicy.MOD_10)
-    .decodeTimeoutMillis(1500)
+    .msiMinPayloadDigits(6)                  // reject short lucky MSI parses (shelf SKUs)
+    .msiOcrRequireChecksum(false)            // trust printed SKU (print omits check digit)
+    .decodeTimeoutMillis(4000)               // leave room for the last-in-line OCR fallback
     .duplicateSuppressionMillis(1500)        // live-mode repeat suppression
     .minConfidence(0.5f)
     .build()
 ```
 
-- `robustMode(false)` (default): 0°+180° orientations, faster per-frame scans;
-  `robustMode(true)`: all 4 orientations, vertical MSI scanlines, extra
-  binarizations, zxing `TryHarder`.
+- `robustMode(false)` (default): upright + upside-down orientations (sensor
+  rotation compensated, so portrait camera frames still start upright), faster
+  per-frame scans; `robustMode(true)`: all 4 orientations, vertical MSI
+  scanlines, extra binarizations, zxing `TryHarder`.
 - MSI checksum must match the label spec; a wrong policy yields `NotFound`
   (never a misread presented as valid — see policy matrix below).
+- `msiMinPayloadDigits` (default 3, spec floor): raise to ~6 for shelf SKUs;
+  short MSI parses validate by luck and can win blurry live frames with only
+  two correlated observations.
+- Printed shelf SKUs usually omit the check digit (it lives in the barcode), so
+  the OCR fallback trusts the printed digits by default (`msiOcrRequireChecksum
+  = false`) and emits them as `MsiOcr` at confidence 0.5. Set true to require
+  validation (confidence 0.7) only if printed numbers carry their check digit.
+  Because OCR runs last, budget `decodeTimeoutMillis` accordingly (~4 s).
 - Duplicate suppression only affects the live `results` flow; one-shot
   `scanBitmap`/`scanFrame` always return the decode result.
 

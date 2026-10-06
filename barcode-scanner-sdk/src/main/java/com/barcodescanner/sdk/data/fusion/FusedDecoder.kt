@@ -38,8 +38,9 @@ import kotlinx.coroutines.withTimeout
  * [ScannerConfig.minConfidence] above 0.9 therefore disables ZXing, above 0.95
  * disables ML Kit — set 0.5 default.
  *
- * Robustness layers: preprocessing contrast normalization, orientation expansion
- * (0/180° default, 0/90/180/270° robust), per-engine binarization retries.
+ * Robustness layers: preprocessing contrast normalization, upright-first
+ * orientation expansion (2 attempts default, 4 robust — upright is relative to
+ * the frame's sensor rotation), per-engine binarization retries.
  */
 class FusedDecoder(
     private val registry: DecoderRegistry,
@@ -140,9 +141,12 @@ class FusedDecoder(
         }
         if (decoder.name in MSI_FAMILY_ENGINES) {
             if (Symbology.MSI_PLESSEY !in config.enabledSymbologies) return false
-            // MSI scanline decoding is the most expensive step; sideways rotations
-            // are only attempted in robust mode (which also enables vertical scanlines).
-            if (!config.robustMode && frame.attemptRotation in setOf(90, 270)) return false
+            // MSI scanline decoding is the most expensive step; sideways views are
+            // only attempted in robust mode (which also enables vertical scanlines).
+            // "Sideways" is relative to upright: camera frames arrive rotated
+            // (rotationDegrees), so the upright candidate is not always attemptRotation=0.
+            val relative = (frame.attemptRotation - frame.rotationDegrees + 360) % 360
+            if (!config.robustMode && relative in setOf(90, 270)) return false
         }
         return true
     }

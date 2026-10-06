@@ -124,6 +124,30 @@ class MsiDecoderRegressionTest {
     }
 
     @Test
+    fun minPayloadDigits_withholdsShortLuckyValidations() {
+        // "80523" = Morovia "8052" + Mod10 check 3: valid under the default spec
+        // floor, but a host scanning 6+ digit shelf SKUs must not emit it (short
+        // parses need only 2 correlated observations to survive on blurry frames).
+        val bmp = renderMsi("80523")
+        val decoder = MsiPlesseyDecoder(
+            checksumPolicy = ScannerConfig.MsiChecksumPolicy.MOD_10,
+            minPayloadDigits = 6,
+        )
+        try {
+            val out = runBlocking { decoder.decode(ScanFrame(bitmap = bmp)) }
+            assertTrue("expected NotFound, got $out", out is DecodeOutcome.NotFound)
+        } finally {
+            decoder.close()
+        }
+        val defaultOut = decode(bmp)
+        assertTrue("expected Success, got $defaultOut", defaultOut is DecodeOutcome.Success)
+        assertEquals(
+            "8052",
+            (defaultOut as DecodeOutcome.Success).barcodes.maxBy { it.confidence }.rawValue,
+        )
+    }
+
+    @Test
     fun stripGuardsRelative_acceptsSpecFraming() {
         val decoder = MsiPlesseyDecoder()
         // START wide+narrow, three '0' digits (bar-first elements, 4px narrow /

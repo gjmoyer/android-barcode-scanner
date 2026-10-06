@@ -227,3 +227,63 @@ Results (deterministic across runs):
 - Timings: MSI 180–760 ms, DataBar 550–1150 ms, full-chain worst case ~1.5 s
   (timeout cap by design). TEMP-DIAG logs removed; duplicate single-check guard
   removed. Suite: 50/50 JVM green.
+
+## Pass 11 — live-camera MSI blind spot: sensor-relative orientation (2026-10-06, user report)
+User: shelf images decode (DeviceMsiTest) but the sample app camera detects no
+MSI. Reproduced on Pixel 6a: rotating each shelf photo into the camera's actual
+frame shape (sideways buffer + `rotationDegrees=90`) and decoding via
+`scanBitmap(rotated, rotationDegrees=90)` turned the 2 exact bar decodes
+(quakotml, starbucks) into NotFound / a timeout-truncated OCR hit (~1.6 s).
+Root cause: `OrientationCandidates` always tried 0°→180°→90°→270° regardless of
+`ScanFrame.rotationDegrees`; portrait camera buffers are stored sideways, so the
+first two candidates were sideways content, MSI's expensive vertical-scanline
+attempts ate the 1500 ms fusion budget, and the upright 90°/270° candidates
+(marked attemptRotation=90/270, skipped for MSI in default mode) came last.
+Fix:
+- `OrientationCandidates.priorityOrder(rotationDegrees)`: upright compensation
+  first, then upside-down, then sideways (gallery stills: unchanged 0/180/90/270).
+- `FusedDecoder.wantsFrame`: MSI-family "sideways" is now relative to
+  `rotationDegrees`, so default-mode portrait frames attempt MSI on the upright
+  candidates instead of skipping them.
+- Unit tests: priority-order matrix + portrait expand/effectiveRotation cases.
+Verification: probe now shows camera-shaped frames match stills exactly on the
+Pixel 6a (starbucks 535 ms bars 1.0, quakotml 693 ms bars 1.0); DeviceMsiTest
+results unchanged for rotationDegrees=0; JVM + connected suites green.
+Perf note: this also makes default (non-robust) MSI work for portrait captures,
+previously documented as 0/180°-only.
+
+## Pass 12 — live-frame forensics: OCR truncation + short MSI false positive (2026-10-06, user retest)
+Captured the user's actual live frames (temporary diagnostic dump in
+DefaultBarcodeScanner; since removed). Pointing at a monitor showing
+msi-starbucks-0168971.png: 1280x960 rot=90 frames produced either
+`MsiOcr 016897 c=0.7` or `MsiPlessey 0128 c=1.0` — never the true `0168971`.
+Two real defects (bars were too small in-frame to decode (~150 px), so both
+fallbacks fired):
+- OCR stripped an interpreted check digit: the printed `0168971` happens to be
+  a valid Mod10 codeword (`016897` + check `1`), so the fallback emitted
+  `016897`. Printers differ on printing the check digit(s); the OCR now emits
+  the digit run AS PRINTED (checksum remains the precision gate only).
+- Short MSI false positive: a 4-digit window with 2 correlated observations
+  cleared the old spec floor (3). New `ScannerConfig.msiMinPayloadDigits`
+  (default 3 = spec compatible; sample/warehouse = 6) withholds short parses;
+  the sample now sets 6.
+Tests: OcrSkuDecoderTest expectations updated to printed-run; new
+MsiDecoderRegressionTest.minPayloadDigits case (8052 rejected at 6, accepted at
+default). JVM suite green; sample reinstalled for retest.
+
+## Pass 12b — OCR trust mode (silkalm/yakult never recognized)
+User: printed SKUs "do not include the checksum" — exactly right: the check
+digit(s) live in the barcode; validating the printed text usually cannot
+succeed. On-device OCR read (warm): yakult `0828147` exact, dixie `0087573`
+exact, silkalm `0828593` (true `0826593`, one stable misread). Changes:
+- `ScannerConfig.msiOcrRequireChecksum` (default false): trust mode emits any
+  plain 7+ digit run as printed at 0.5; strict mode (true) requires validation
+  and earns 0.7. Bars are unaffected.
+- Decoder emits the printed run, never strips (the old strip truncated
+  Starbucks `0168971`→`016897`).
+- `decodeTimeoutMillis`: OCR is last, so the 1.5 s default truncated it —
+  sample now uses 4 s (verified: at 5 s, silkalm/yakult/dixie all emit via
+  MsiOcr; at 1.5 s, silkalm/dixie were NotFound).
+On-device full-chain results (trust mode): yakult exact, dixie exact, silkalm
+one-digit misread (ML Kit limit; undetectable without a check digit in print).
+Sample enables trust mode + min payload 6 + 4 s. Zero confident bar changes.

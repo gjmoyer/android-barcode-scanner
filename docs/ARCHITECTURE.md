@@ -34,7 +34,7 @@ CameraX / Bitmap
   → ScanFrame(bitmap, sensorRotation)
   → PreprocessingPipeline stage 0: DownscaleTransform (≤1280 long edge)
   → BlurScoringTransform → ContrastNormalizationTransform
-  → OrientationCandidates.expand (0/180° default, 0/90/180/270° robust)
+  → OrientationCandidates.expand (upright-first, sensor-compensated: 2 default, 4 robust)
   → per orientation in REGISTRY order (MLKit → ZXingCpp → MSI → MsiOcr):
   skip-if-disabled; MSI text fallback runs only after all bar engines miss
   → confident hit (≥0.95) stops scan; else pool/dedup and best-confidence wins
@@ -54,7 +54,7 @@ No pipeline change.
 3. Done — fusion iterates `registry.snapshot()` order; no fusion edit needed.
 
 **Tune robustness vs speed**:
-- `ScannerConfig(maxOrientationsTried=2)` default: 0°+180°, fastest.
+- `ScannerConfig(maxOrientationsTried=2)` default: upright + upside-down, fastest.
 - `ScannerConfig.robust()` → 4 orientations + extra MSI binarizations + wider voting.
 
 ## Decisions (ADRs, condensed)

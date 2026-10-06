@@ -53,6 +53,7 @@ internal class ScannerContainer(
             checksumPolicy = config.msiChecksumPolicy,
             robustMode = config.robustMode,
             dispatcher = dispatcher,
+            minPayloadDigits = config.msiMinPayloadDigits,
         )
     }
 
@@ -66,6 +67,7 @@ internal class ScannerContainer(
             checksumPolicy = config.msiChecksumPolicy,
             robustMode = config.robustMode,
             dispatcher = dispatcher,
+            requireChecksum = config.msiOcrRequireChecksum,
         )
     }
 

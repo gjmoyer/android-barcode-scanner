@@ -32,14 +32,24 @@ import java.util.concurrent.atomic.AtomicBoolean
  *     proximity to a dense band.
  *
  * Dash-adjacency matters: runs are split on non-digits, and a run touching `-`
- * or `/` in its line is marked dashed, so a lucky-validating case-code segment
- * loses to a plain SKU run. Checksum policy semantics match the bar decoder:
- * non-NONE policies require validation; NONE accepts the longest run (≥ 7).
+ * or `/` in its line is marked dashed, so a case-code segment loses to a plain
+ * SKU run.
  *
- * Precision note: single-checksum collisions (1/10) are contained by the
- * dash/length/proximity ranking plus the agreement-agnostic single-shot nature —
- * hosts should treat `engineName == "MsiOcr"` hits as lower-trust (0.7) and can
- * filter them out entirely via `ScanResult` inspection if desired.
+ * Checksum semantics: shelf labels print the SKU WITHOUT the check digit(s)
+ * (those live in the barcode), so validating the printed text is usually
+ * impossible. [requireChecksum] therefore defaults to false: any plain 7+ digit
+ * run is emitted at confidence 0.5 in the digits-as-printed form. Hosts that
+ * need strict precision can set [requireChecksum] = true; runs that happen to
+ * validate then earn confidence 0.7.
+ *
+ * Reported value: the digit run EXACTLY AS PRINTED (never stripped — the old
+ * strip silently truncated real SKUs, e.g. Starbucks payload `0168971` is
+ * itself a valid Mod10 codeword and became `016897`).
+ *
+ * Precision note: unvalidated OCR reads depend on read quality (one misread
+ * digit cannot be detected without the check digit) — hosts should treat
+ * `engineName == "MsiOcr"` hits as lower-trust and can filter them out
+ * entirely via `ScanResult` inspection if desired.
  */
 class OcrSkuDecoder(
     enabledSymbologies: Set<Symbology>,
@@ -47,6 +57,12 @@ class OcrSkuDecoder(
         ScannerConfig.MsiChecksumPolicy.MOD_10,
     private val robustMode: Boolean = false,
     private val dispatcher: CoroutineDispatcher = Dispatchers.Default,
+    /**
+     * False (default): emit the best plain 7+ digit run as printed (confidence
+     * 0.5). True: require validation under [checksumPolicy] (confidence 0.7) —
+     * only useful when the printed number actually carries its check digit(s).
+     */
+    private val requireChecksum: Boolean = false,
     private val ocrEngineProvider: () -> OcrEngine = { MlKitOcrEngine() },
 ) : BarcodeDecoder {
 
@@ -95,12 +111,15 @@ class OcrSkuDecoder(
                 DecodeOutcome.Success(
                     listOf(
                         DecodedBarcode(
+                            // Printed run as-is (never strip: printer conventions differ).
                             rawValue = pick.digits,
                             symbology = Symbology.MSI_PLESSEY,
-                            confidence = 0.7f,
+                            // Validated reads outrank unvalidated ones; hosts with a
+                            // minConfidence above 0.5 filter the latter out.
+                            confidence = if (pick.validated) 0.7f else 0.5f,
                             boundingBox = if (rotated) null else pick.box,
                             engineName = NAME,
-                            checksumStripped = checksumPolicy != ScannerConfig.MsiChecksumPolicy.NONE,
+                            checksumStripped = false,
                             isUpsideDown = frame.attemptRotation == 180,
                         ),
                     ),
@@ -125,32 +144,28 @@ class OcrSkuDecoder(
         }
     }
 
-    internal data class SkuPick(val digits: String, val box: Rect?)
+    internal data class SkuPick(val digits: String, val box: Rect?, val validated: Boolean)
 
     /**
      * Picks the SKU digit run across OCR lines.
      *
-     * Rules (in order): digit runs split on non-digits and must clear
-     * [minDigits] (4; 7 under NONE where no checksum applies); non-NONE
-     * policies require checksum validation; among survivors prefer plain runs
-     * (not dash/slash-adjacent: case codes print dashed, SKUs print plain),
-     * then longer, then nearer a content band.
+     * Rules (in order): digit runs split on non-digits and must clear the
+     * length floor (strict: 4 + checksum validation; trust mode: 7, since no
+     * validation can apply to print without check digits); among survivors
+     * prefer plain runs (not dash/slash-adjacent: case codes print dashed,
+     * SKUs print plain), then longer, then nearer a content band.
      */
     internal fun pickSku(
         lines: List<OcrLine>,
         bands: List<IntRange>,
         scale: Float,
     ): SkuPick? {
-        // NONE has no checksum to gate on: demand a long run instead.
-        // Single-checksum hits additionally require MIN_SINGLE_DIGITS: a short
-        // run validating by 1/10-1/11 luck with no agreement mechanism behind it
-        // is a confident misread waiting to happen ("1512" off a case code);
-        // real shelf SKUs run 6+ digits, and short payloads remain the bar
-        // decoder's job (it has the ≥2-observation gate OCR inherently lacks).
-        val minDigits = when (checksumPolicy) {
-            ScannerConfig.MsiChecksumPolicy.NONE -> 7
-            else -> 4
-        }
+        // Validation only makes sense when the host asks for it AND the policy
+        // is not NONE. Shelf labels print the SKU without its check digit(s),
+        // so trust mode demands a long run instead.
+        val mustValidate = requireChecksum &&
+            checksumPolicy != ScannerConfig.MsiChecksumPolicy.NONE
+        val minDigits = if (mustValidate) 4 else 7
         // Single-checksum policies validate by 1/10-1/11 luck with no
         // cross-observation agreement behind a single OCR pass.
         val isSingleCheck = checksumPolicy == ScannerConfig.MsiChecksumPolicy.MOD_10 ||
@@ -178,14 +193,18 @@ class OcrSkuDecoder(
                 val digits = m.value
                 if (digits.length < minDigits) continue
                 val plain = isPlainRun(line.text, m.range.first, m.range.last + 1)
-                val payload = if (checksumPolicy == ScannerConfig.MsiChecksumPolicy.NONE) {
-                    digits
-                } else {
+                val payload = if (mustValidate) {
                     val validation = MsiChecksumValidator.validate(digits, checksumPolicy)
                     if (!validation.valid) continue
+                    // Short runs validating by 1/10-1/11 luck with no agreement
+                    // mechanism are confident misreads waiting to happen.
+                    if (isSingleCheck && validation.payloadWithoutChecksum.length < MIN_SINGLE_DIGITS) {
+                        continue
+                    }
                     validation.payloadWithoutChecksum
+                } else {
+                    digits
                 }
-                if (isSingleCheck && payload.length < MIN_SINGLE_DIGITS) continue
                 scored += Scored(digits, payload, box, plain, proximity)
             }
         }
@@ -195,7 +214,8 @@ class OcrSkuDecoder(
                 .thenByDescending { it.payload.length }
                 .thenBy { it.proximity },
         ).first()
-        return SkuPick(best.payload, best.box?.let { Rect(it) })
+        // Emit the run as printed; `payload` only gated/ranked.
+        return SkuPick(best.digits, best.box?.let { Rect(it) }, validated = mustValidate)
     }
 
     /**

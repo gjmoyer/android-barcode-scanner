@@ -31,6 +31,49 @@ class OrientationCandidatesTest {
     }
 
     @Test
+    fun priorityOrder_compensatesSensorRotation() {
+        assertArrayEquals(
+            intArrayOf(0, 180, 90, 270),
+            OrientationCandidates.priorityOrder(0).toIntArray(),
+        )
+        assertArrayEquals(
+            intArrayOf(90, 270, 180, 0),
+            OrientationCandidates.priorityOrder(90).toIntArray(),
+        )
+        assertArrayEquals(
+            intArrayOf(180, 0, 270, 90),
+            OrientationCandidates.priorityOrder(180).toIntArray(),
+        )
+        assertArrayEquals(
+            intArrayOf(270, 90, 0, 180),
+            OrientationCandidates.priorityOrder(270).toIntArray(),
+        )
+    }
+
+    @Test
+    fun expand_portraitFrame_startsWithUprightCompensation() {
+        // Portrait camera capture: buffer stored sideways, rotationDegrees=90.
+        val bmp = Bitmap.createBitmap(100, 50, Bitmap.Config.ARGB_8888)
+        val frame = ScanFrame(bitmap = bmp, rotationDegrees = 90)
+        val expanded = OrientationCandidates.expand(frame, 4)
+        assertEquals(90, expanded[0].attemptRotation)
+        // The first candidate is already upright: no ML Kit rotation hint left.
+        assertEquals(0, expanded[0].effectiveRotation)
+        assertEquals(270, expanded[1].attemptRotation)
+        assertEquals(180, expanded[1].effectiveRotation)
+    }
+
+    @Test
+    fun expand_portraitDefaultMode_triesOnlyUprightViews() {
+        // maxOrientationsTried=2 previously meant 0°/180° (sideways for a
+        // portrait frame). It must now mean the two upright-axis views.
+        val bmp = Bitmap.createBitmap(100, 50, Bitmap.Config.ARGB_8888)
+        val frame = ScanFrame(bitmap = bmp, rotationDegrees = 270)
+        val expanded = OrientationCandidates.expand(frame, 2)
+        assertEquals(listOf(270, 90), expanded.map { it.attemptRotation })
+    }
+
+    @Test
     fun rotate_180PreservesDimensions() {
         val bmp = Bitmap.createBitmap(100, 50, Bitmap.Config.ARGB_8888)
         val rotated = OrientationCandidates.rotate(bmp, 180)

@@ -19,6 +19,21 @@ data class ScannerConfig(
     val duplicateSuppressionMillis: Long,
     /** MSI Plessey checksum policy (Mod10 default per spec). */
     val msiChecksumPolicy: MsiChecksumPolicy,
+    /**
+     * Minimum MSI payload (checksum-stripped) length to emit. The spec floor is
+     * 3; short parses validate by luck far more often (a 4-digit window needs
+     * just 2 correlated observations to win a blurry frame), so hosts scanning
+     * shelf SKUs should raise this (typically 6). 3 = spec-compatible default.
+     */
+    val msiMinPayloadDigits: Int,
+    /**
+     * OCR text fallback (MsiOcr). False (default): emit the best plain 7+ digit
+     * run exactly as printed at confidence 0.5. Shelf labels print the SKU
+     * WITHOUT the check digit(s) (those live in the barcode), so validation is
+     * usually impossible; set true only when printed numbers carry their check.
+     * Bars stay strictly checksum-gated either way.
+     */
+    val msiOcrRequireChecksum: Boolean,
     /** Minimum confidence to emit a result. NOTE: >0.9 disables ZXing, >0.95 disables ML Kit. */
     val minConfidence: Float,
 ) {
@@ -30,6 +45,7 @@ data class ScannerConfig(
         require(maxOrientationsTried in 1..4) { "maxOrientationsTried must be 1..4" }
         require(decodeTimeoutMillis in 100..10_000L) { "decodeTimeoutMillis out of range" }
         require(duplicateSuppressionMillis >= 0) { "duplicateSuppressionMillis must be >= 0" }
+        require(msiMinPayloadDigits in 3..32) { "msiMinPayloadDigits must be 3..32" }
         require(minConfidence in 0f..1f) { "minConfidence must be 0..1" }
     }
 
@@ -52,6 +68,8 @@ data class ScannerConfig(
         private var timeout = 1_500L
         private var dedup = 1_500L
         private var msi = MsiChecksumPolicy.MOD_10
+        private var msiMinDigits = 3
+        private var msiOcrChecksum = false
         private var minConf = 0.5f
 
         fun enabledSymbologies(v: Set<Symbology>) = apply { enabled = v.toSet() }
@@ -73,6 +91,8 @@ data class ScannerConfig(
         fun decodeTimeoutMillis(v: Long) = apply { timeout = v }
         fun duplicateSuppressionMillis(v: Long) = apply { dedup = v }
         fun msiChecksumPolicy(v: MsiChecksumPolicy) = apply { msi = v }
+        fun msiMinPayloadDigits(v: Int) = apply { msiMinDigits = v }
+        fun msiOcrRequireChecksum(v: Boolean) = apply { msiOcrChecksum = v }
         fun minConfidence(v: Float) = apply { minConf = v }
         fun build() = ScannerConfig(
             enabledSymbologies = enabled.toSet(),
@@ -81,6 +101,8 @@ data class ScannerConfig(
             decodeTimeoutMillis = timeout,
             duplicateSuppressionMillis = dedup,
             msiChecksumPolicy = msi,
+            msiMinPayloadDigits = msiMinDigits,
+            msiOcrRequireChecksum = msiOcrChecksum,
             minConfidence = minConf,
         )
     }

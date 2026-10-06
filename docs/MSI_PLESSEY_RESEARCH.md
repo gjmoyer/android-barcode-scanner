@@ -78,8 +78,14 @@ Scandit checksum enum (Mod10/1010/11/1110 naming), tc-lib-barcode (family contex
 - The decoder is forward-only ON PURPOSE: guards are asymmetric and mirrored digits
   are bit-reversed per digit plus digit-order-reversed, so pixel reversal cannot reuse
   the table. 180° labels decode via the 180° candidate (half the CPU of dual-direction).
-- 90°/270° bars need vertical sampling: robust mode adds 3 vertical scanlines and
-  allows MSI on 90/270° candidates; default mode documents 0/180°-only MSI.
+- Orientation order is sensor-relative: `OrientationCandidates` starts at the
+  rotation that compensates `ScanFrame.rotationDegrees` (portrait camera frames
+  are stored sideways), then upside-down, then sideways. The old fixed
+  0°→180°→90°→270° order made live portrait frames burn the 1500 ms fusion
+  budget on sideways MSI/OCR attempts before the upright 90°/270° candidate,
+  so MSI appeared camera-blind while gallery stills decoded. Sideways views
+  still need vertical sampling: robust mode adds 3 vertical scanlines; default
+  mode skips MSI on the two sideways candidates (relative to upright).
 
 **Inversion (white-on-black).**
 - zxing-cpp path sets TryInvert; MSI scanline path assumes dark-bars-on-light (quiet-zone
@@ -151,9 +157,19 @@ Scandit's damaged-label path falls back to reading the printed digits; ours now
 does the same (`data/ocr/OcrSkuDecoder`, ML Kit text-recognition 16.0.1 bundled,
 offline). Design: runs LAST after all bar engines miss; requires content bands
 (blank walls never invoke the model); digit runs split on non-digits; prefers
-dash-free runs (case codes print dashed: `000-42000-15121`); requires checksum
-validation (non-`NONE`) with a 6-digit floor on single-checksum hits; emits
-`MSI_PLESSEY` at 0.7 with `engineName="MsiOcr"` and the OCR box.
+dash-free runs (case codes print dashed: `000-42000-15121`); emits `MSI_PLESSEY`
+with `engineName="MsiOcr"` and the OCR box. The emitted value is the digit run
+AS PRINTED — never checksum-stripped, because shelf labels print the SKU
+WITHOUT its check digit(s) (those live in the barcode): Starbucks payload
+`0168971` is itself a valid Mod10 codeword and the old strip reported `016897`;
+Yakult `0828147` and Dixie `0087573` match no standard scheme at all. Trusting
+the print is therefore the default (`msiOcrRequireChecksum = false`), emitted at
+0.5; strict validation remains available (0.7) when printed numbers do carry
+their check. One misread digit cannot be detected without the check digit
+(ML Kit reads Silkalm `0826593` as `0828593`), so hosts should treat `MsiOcr`
+hits as lower-trust and can filter them via `minConfidence`/engine inspection.
+Because OCR is last in the chain, `decodeTimeoutMillis` must cover the bar
+engines first (~4 s for shelf labels; the 1.5 s default truncated it).
 
 Checksum census from the filename SKUs (machine-verified, not assumed):
 - quakotml `0186477`: Mod1010 (checks 6, 8) — bars decode.

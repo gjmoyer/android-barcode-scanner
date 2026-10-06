@@ -50,6 +50,13 @@ class MsiPlesseyDecoder(
         ScannerConfig.MsiChecksumPolicy.MOD_10,
     private val robustMode: Boolean = false,
     private val dispatcher: CoroutineDispatcher = Dispatchers.Default,
+    /**
+     * Minimum checksum-stripped payload length to emit. Default = spec floor;
+     * short windows validate by luck and correlate across adjacent scanlines,
+     * so blurry live frames can yield 4-digit false positives at 2 votes.
+     * Hosts scanning shelf SKUs should raise this to ~6.
+     */
+    private val minPayloadDigits: Int = MsiCodeTable.MIN_DIGITS,
 ) : BarcodeDecoder {
 
     override val name: String = NAME
@@ -241,9 +248,12 @@ class MsiPlesseyDecoder(
                 // All policies require ≥2 agreeing observations: a lone checksum
                 // collision (1/10 per lottery, certain at scale across hundreds of
                 // windows) must never be emitted. Fallback scales additionally
-                // withhold short payloads (see minPayload).
+                // withhold short payloads (see minPayload); [minPayloadDigits]
+                // raises the floor for hosts scanning longer SKUs.
                 val outcome: DecodeOutcome =
-                    if (winner != null && winner.key.length >= minPayload) {
+                    if (winner != null &&
+                        winner.key.length >= maxOf(minPayload, minPayloadDigits)
+                    ) {
                         val rev = revVotes[winner.key] ?: 0
                         val upsideDown = frame.attemptRotation == 180 || rev * 2 > winner.value
                         success(winner.key, details.getValue(winner.key), frame, upsideDown)

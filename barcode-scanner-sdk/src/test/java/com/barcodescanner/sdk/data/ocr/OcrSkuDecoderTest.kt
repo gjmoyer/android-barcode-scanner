@@ -52,15 +52,22 @@ class OcrSkuDecoderTest {
     private fun decoder(
         fake: FakeOcrEngine,
         policy: ScannerConfig.MsiChecksumPolicy = ScannerConfig.MsiChecksumPolicy.MOD_10,
+        requireChecksum: Boolean = false,
     ) = OcrSkuDecoder(
         enabledSymbologies = setOf(Symbology.MSI_PLESSEY),
         checksumPolicy = policy,
+        requireChecksum = requireChecksum,
         ocrEngineProvider = { fake },
     )
 
     private fun successRaw(outcome: DecodeOutcome): String {
         assertTrue("expected Success, got $outcome", outcome is DecodeOutcome.Success)
         return (outcome as DecodeOutcome.Success).barcodes.maxBy { it.confidence }.rawValue
+    }
+
+    private fun successConfidence(outcome: DecodeOutcome): Float {
+        assertTrue("expected Success, got $outcome", outcome is DecodeOutcome.Success)
+        return (outcome as DecodeOutcome.Success).barcodes.maxBy { it.confidence }.confidence
     }
 
     @Test
@@ -76,10 +83,25 @@ class OcrSkuDecoderTest {
                 OcrLine("0168971", Rect(10, 120, 220, 150)),
             ),
         )
+        val d = decoder(fake, requireChecksum = true)
+        val out = runBlocking { d.decode(ScanFrame(bitmap = labelWithBars())) }
+        // Printed run emitted as-is (never stripped); strict mode earns 0.7.
+        assertEquals("0168971", successRaw(out))
+        assertEquals(0.7f, successConfidence(out), 0f)
+        d.close()
+    }
+
+    @Test
+    fun trustMode_emitsPrintedSkuWithoutCheckDigit() {
+        // Yakult prints "0828147" with no check digit (none of the standard
+        // schemes apply); default trust mode must still emit the SKU as printed.
+        val fake = FakeOcrEngine(
+            listOf(OcrLine("0828147 006 99235-00100 10 13.5 OZ", Rect(10, 120, 300, 150))),
+        )
         val d = decoder(fake)
         val out = runBlocking { d.decode(ScanFrame(bitmap = labelWithBars())) }
-        // Check digit stripped, like the bar path (checksumStripped=true).
-        assertEquals("016897", successRaw(out))
+        assertEquals("0828147", successRaw(out))
+        assertEquals(0.5f, successConfidence(out), 0f)
         d.close()
     }
 
@@ -94,8 +116,8 @@ class OcrSkuDecoderTest {
         )
         val d = decoder(fake)
         val out = runBlocking { d.decode(ScanFrame(bitmap = labelWithBars())) }
-        // Check digit stripped ("0168971" validates Mod10 with check 1).
-        assertEquals("016897", successRaw(out))
+        // Printed run as-is ("0168971" validates Mod10 with check 1).
+        assertEquals("0168971", successRaw(out))
         d.close()
     }
 
@@ -104,7 +126,7 @@ class OcrSkuDecoderTest {
         // "1512" genuinely validates Mod11 (1/11 luck on a case-code segment),
         // but at 4 payload digits a single OCR pass cannot back it — withheld.
         val fake = FakeOcrEngine(listOf(OcrLine("X-15121", Rect(10, 120, 200, 150))))
-        val d = decoder(fake, ScannerConfig.MsiChecksumPolicy.MOD_11)
+        val d = decoder(fake, ScannerConfig.MsiChecksumPolicy.MOD_11, requireChecksum = true)
         val out = runBlocking { d.decode(ScanFrame(bitmap = labelWithBars())) }
         assertTrue("expected NotFound, got $out", out is DecodeOutcome.NotFound)
         d.close()
@@ -113,7 +135,7 @@ class OcrSkuDecoderTest {
     @Test
     fun rejectsWrongChecksumPolicy() {        // "80527" carries a Mod11 check (7); Mod10 must not accept the SKU.
         val fake = FakeOcrEngine(listOf(OcrLine("80527", Rect(10, 120, 200, 150))))
-        val d = decoder(fake, ScannerConfig.MsiChecksumPolicy.MOD_10)
+        val d = decoder(fake, ScannerConfig.MsiChecksumPolicy.MOD_10, requireChecksum = true)
         val out = runBlocking { d.decode(ScanFrame(bitmap = labelWithBars())) }
         assertTrue("expected NotFound, got $out", out is DecodeOutcome.NotFound)
         d.close()
