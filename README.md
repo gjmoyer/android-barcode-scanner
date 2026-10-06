@@ -173,4 +173,8 @@ non-standard checksums stay silent rather than guess.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Our code: MIT — see [LICENSE](LICENSE).
+
+The built SDK links third-party libraries (notably zxing-cpp, Apache-2.0);
+see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) and pass those notices
+on if you distribute the built artifacts.
