@@ -1,0 +1,20 @@
+# Gradle / Android build outputs
+build/
+.gradle/
+out/
+
+# CMake / NDK generated
+.cxx/
+
+# Local SDK / signing config (machine-specific, Android Studio provisions these)
+local.properties
+*.jks
+*.keystore
+
+# IDE
+.idea/
+*.iml
+.kotlin/
+
+# OS
+.DS_Store
