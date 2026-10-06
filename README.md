@@ -95,6 +95,7 @@ barcode-scanner-sdk/          # the reusable library (only depend on this)
     data/mlkit/               # primary engine
     data/zxingcpp/            # DataBar engine (JNI)
     data/msi/                 # custom MSI Plessey engine
+    data/ocr/                 # MSI SKU text fallback (ML Kit text recognition)
     data/fusion/              # multi-engine, multi-orientation voter
     camera/                   # CameraX frame producer (single-flight, conflated)
     di/                       # manual DI (internal)
@@ -152,6 +153,16 @@ Encoding table + guards verified against Wikipedia "MSI Barcode" + Morovia KB106
 (weights 2..9) and white-on-black MSI are documented limitations. Robust mode adds
 vertical scanlines for 90° labels; upside-down labels decode via the reverse
 run-direction path.
+
+**SKU text fallback** (`MsiOcr`, bundled ML Kit text recognition, offline): when MSI
+is enabled and every bar engine misses, the decoder reads the printed SKU next to
+the barcode — digit runs anchored to content bands, preferring dash-free runs
+(shelf case codes print dashed: `000-42000-15121`) and requiring checksum validation
+(non-`NONE`). Shelf labels where the bars are unreadable but the text survives
+(e.g. scratched/occluded barcodes) still scan. Hits report `engineName="MsiOcr"`
+at confidence 0.7 with the OCR line's bounding box, so hosts can tell bar reads
+from text reads and gate accordingly. Labels whose printed numbers use
+non-standard checksums stay silent rather than guess.
 
 ## Testing
 

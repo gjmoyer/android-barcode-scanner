@@ -188,3 +188,19 @@ Also removed checksum-guided digit repair for the same reason (deterministic
 pipeline + 1-digit checksums + correlated observations = certain collisions).
 Voter is now exact-evidence-only: windows → guards/table/soft → checksum →
 length×votes. Test suite: 40/40 green.
+
+## Pass 9 — MSI SKU text fallback OCR (2026-10-06, user request)
+User shelves carry the SKU in print next to the barcode (Scandit-style fallback).
+Added `data/ocr/`: `OcrEngine` seam + `MlKitOcrEngine` (bundled Latin text-recognition
+16.0.1, offline, lazy client) + `OcrSkuDecoder` (MSI-only, registered LAST after all
+bar engines). Flow: content-band gate (blank walls never invoke the model) → one
+full-frame OCR → digit runs split on non-digits → checksum validation (non-NONE) →
+prefer dash-free runs (case codes print dashed), longer, nearer a band; emits
+`MSI_PLESSEY` at 0.7 as `MsiOcr` with the OCR box. Single-checksum hits need ≥6
+payload digits (one OCR pass has no cross-observation agreement behind it).
+Checksum census (machine-verified, replacing hand arithmetic that twice misled):
+quakotml=Mod1010, starbucks=single-Mod10, ondeg=IBM-Mod11, dixie=NO standard scheme.
+Retest on user photos (transcribed OCR text; ML Kit inference itself needs a device):
+fused bars still exact on quakotml/starbucks; OCR accepts ondeg under MOD_11 and
+rejects everything under wrong policies; dixie/silkalm/yakult honestly silent.
+Unit tests: 10 (fake engine; ML Kit adapter is device-verified surface).

@@ -18,6 +18,8 @@ Clean-architecture, enterprise-style layering. Dependency rule: **outer layers d
 │ data/zxingcpp     ZXingCppDecoder + ZXingCppBridge     │  DataBar engine (native)
 │ data/msi          MsiPlesseyDecoder + table/checksum/  │  Custom MSI engine
 │                   binarizer                            │
+│ data/ocr          OcrSkuDecoder + OcrEngine (ML Kit    │  MSI SKU text fallback
+│                   text recognition, last resort)        │  (0.7, engine MsiOcr)
 │ data/fusion       FusedDecoder                         │  Orchestrates all engines
 ├────────────────────────────────────────────────────────┤
 │ camera/           CameraScanManager (CameraX)          │  Frame producer only
@@ -33,8 +35,9 @@ CameraX / Bitmap
   → PreprocessingPipeline stage 0: DownscaleTransform (≤1280 long edge)
   → BlurScoringTransform → ContrastNormalizationTransform
   → OrientationCandidates.expand (0/180° default, 0/90/180/270° robust)
-  → per orientation in REGISTRY order (MLKit → ZXingCpp → MSI): skip-if-disabled
-  → confident hit (≥0.9) stops scan; else pool/dedup and best-confidence wins
+  → per orientation in REGISTRY order (MLKit → ZXingCpp → MSI → MsiOcr):
+  skip-if-disabled; MSI text fallback runs only after all bar engines miss
+  → confident hit (≥0.95) stops scan; else pool/dedup and best-confidence wins
   → live path: per-key duplicate suppression → ScanResult.Success
   → one-shot path: pure return, never touches the results Flow
 ```
@@ -67,9 +70,11 @@ No pipeline change.
   and space-tolerant HRI matching (`ToString` returns "DataBar Expanded", "QR Code").
 - **Pure-Kotlin MSI first, native optional later**: tables + scanline logic stay in Kotlin for
   testability; the `MsiPlesseyDecoder` boundary is the seam for a future NEON/C++ fast path.
-  MSI is EXPERIMENTAL until Zint-rendered vectors verify the code table.
+  The code table/guards/checksums are verified end-to-end (Zint-rendered fixtures →
+  `MsiPristineTest`, all policies).
 - **Fusion owns orientation**, engines own inversion/binarization: avoids N×M retry explosion.
-  MSI is forward-only (asymmetric guards) — 180° handled by orientation expansion, not pixel reversal.
+  MSI reads upside-down via a true reverse run-direction path (STOP-first, space-first
+  digits un-mirrored through the shared table), not pixel reversal.
 - **Domain references Android graphics types** (Bitmap/Rect) as an accepted v1 tradeoff: an Android
   library module pays less for Robolectric than for a FrameImage abstraction layer; revisit if a
   pure-JVM artifact is ever needed.

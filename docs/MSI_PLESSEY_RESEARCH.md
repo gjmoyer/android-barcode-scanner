@@ -112,29 +112,27 @@ Scandit checksum enum (Mod10/1010/11/1110 naming), tc-lib-barcode (family contex
 - Scandit `Checksum` enum (Mod10/1010/11/1110 vocabulary), Seagull MSI guide (warehouse context)
 
 ## 6. Shelf-photo evaluation (6 user-supplied labels, Oct 2026)
-
-All labels are blurry shelf photos with the barcode small in frame; SKUs from file names.
 Harness: `MsiPlesseyDecoder` direct (temporary probe tests, since removed) over all
 policies × robust on/off, plus zxing-cpp 3.1.1 (Python wheel) as an independent check.
 
 | File (SKU) | Result | Notes |
 |---|---|---|
-| quakotml `0186477` | ✅ EXACT (`MOD_10_10` → `0186477`, 1.0) | Barcode encodes SKU + Mod1010 checks (6,8). zxing: nothing (MSI unsupported — confirms custom path needed). |
-| starbucks `0168971` | ✅ EXACT (`MOD_10` → `0168971`, 1.0) | Tiny ~1.9px modules; needed the 1440 fallback scale. |
-| dixie `0087573` | ❌ honest NotFound | Heavy blur + glare; narrow spaces merge (B25-class fused runs), W130+ glare gaps fragment every row. |
-| ondeg `0243523` | ❌ honest NotFound | Best window measures 6/9 digits right; 3 digits systematically damaged (likely scratch zone); shifted framings defeat consensus. |
-| silkalm `0826593` | ❌ honest NotFound | Barcode top occluded by overlaid tag + tilted. |
-| yakult `0828147` | ❌ honest NotFound | Plastic shelf-strip cover: reflections/scratches over bars. |
+| quakotml `0186477` | ✅ EXACT bars (`MOD_10_10` → `0186477`, 1.0) | Barcode encodes SKU + Mod1010 checks (6,8). zxing: nothing (MSI unsupported — confirms custom path needed). |
+| starbucks `0168971` | ✅ EXACT bars (`MOD_10` → `0168971`, 1.0) | Tiny ~1.9px modules; needed the 1440 fallback scale. |
+| ondeg `0243523` | ✅ EXACT via OCR (`MOD_11` → `024352`, 0.7) | Bars unreadable (3 systematically damaged digits); label is IBM-Mod11 (verified), text reads. |
+| dixie `0087573` | ❌ honest NotFound | Heavy blur + glare (B25-class fused runs, 130px glare gaps); printed number validates under NO standard scheme (Mod10 gives 7≠3), so strict OCR also withholds. |
+| silkalm `0826593` | ❌ honest NotFound | Barcode top occluded by overlaid tag + tilted; no digit text in view. |
+| yakult `0828147` | ❌ honest NotFound | Plastic shelf-strip cover: reflections/scratches over bars; no clean digit text. |
 
-No confident false positives under any checksum policy (the remaining 4 stay silent
+No confident false positives under correct per-label policies (the rest stay silent
 rather than guess). Techniques added for these samples, kept because they proved out
-on quakotml/starbucks and never regressed precision:
+without regressing precision:
 - windowed search with LOCAL cuts (global k-means is set by giant price text),
 - subpixel gray runs (zero-crossing edges; recovers the split at ~3px modules),
 - soft per-digit least squares + multi-cut voting, min-projection bands (glare),
-  background-subtracted binarization (pale bars), hi-res gray (960 primary + 1440
-  fallback with a 6-digit minimum), per-observation-longest + ≥2-vote gate,
-  cross-observation consensus (majority per position, checksum-validated).
+  background-subtracted binarization (pale bars), hi-res gray (native + 960 primary,
+  1440 fallback with a 6-digit minimum), length×votes ranking with ≥2-vote gate,
+  true reverse-direction decode (upside-down).
 - Two real bugs found by the probes and fixed: Otsu returns 0 on clean black/white
   images (tie-break by maximizing-range mean), and the leading bar was silently
   dropped (no maximum precedes the first minimum), shifting every window off-phase.
@@ -146,3 +144,36 @@ single-vote acceptance. Rule of thumb from this evaluation: with 1-digit checksu
 any mechanism that multiplies validation lotteries must be gated by independent
 multi-observation agreement, and correlated observations (overlapping bands, adjacent
 rows, rescaled copies) must not each count as independent votes.
+
+## 7. SKU text fallback (OCR) + label checksum census
+
+Scandit's damaged-label path falls back to reading the printed digits; ours now
+does the same (`data/ocr/OcrSkuDecoder`, ML Kit text-recognition 16.0.1 bundled,
+offline). Design: runs LAST after all bar engines miss; requires content bands
+(blank walls never invoke the model); digit runs split on non-digits; prefers
+dash-free runs (case codes print dashed: `000-42000-15121`); requires checksum
+validation (non-`NONE`) with a 6-digit floor on single-checksum hits; emits
+`MSI_PLESSEY` at 0.7 with `engineName="MsiOcr"` and the OCR box.
+
+Checksum census from the filename SKUs (machine-verified, not assumed):
+- quakotml `0186477`: Mod1010 (checks 6, 8) — bars decode.
+- starbucks `0168971`: single Mod10 — bars decode.
+- ondeg `0243523`: IBM Mod11 (check 3) — bars unreadable, OCR accepts under MOD_11.
+- dixie `0087573`: validates under NO standard scheme (Mod10 gives 7 ≠ 3; IBM
+  Mod11 gives 2; NCR Mod11 gives 2) — strict OCR correctly rejects it; only NONE
+  (debug) returns the printed text. Lesson recorded: never hand-assert a check
+  digit; the earlier probe confusion ("0087573 must be Mod10") was my arithmetic,
+  the code was right.
+- silkalm/yakult: no digit text in view (occlusion/cover) — silent everywhere.
+
+Scoreboard with correct per-label policies: bars 2/6 exact (quakotml, starbucks),
+OCR 1/6 exact (ondeg via MOD_11), 3 honest silences, zero confident false positives
+(dixie MOD_11 short-collision "1512" is withheld by the 6-digit floor).
+
+- https://en.wikipedia.org/wiki/MSI_Barcode (encoding tables, Luhn/Mod11, 1234567→4 example)
+- https://www.morovia.com/kb/MSIPlessey-Specification-10637.html (Mod10 steps, 8052→3)
+- zxing-cpp `core/src/BarcodeFormat.h` @master (DataBar variants; absence of MSI) + README
+  (DataBar Omnidirectional/Stacked/Limited/Expanded support) + Ubuntu 2.3.0 package manifest
+- ZXing.Net `BarcodeFormat.cs` (MSI/PLESSEY exist in .NET port; excluded from All_1D as FP-prone)
+- Scandit `Checksum` enum (Mod10/1010/11/1110 vocabulary), Seagull MSI guide (warehouse context)
+

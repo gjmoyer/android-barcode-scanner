@@ -83,6 +83,9 @@ dependencies {
     implementation(libs.camera.camera2)
     implementation(libs.camera.lifecycle)
     implementation(libs.mlkit.barcode.scanning)
+    // Bundled Latin OCR model (offline, no Play dependency) for the MSI SKU
+    // text fallback (see data/ocr). Runs last, only on MSI bar-miss.
+    implementation(libs.mlkit.text.recognition)
     implementation(libs.coroutines.core)
     implementation(libs.coroutines.android)
     // Task<T>.await() for ML Kit's GMS Task API.

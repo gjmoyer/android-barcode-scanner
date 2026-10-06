@@ -138,7 +138,7 @@ class FusedDecoder(
         if (decoder.supportedSymbologies.intersect(config.enabledSymbologies).isEmpty()) {
             return false
         }
-        if (decoder.name == com.barcodescanner.sdk.data.msi.MsiPlesseyDecoder.NAME) {
+        if (decoder.name in MSI_FAMILY_ENGINES) {
             if (Symbology.MSI_PLESSEY !in config.enabledSymbologies) return false
             // MSI scanline decoding is the most expensive step; sideways rotations
             // are only attempted in robust mode (which also enables vertical scanlines).
@@ -149,6 +149,11 @@ class FusedDecoder(
 
     companion object {
         const val NAME = "Fused"
+        /** Engines bound to the MSI symbology (bar decode + OCR text fallback). */
+        val MSI_FAMILY_ENGINES: Set<String> = setOf(
+            com.barcodescanner.sdk.data.msi.MsiPlesseyDecoder.NAME,
+            com.barcodescanner.sdk.data.ocr.OcrSkuDecoder.NAME,
+        )
         /**
          * 0.95: ML Kit (0.95) and MSI-verified (1.0) stop immediately; ZXing (0.9)
          * pools instead of short-circuiting a possibly higher-confidence MSI hit

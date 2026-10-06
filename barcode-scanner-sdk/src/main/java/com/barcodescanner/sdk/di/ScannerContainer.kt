@@ -4,6 +4,7 @@ import android.content.Context
 import com.barcodescanner.sdk.data.fusion.FusedDecoder
 import com.barcodescanner.sdk.data.mlkit.MLKitDecoder
 import com.barcodescanner.sdk.data.msi.MsiPlesseyDecoder
+import com.barcodescanner.sdk.data.ocr.OcrSkuDecoder
 import com.barcodescanner.sdk.data.zxingcpp.ZXingCppDecoder
 import com.barcodescanner.sdk.domain.decoder.DecoderRegistry
 import com.barcodescanner.sdk.domain.model.ScannerConfig
@@ -20,9 +21,9 @@ import kotlinx.coroutines.Dispatchers
  *
  * Internal: host apps share the facade, never this container (prevents
  * bypassing the fusion pipeline). Assembly order mirrors decode priority:
- * ML Kit -> zxing-cpp -> MSI. To add an engine: construct it, call
- * `registry.register(it)` — fusion respects registration order, no other
- * change needed.
+ * ML Kit -> zxing-cpp -> MSI bar decode -> MSI OCR text fallback. To add an
+ * engine: construct it, call `registry.register(it)` — fusion respects
+ * registration order, no other change needed.
  */
 internal class ScannerContainer(
     appContext: Context,
@@ -55,9 +56,22 @@ internal class ScannerContainer(
         )
     }
 
+    /**
+     * SKU text fallback, deliberately LAST: runs only after every bar engine
+     * missed, and only when MSI is enabled at all.
+     */
+    val ocrDecoder: OcrSkuDecoder by lazy {
+        OcrSkuDecoder(
+            enabledSymbologies = config.enabledSymbologies,
+            checksumPolicy = config.msiChecksumPolicy,
+            robustMode = config.robustMode,
+            dispatcher = dispatcher,
+        )
+    }
+
     val registry: DecoderRegistry by lazy {
         DecoderRegistry(
-            listOf(mlKitDecoder, zxingDecoder, msiDecoder),
+            listOf(mlKitDecoder, zxingDecoder, msiDecoder, ocrDecoder),
         )
     }
 
