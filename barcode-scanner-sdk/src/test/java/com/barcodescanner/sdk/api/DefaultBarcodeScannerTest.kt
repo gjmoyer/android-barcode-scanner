@@ -28,6 +28,24 @@ class DefaultBarcodeScannerTest {
         ),
     )
 
+    private fun msiBar(value: String, engine: String = "MsiPlessey") = ScanResult.Success(
+        DecodedBarcode(
+            rawValue = value,
+            symbology = Symbology.MSI_PLESSEY,
+            confidence = 1.0f,
+            engineName = engine,
+        ),
+    )
+
+    private fun msiOcr(value: String) = ScanResult.Success(
+        DecodedBarcode(
+            rawValue = value,
+            symbology = Symbology.MSI_PLESSEY,
+            confidence = 0.5f,
+            engineName = "MsiOcr",
+        ),
+    )
+
     private fun scanner(suppressionMillis: Long): DefaultBarcodeScanner {
         val config = ScannerConfig.Builder()
             .duplicateSuppressionMillis(suppressionMillis)
@@ -69,6 +87,45 @@ class DefaultBarcodeScannerTest {
             yield()
             assertEquals(2, received.size)
             job.cancel()
+        } finally {
+            scanner.close()
+        }
+    }
+
+    @Test
+    fun stability_withholdsFirstMsiBarSighting() {
+        // Systematic misparses agree within a frame: only a repeat emits.
+        val scanner = scanner(suppressionMillis = 0)
+        try {
+            assertEquals(false, scanner.confirmLiveBarHit(msiBar("86774681")))
+            assertEquals(true, scanner.confirmLiveBarHit(msiBar("86774681")))
+        } finally {
+            scanner.close()
+        }
+    }
+
+    @Test
+    fun stability_resetsOnDifferentValue() {
+        val scanner = scanner(suppressionMillis = 0)
+        try {
+            assertEquals(false, scanner.confirmLiveBarHit(msiBar("A")))
+            assertEquals(false, scanner.confirmLiveBarHit(msiBar("B")))
+            assertEquals(true, scanner.confirmLiveBarHit(msiBar("B")))
+        } finally {
+            scanner.close()
+        }
+    }
+
+    @Test
+    fun stability_passesThroughOcrAndOtherSymbologies() {
+        val scanner = scanner(suppressionMillis = 0)
+        try {
+            // OCR text (0.5) and non-MSI symbologies emit on first sighting.
+            assertEquals(true, scanner.confirmLiveBarHit(msiOcr("0168971")))
+            assertEquals(true, scanner.confirmLiveBarHit(success("QR")))
+            // Both ROI and full-frame MSI lanes are bar reads: gated alike.
+            assertEquals(false, scanner.confirmLiveBarHit(msiBar("X", engine = "MsiRoi")))
+            assertEquals(true, scanner.confirmLiveBarHit(msiBar("X", engine = "MsiRoi")))
         } finally {
             scanner.close()
         }

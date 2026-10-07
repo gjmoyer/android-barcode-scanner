@@ -9,6 +9,7 @@ import com.barcodescanner.sdk.camera.CameraScanManager
 import com.barcodescanner.sdk.di.ScannerContainer
 import com.barcodescanner.sdk.domain.decoder.DecodeOutcome
 import com.barcodescanner.sdk.domain.model.ScanFrame
+import com.barcodescanner.sdk.domain.model.Symbology
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -68,6 +69,17 @@ internal class DefaultBarcodeScanner(
     /** Live-path dedup: key -> last emitted elapsed-realtime. */
     private val dedup = ConcurrentHashMap<String, Long>()
     private val emitMutex = Mutex()
+    /**
+     * Stability gate for MSI bar reads (see [confirmLiveBarHit]): pending key
+     * plus consecutive count. Plain vars (not mutex-guarded): readers/writers
+     * are the single-flight live loop plus stop/close resets — a torn update
+     * costs at most one extra withheld frame or one early emit, never a wrong
+     * value (emission still goes through dedup + checksum gating upstream).
+     */
+    @Volatile
+    private var pendingKey: String? = null
+    @Volatile
+    private var pendingCount = 0
     /** Debug dump fires once per scanner instance (see [ScannerConfig.debugOcrFrameDump]). */
     private val ocrDumpDone = AtomicBoolean(false)
 
@@ -124,8 +136,12 @@ internal class DefaultBarcodeScanner(
                     val result = scanFrame(frame.copy(allowFallbackSweep = stale))
                     if (result is ScanResult.Success) {
                         lastSuccessAt.set(now)
-                        emitLiveDeduped(result)
-                        maybeDumpOcrFrame(frame, result)
+                        // Stability gate swallows the first sighting of an MSI
+                        // bar value; the next frame decides (see method).
+                        if (confirmLiveBarHit(result)) {
+                            emitLiveDeduped(result)
+                            maybeDumpOcrFrame(frame, result)
+                        }
                     }
                 },
             )
@@ -141,6 +157,10 @@ internal class DefaultBarcodeScanner(
     private fun stopCameraLocked() {
         cameraManager?.stop()
         cameraManager = null
+        // Fresh aim on next engagement: a stale pending key matching the new
+        // aim's first sighting would emit without confirmation.
+        pendingKey = null
+        pendingCount = 0
     }
 
     override fun close() {
@@ -148,6 +168,38 @@ internal class DefaultBarcodeScanner(
         synchronized(cameraLock) { stopCameraLocked() }
         scope.cancel()
         runCatching { container.close() }
+    }
+
+    /**
+     * Stability gate for live MSI bar reads; internal for tests.
+     *
+     * A single frame's checksum-validated MSI parse can be a systematic
+     * misparse (same window geometry repeating across scanlines agrees with
+     * itself — observed: a confident value matching no printed label), so the
+     * first sighting of a bar value is withheld and only a repeat on a later
+     * frame emits. Non-matching successes reset the count; frames with no
+     * result leave it (aiming jitter must not reset an honest read).
+     *
+     * Scope is deliberately narrow: MSI bar hits only, identified by symbology
+     * + high confidence (bars emit 1.0, OCR text ≤0.7 passes straight through,
+     * as do all other symbologies). One-shot scans bypass this entirely —
+     * there is no second frame — so [scanFrame]/[scanBitmap] return the first
+     * read as before.
+     *
+     * @return true when the result may emit.
+     */
+    internal fun confirmLiveBarHit(result: ScanResult.Success): Boolean {
+        val b = result.barcode
+        if (b.symbology != Symbology.MSI_PLESSEY || b.confidence <= 0.9f) return true
+        val key = "${b.symbology}:${b.rawValue}"
+        return if (key == pendingKey) {
+            pendingCount += 1
+            pendingCount >= BAR_STABILITY_FRAMES
+        } else {
+            pendingKey = key
+            pendingCount = 1
+            false
+        }
     }
 
     /** Live-path emission with per-key dedup; internal for tests. */
@@ -215,6 +267,14 @@ internal class DefaultBarcodeScanner(
          * scans always sweep (see ScanFrame.allowFallbackSweep).
          */
         const val STALE_SWEEP_AFTER_MILLIS = 2_000L
+        /**
+         * Consecutive live sightings of one MSI bar value required to emit.
+         * 2 separates systematic misparses (which repeat within a frame but
+         * rarely survive re-aiming) from truth, at the cost of one withheld
+         * frame (~200ms) on every fresh aim. Not a config knob: it is a
+         * correctness policy, and one-shot scans bypass it.
+         */
+        const val BAR_STABILITY_FRAMES = 2
         const val OCR_DUMP_ENGINE = "MsiOcr"
         const val OCR_DUMP_DIR = "ocr-debug"
         const val OCR_DUMP_MAX_FILES = 3
