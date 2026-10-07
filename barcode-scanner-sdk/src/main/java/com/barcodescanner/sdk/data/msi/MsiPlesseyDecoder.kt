@@ -181,32 +181,10 @@ class MsiPlesseyDecoder(
         var statRunLists = 0
         var statStruct = 0
         var statValidated = 0
-        val votes = mutableMapOf<String, Int>()
-        val revVotes = mutableMapOf<String, Int>()
-        val details = mutableMapOf<String, CandidateDetail>()
-        fun logStats(stage: String) {
-            val best = votes.maxByOrNull { it.value }
-            val top = votes.entries.sortedByDescending { it.value }.take(5)
-                .map { it.key to it.value }
-            val snap = PassStats(
-                label = label,
-                stage = stage,
-                runLists = statRunLists,
-                struct = statStruct,
-                validated = statValidated,
-                keys = votes.size,
-                bestKey = best?.key,
-                bestVotes = best?.value ?: 0,
-                topKeys = top,
-            )
-            synchronized(statsLock) { recentStats = recentStats + snap }
-            android.util.Log.d(
-                NAME,
-                "pass=$label stage=$stage runLists=$statRunLists struct=$statStruct " +
-                    "validated=$statValidated keys=${votes.size} " +
-                    "best=${best?.key}@${best?.value}",
-            )
-        }
+        // NOTE: the vote maps live below (declared after gray collection so the
+        // "collect once" comment sits with them); logStats is defined alongside
+        // them for the same reason — a shadowed copy once made it report empty
+        // maps forever while voting itself worked. Single declaration, single truth.
         try {
                 // Gray-derived run lists are identical across binarization variants,
                 // so collect them ONCE per copy (counting the same observation N
@@ -246,6 +224,30 @@ class MsiPlesseyDecoder(
                 val votes = mutableMapOf<String, Int>()
                 val revVotes = mutableMapOf<String, Int>()
                 val details = mutableMapOf<String, CandidateDetail>()
+
+                fun logStats(stage: String) {
+                    val best = votes.maxByOrNull { it.value }
+                    val top = votes.entries.sortedByDescending { it.value }.take(5)
+                        .map { it.key to it.value }
+                    val snap = PassStats(
+                        label = label,
+                        stage = stage,
+                        runLists = statRunLists,
+                        struct = statStruct,
+                        validated = statValidated,
+                        keys = votes.size,
+                        bestKey = best?.key,
+                        bestVotes = best?.value ?: 0,
+                        topKeys = top,
+                    )
+                    synchronized(statsLock) { recentStats = recentStats + snap }
+                    android.util.Log.d(
+                        NAME,
+                        "pass=$label stage=$stage runLists=$statRunLists struct=$statStruct " +
+                            "validated=$statValidated keys=${votes.size} " +
+                            "best=${best?.key}@${best?.value}",
+                    )
+                }
 
                 // Winner ranking is score = payload length × votes: a longer
                 // checksum-validated parse explains more barcode modules, while
