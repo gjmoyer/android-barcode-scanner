@@ -55,6 +55,8 @@ class MainActivity : ComponentActivity() {
     private var scanner: BarcodeScannerFacade? = null
     private var collectJob: Job? = null
     private var robust = true
+    /** POC: ML Kit ROI assist for tilted MSI labels (off by default). */
+    private var roiAssist = false
 
     /** True after tapping SCAN, until the next successful decode. */
     private var awaitingScan = false
@@ -67,6 +69,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var robustHelp: TextView
     private lateinit var scanButton: Button
     private lateinit var toggleRobust: Button
+    private lateinit var toggleRoi: Button
     private lateinit var preview: PreviewView
 
     private var toneGenerator: ToneGenerator? = null
@@ -97,12 +100,18 @@ class MainActivity : ComponentActivity() {
         }
         scanButton = Button(this).apply { text = "Scan" }
         toggleRobust = Button(this).apply { text = "Robust mode: ON" }
+        toggleRoi = Button(this).apply { text = "ROI assist: OFF" }
 
         val buttonRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             addView(scanButton, LinearLayout.LayoutParams(0, -2, 1f))
             addView(toggleRobust, LinearLayout.LayoutParams(0, -2, 1f))
+        }
+        val roiRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(toggleRoi, LinearLayout.LayoutParams(-1, -2))
         }
 
         resultValue = TextView(this).apply {
@@ -133,6 +142,7 @@ class MainActivity : ComponentActivity() {
             setPadding(pad, pad, pad, pad)
             addView(previewStack, LinearLayout.LayoutParams(-1, 0, 1f))
             addView(buttonRow)
+            addView(roiRow)
             addView(resultCard)
             addView(status)
             addView(robustHelp)
@@ -140,7 +150,7 @@ class MainActivity : ComponentActivity() {
         setContentView(layout)
 
         // Example: all symbologies incl. DataBar + MSI, robust orientations for warehouse labels.
-        recreateScanner(robust = true)
+        recreateScanner()
 
         // Or limit to what you need for speed:
         // val config = ScannerConfigBuilder()
@@ -166,10 +176,17 @@ class MainActivity : ComponentActivity() {
         toggleRobust.setOnClickListener {
             // Re-creating with a different config is the supported way to switch modes.
             robust = !robust
-            recreateScanner(robust)
+            recreateScanner()
             toggleRobust.text = if (robust) "Robust mode: ON" else "Robust mode: OFF"
             robustHelp.text = robustExplanation(robust)
             // Re-engage the camera only if a one-shot capture was in progress.
+            if (awaitingScan) startScanner() else status.text = READY_TEXT
+        }
+
+        toggleRoi.setOnClickListener {
+            roiAssist = !roiAssist
+            recreateScanner()
+            toggleRoi.text = if (roiAssist) "ROI assist: ON" else "ROI assist: OFF"
             if (awaitingScan) startScanner() else status.text = READY_TEXT
         }
 
@@ -183,7 +200,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun recreateScanner(robust: Boolean) {
+    private fun recreateScanner() {
         collectJob?.cancel()
         scanner?.close()
         val config = ScannerConfigBuilder()
@@ -205,6 +222,9 @@ class MainActivity : ComponentActivity() {
             // Debug: persist the first live MsiOcr frame as PNG for offline
             // bar-miss forensics (adb pull .../files/ocr-debug).
             .debugOcrFrameDump(true)
+            // POC: ML Kit ROI assist for tilted MSI (localize -> deskewed crop
+            // -> MSI decode; watch `adb logcat -s MsiRoi` for hit-rate).
+            .msiRegionAssist(roiAssist)
             .build()
         scanner = BarcodeScannerFactory.create(this, config)
         bindResults()
@@ -269,6 +289,7 @@ class MainActivity : ComponentActivity() {
         "MLKit" -> " (Google ML Kit)"
         "ZXingCpp" -> " (ZXing C++ fallback — e.g. DataBar)"
         "MsiPlessey" -> " (custom MSI scanline decoder)"
+        "MsiRoi" -> " (ML Kit ROI + MSI)"
         "MsiOcr" -> " (OCR text fallback)"
         else -> ""
     }

@@ -3,11 +3,15 @@ package com.barcodescanner.sdk.di
 import android.content.Context
 import com.barcodescanner.sdk.data.fusion.FusedDecoder
 import com.barcodescanner.sdk.data.mlkit.MLKitDecoder
+import com.barcodescanner.sdk.data.mlkit.MlKitRegionLocalizer
 import com.barcodescanner.sdk.data.msi.MsiPlesseyDecoder
+import com.barcodescanner.sdk.data.msi.MsiRegionAssistDecoder
 import com.barcodescanner.sdk.data.ocr.OcrSkuDecoder
 import com.barcodescanner.sdk.data.zxingcpp.ZXingCppDecoder
 import com.barcodescanner.sdk.domain.decoder.DecoderRegistry
+import com.barcodescanner.sdk.domain.decoder.BarcodeDecoder
 import com.barcodescanner.sdk.domain.model.ScannerConfig
+import com.barcodescanner.sdk.domain.model.Symbology
 import com.barcodescanner.sdk.domain.pipeline.ContrastNormalizationTransform
 import com.barcodescanner.sdk.domain.pipeline.DownscaleTransform
 import com.barcodescanner.sdk.domain.pipeline.PreprocessingPipeline
@@ -20,7 +24,8 @@ import kotlinx.coroutines.Dispatchers
  *
  * Internal: host apps share the facade, never this container (prevents
  * bypassing the fusion pipeline). Assembly order mirrors decode priority
- * (cheap-first): ML Kit (broad, fast) -> MSI bar decode (narrow scanline,
+ * (cheap-first): ML Kit (broad, fast) -> MSI-ROI assist (flag-gated POC:
+ * tilted labels via deskewed crops) -> MSI bar decode (narrow scanline,
  * must precede the slow native sweep so MSI tags resolve without paying for
  * zxing TryHarder first) -> zxing-cpp (broad, thorough) -> MSI OCR text
  * fallback. To add an engine: construct it, call `registry.register(it)` —
@@ -75,9 +80,18 @@ internal class ScannerContainer(
     }
 
     val registry: DecoderRegistry by lazy {
-        DecoderRegistry(
-            listOf(mlKitDecoder, msiDecoder, zxingDecoder, ocrDecoder),
-        )
+        // ROI assist (POC, flag-gated) runs BEFORE full-frame MSI: a tilted
+        // label that only decodes from a deskewed crop resolves here without
+        // paying for the full-frame scanline sweep first. A miss is a cheap
+        // NotFound and fusion falls through to the standard engines.
+        val engines = mutableListOf<BarcodeDecoder>(mlKitDecoder)
+        if (config.msiRegionAssist && Symbology.MSI_PLESSEY in config.enabledSymbologies) {
+            engines += MsiRegionAssistDecoder(MlKitRegionLocalizer(), msiDecoder)
+        }
+        engines += msiDecoder
+        engines += zxingDecoder
+        engines += ocrDecoder
+        DecoderRegistry(engines)
     }
 
     val fusedDecoder: FusedDecoder by lazy {

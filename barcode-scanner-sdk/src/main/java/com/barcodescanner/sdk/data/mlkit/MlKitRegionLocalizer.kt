@@ -32,8 +32,10 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Best-effort contract (do NOT rely on this alone):
  * - the model is trained on supported families, not MSI: dense/short/low-contrast
  *   MSI can miss, and `enableAllPotentialBarcodes` can also return noise boxes;
- * - coordinates are in [InputImage] space (matches [ScanFrame.bitmap] here since
- *   we build the image from the frame bitmap + effective rotation);
+ * - coordinates are in [InputImage] space, which here is [ScanFrame.bitmap]
+ *   space (the image is built from the frame bitmap): always valid for
+ *   cropping, on every orientation candidate. They are NOT valid for host
+ *   overlays without mapping — consumers must not draw them directly;
  * - callers must fall back to full-frame MSI decode when no region validates,
  *   and should require a stable read across frames before accepting an ROI hit.
  *
@@ -106,11 +108,11 @@ class MlKitRegionLocalizer(
                 } finally {
                     runCatching { cts.cancel() }
                 }
-                val rotated = frame.attemptRotation != 0
-                barcodes.mapNotNull { b ->
+                // NOTE: no attemptRotation filtering (unlike MLKitDecoder): boxes
+                // are consumed by cropping frame.bitmap, which shares InputImage
+                // space on every candidate. Only overlay use would need mapping.
+                return@withContext barcodes.mapNotNull { b ->
                     val box = b.boundingBox ?: return@mapNotNull null
-                    // Rotated candidates: box coords are in pre-rotated space.
-                    if (rotated) return@mapNotNull null
                     BarcodeRegion(
                         boundingBox = Rect(box),
                         cornerPoints = b.cornerPoints?.toList(),

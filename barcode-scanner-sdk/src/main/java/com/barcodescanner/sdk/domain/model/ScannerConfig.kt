@@ -64,6 +64,15 @@ data class ScannerConfig(
      * the box it can never decode — keep the box generous.
      */
     val scanRegion: ScanRegion? = null,
+    /**
+     * ML Kit ROI assist for MSI (POC, default false): run ML Kit's
+     * `enableAllPotentialBarcodes()` localizer first and decode MSI on the
+     * deskewed crops before falling back to full-frame MSI. Off-cardinal tilts
+     * (15°/30°/60°/…) only decode through this path; cardinals are unaffected.
+     * Best-effort: MSI is not an ML Kit format, so boxes may miss (fallback
+     * still runs) or be noise (checksum + voting reject them).
+     */
+    val msiRegionAssist: Boolean = false,
 ) {
     init {
         require(enabledSymbologies.isNotEmpty()) { "At least one symbology must be enabled" }
@@ -130,6 +139,7 @@ data class ScannerConfig(
         private var zxingHarder: Boolean? = null
         private var ocrDump = false
         private var region: ScanRegion? = null
+        private var roiAssist = false
 
         fun enabledSymbologies(v: Set<Symbology>) = apply { enabled = v.toSet() }
 
@@ -170,6 +180,8 @@ data class ScannerConfig(
         }
         /** Full-frame decoding (clears any [scanRegion]). */
         fun fullFrame() = apply { region = null }
+        /** POC: ML Kit ROI assist for MSI (see [ScannerConfig.msiRegionAssist]). */
+        fun msiRegionAssist(v: Boolean) = apply { roiAssist = v }
         fun build(): ScannerConfig {
             val orientations = maxOrientationsOverride ?: if (robust) 4 else 2
             return ScannerConfig(
@@ -185,6 +197,7 @@ data class ScannerConfig(
                 zxingTryHarder = zxingHarder,
                 debugOcrFrameDump = ocrDump,
                 scanRegion = region,
+                msiRegionAssist = roiAssist,
             )
         }
     }

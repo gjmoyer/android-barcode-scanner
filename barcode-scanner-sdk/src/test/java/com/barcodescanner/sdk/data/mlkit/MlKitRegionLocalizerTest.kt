@@ -24,8 +24,8 @@ import org.robolectric.annotation.Config
  *
  * The load-bearing behavior is that UNDECODED candidates (rawValue null — the
  * expected MSI case, since MSI is not a supported format) are kept as long as
- * they carry a bounding box, while box-less noise and rotated-candidate frames
- * (whose coordinates would be in pre-rotated space) are dropped.
+ * they carry a bounding box, while box-less noise is dropped. Boxes stay valid
+ * for cropping on every orientation candidate (crop space is bitmap space).
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -100,11 +100,13 @@ class MlKitRegionLocalizerTest {
     }
 
     @Test
-    fun dropsRotatedCandidate_coordinatesArePreRotated() = runBlocking {
+    fun keepsRotatedCandidate_cropSpaceIsBitmapSpace() = runBlocking {
         val localizer = localizerWith(candidate())
         try {
-            // attemptRotation != 0: boxes would mislead overlays/crops.
-            assertTrue(localizer.localize(frame(attemptRotation = 90)).isEmpty())
+            // attemptRotation != 0: boxes still crop frame.bitmap correctly
+            // (InputImage is built from it); only overlays would need mapping.
+            val regions = localizer.localize(frame(attemptRotation = 90))
+            assertEquals(1, regions.size)
         } finally {
             localizer.close()
         }
