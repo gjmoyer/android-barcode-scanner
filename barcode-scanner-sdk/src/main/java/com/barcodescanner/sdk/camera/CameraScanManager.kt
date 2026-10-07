@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Rect
+import android.graphics.RectF
 import android.os.SystemClock
 import android.util.Size
 import androidx.camera.core.CameraSelector
@@ -186,7 +187,14 @@ internal class CameraScanManager(
         val top = raw.top.coerceIn(0, height)
         val right = raw.right.coerceIn(left + 1, width)
         val bottom = raw.bottom.coerceIn(top + 1, height)
-        val crop = Rect(left, top, right, bottom)
+        val sensor = Rect(left, top, right, bottom)
+        // Viewfinder ROI (null = full sensor crop): fewer pixels for every
+        // engine downstream, less competing print, and the box guides aim.
+        val rotation = when (imageInfo.rotationDegrees) {
+            90, 180, 270 -> imageInfo.rotationDegrees
+            else -> 0
+        }
+        val crop = roiToBuffer(sensor, width, height, rotation, config.scanRegion)
         val cw = crop.width()
         val ch = crop.height()
         if (cw <= 0 || ch <= 0) return null
@@ -304,5 +312,48 @@ internal class CameraScanManager(
     companion object {
         /** Rejects bogus ImageProxy dimensions before the `w*h*3/2` alloc. */
         const val MAX_FRAME_PIXELS = 16_000_000L
+
+        /**
+         * Maps a centered upright-normalized viewfinder region to buffer pixels
+         * within [sensorCrop]. Portrait buffers (rotation 90/270) store the
+         * image transposed, so the fractions swap axes; centering is preserved
+         * either way, which is why the API only offers centered boxes. Null
+         * region (or a region covering the sensor crop) returns the sensor crop
+         * as-is — never an empty rect.
+         */
+        internal fun roiToBuffer(
+            sensorCrop: Rect,
+            imageWidth: Int,
+            imageHeight: Int,
+            rotationDegrees: Int,
+            region: ScannerConfig.ScanRegion?,
+        ): Rect {
+            if (region == null) return Rect(sensorCrop)
+            val centered = RectF(
+                (1 - region.widthFraction) / 2,
+                (1 - region.heightFraction) / 2,
+                (1 + region.widthFraction) / 2,
+                (1 + region.heightFraction) / 2,
+            )
+            val (fw, fh) = if (rotationDegrees == 90 || rotationDegrees == 270) {
+                centered.height() to centered.width()
+            } else {
+                centered.width() to centered.height()
+            }
+            if (fw >= 1f && fh >= 1f) return Rect(sensorCrop)
+            val cw = (sensorCrop.width() * fw).toInt().coerceIn(1, sensorCrop.width())
+            val ch = (sensorCrop.height() * fh).toInt().coerceIn(1, sensorCrop.height())
+            if (cw >= sensorCrop.width() && ch >= sensorCrop.height()) return Rect(sensorCrop)
+            val left = (sensorCrop.left + (sensorCrop.width() - cw) / 2)
+                .coerceIn(0, imageWidth - 1)
+            val top = (sensorCrop.top + (sensorCrop.height() - ch) / 2)
+                .coerceIn(0, imageHeight - 1)
+            return Rect(
+                left,
+                top,
+                (left + cw).coerceIn(left + 1, imageWidth),
+                (top + ch).coerceIn(top + 1, imageHeight),
+            )
+        }
     }
 }

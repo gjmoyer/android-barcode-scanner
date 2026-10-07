@@ -19,10 +19,12 @@ import kotlinx.coroutines.Dispatchers
  * not forced onto a DI framework. One container per [ScannerConfig].
  *
  * Internal: host apps share the facade, never this container (prevents
- * bypassing the fusion pipeline). Assembly order mirrors decode priority:
- * ML Kit -> zxing-cpp -> MSI bar decode -> MSI OCR text fallback. To add an
- * engine: construct it, call `registry.register(it)` — fusion respects
- * registration order, no other change needed.
+ * bypassing the fusion pipeline). Assembly order mirrors decode priority
+ * (cheap-first): ML Kit (broad, fast) -> MSI bar decode (narrow scanline,
+ * must precede the slow native sweep so MSI tags resolve without paying for
+ * zxing TryHarder first) -> zxing-cpp (broad, thorough) -> MSI OCR text
+ * fallback. To add an engine: construct it, call `registry.register(it)` —
+ * fusion respects registration order, no other change needed.
  */
 internal class ScannerContainer(
     appContext: Context,
@@ -74,7 +76,7 @@ internal class ScannerContainer(
 
     val registry: DecoderRegistry by lazy {
         DecoderRegistry(
-            listOf(mlKitDecoder, zxingDecoder, msiDecoder, ocrDecoder),
+            listOf(mlKitDecoder, msiDecoder, zxingDecoder, ocrDecoder),
         )
     }
 

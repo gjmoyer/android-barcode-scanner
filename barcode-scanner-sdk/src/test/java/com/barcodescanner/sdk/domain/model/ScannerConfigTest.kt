@@ -57,4 +57,34 @@ class ScannerConfigTest {
     fun timeout_outOfRange_rejected() {
         ScannerConfig.Builder().decodeTimeoutMillis(50).build()
     }
+
+    @Test
+    fun scanRegion_defaultNull() {
+        assertEquals(null, ScannerConfig.default().scanRegion)
+    }
+
+    @Test
+    fun scanRegion_buildsCenteredRect() {
+        val config = ScannerConfig.Builder().scanRegion(0.9f, 0.5f).build()
+        assertEquals(ScannerConfig.ScanRegion(0.9f, 0.5f), config.scanRegion)
+    }
+
+    @Test
+    fun scanRegion_fullFrame_clears() {
+        val config = ScannerConfig.Builder()
+            .scanRegion(0.9f, 0.5f)
+            .fullFrame()
+            .build()
+        assertEquals(null, config.scanRegion)
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun scanRegion_tooSmall_rejected() {
+        ScannerConfig.Builder().scanRegion(0.1f, 0.5f).build()
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun scanRegion_overFull_rejected() {
+        ScannerConfig.Builder().scanRegion(1.1f, 0.5f).build()
+    }
 }

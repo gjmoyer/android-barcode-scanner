@@ -22,7 +22,7 @@ import kotlinx.coroutines.withTimeout
  * Fusion decoder: preprocessing -> multi-orientation -> engine chain -> voting.
  *
  * Engine order respects [DecoderRegistry] registration order (default assembly in
- * ScannerContainer: ML Kit -> zxing-cpp -> MSI). To add an engine, register it —
+ * ScannerContainer: ML Kit -> MSI -> zxing-cpp). To add an engine, register it —
  * fusion needs no code change (Open/Closed Principle). [LastResortDecoder]s
  * (e.g. the MSI OCR text fallback) are deferred out of the orientation loop and
  * run once per frame, only when every primary engine missed.
@@ -76,6 +76,7 @@ class FusedDecoder(
         var processed: ScanFrame = frame
         var recycleBitmaps = true
         val consumed = mutableListOf<ScanFrame>()
+        val startNanos = System.nanoTime()
         try {
             val pool = mutableListOf<DecodedBarcode>()
             try {
@@ -129,15 +130,30 @@ class FusedDecoder(
                         if (System.nanoTime() >= barDeadlineNanos) break@orientationLoop
                         for (decoder in eager) {
                             ensureActive()
-                            if (System.nanoTime() >= barDeadlineNanos) break@orientationLoop
+                            if (System.nanoTime() >= barDeadlineNanos) {
+                                android.util.Log.d(TAG, "frame bar-budget exhausted, stopping")
+                                break@orientationLoop
+                            }
                             // Internal-rotation engines would get equivalent input
                             // on a physically rotated candidate: skip (dedup).
                             if (candidate.relativeRotation != 0 &&
                                 decoder.resolvesOrientationInternally
                             ) {
+                                android.util.Log.d(
+                                    TAG,
+                                    "skip=${decoder.name} rot=${candidate.relativeRotation} " +
+                                        "internal-rotation",
+                                )
                                 continue
                             }
-                            if (!wantsFrame(decoder, candidate)) continue
+                            if (!wantsFrame(decoder, candidate)) {
+                                android.util.Log.d(
+                                    TAG,
+                                    "skip=${decoder.name} rot=${candidate.relativeRotation} " +
+                                        "filtered",
+                                )
+                                continue
+                            }
                             runDecoder(decoder, candidate, pool)
                             val confident = (pool.maxByOrNull { it.confidence }?.confidence ?: 0f) >=
                                 CONFIDENT_THRESHOLD
@@ -176,8 +192,22 @@ class FusedDecoder(
                 return DecodeOutcome.Error(DecoderException("Fusion failed", e), recoverable = false)
             }
 
-            if (pool.isEmpty()) return DecodeOutcome.NotFound("fusion: no engine decoded the frame")
+            if (pool.isEmpty()) {
+                android.util.Log.d(
+                    TAG,
+                    "frame totalMs=${(System.nanoTime() - startNanos) / 1_000_000} " +
+                        "result=NotFound cands=${consumed.size}",
+                )
+                return DecodeOutcome.NotFound("fusion: no engine decoded the frame")
+            }
             val ranked = pool.sortedByDescending { it.confidence }
+            val best = ranked.first()
+            android.util.Log.d(
+                TAG,
+                "frame totalMs=${(System.nanoTime() - startNanos) / 1_000_000} " +
+                    "result=${best.engineName}:${best.rawValue}@${best.confidence} " +
+                    "cands=${consumed.size} pool=${ranked.size}",
+            )
             return DecodeOutcome.Success(ranked)
         } finally {
             // Recycle physically rotated copies; never the caller's base bitmap.
@@ -200,17 +230,37 @@ class FusedDecoder(
         candidate: ScanFrame,
         pool: MutableList<DecodedBarcode>,
     ) {
+        val t = System.nanoTime()
         when (val outcome = decoder.decode(candidate)) {
             is DecodeOutcome.Success -> {
                 val accepted = outcome.barcodes
                     .filter { it.symbology in config.enabledSymbologies }
                     .filter { it.confidence >= config.minConfidence }
                 if (accepted.isNotEmpty()) mergeIntoPool(pool, accepted)
+                val best = accepted.maxByOrNull { it.confidence }
+                android.util.Log.d(
+                    TAG,
+                    "engine=${decoder.name} rot=${candidate.relativeRotation} " +
+                        "ms=${(System.nanoTime() - t) / 1_000_000} " +
+                        "hit=${best?.rawValue}~${best?.symbology}@${best?.confidence}",
+                )
             }
             is DecodeOutcome.Error -> {
+                android.util.Log.d(
+                    TAG,
+                    "engine=${decoder.name} rot=${candidate.relativeRotation} " +
+                        "ms=${(System.nanoTime() - t) / 1_000_000} " +
+                        "error(recoverable=${outcome.recoverable})",
+                )
                 if (!outcome.recoverable) throw outcome.cause
             }
-            is DecodeOutcome.NotFound -> Unit
+            is DecodeOutcome.NotFound -> {
+                android.util.Log.d(
+                    TAG,
+                    "engine=${decoder.name} rot=${candidate.relativeRotation} " +
+                        "ms=${(System.nanoTime() - t) / 1_000_000} miss",
+                )
+            }
         }
     }
 
@@ -240,6 +290,8 @@ class FusedDecoder(
 
     companion object {
         const val NAME = "Fused"
+        /** Logcat tag for per-engine timing; always emitted, filter with `-s FusedDecoder`. */
+        const val TAG = "FusedDecoder"
         /**
          * 0.95: ML Kit (0.95) and MSI-verified (1.0) stop immediately; ZXing (0.9)
          * pools instead of short-circuiting a possibly higher-confidence MSI hit

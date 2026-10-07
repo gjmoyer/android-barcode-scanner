@@ -63,8 +63,29 @@ class MsiPlesseyDecoder(
     override val name: String = NAME
     override val supportedSymbologies: Set<Symbology> = setOf(Symbology.MSI_PLESSEY)
 
+    /** Per-pass vote forensics from the last [decode] call (cleared on entry). */
+    internal data class PassStats(
+        val label: String,
+        val stage: String,
+        val runLists: Int,
+        val struct: Int,
+        val validated: Int,
+        val keys: Int,
+        val bestKey: String?,
+        val bestVotes: Int,
+        /** Top vote-getters (key to votes), most-voted first. */
+        val topKeys: List<Pair<String, Int>>,
+    )
+
+    private val statsLock = Any()
+    private var recentStats: List<PassStats> = emptyList()
+
+    /** Snapshot of the last decode's per-pass stats (forensics/testing only). */
+    internal fun snapshotStats(): List<PassStats> = synchronized(statsLock) { recentStats }
+
     override suspend fun decode(frame: ScanFrame): DecodeOutcome = withContext(dispatcher) {
         try {
+            synchronized(statsLock) { recentStats = emptyList() }
             val working = downscaleIfNeeded(frame.bitmap)
             val ownedWorking = working !== frame.bitmap
             try {
@@ -91,6 +112,7 @@ class MsiPlesseyDecoder(
                         val fallback = decodeWithGray(
                             frame, working, variants, listOf(scaled1440),
                             minPayload = MIN_FALLBACK_DIGITS,
+                            label = "fallback1440",
                         )
                         if (fallback is DecodeOutcome.Success) return@withContext fallback
                         return@withContext primary
@@ -151,7 +173,40 @@ class MsiPlesseyDecoder(
         variants: List<MsiBinarizer.BinaryImage>,
         grays: List<GrayCopy>,
         minPayload: Int = 0,
+        label: String = "primary",
     ): DecodeOutcome {
+        // Forensics counters: distinguish "no run lists" (blank/quiet veto)
+        // from "no structural candidates" (guard prefilters) from "no checksum
+        // agreement" (close). Reported via Log.d + snapshotStats() per pass.
+        var statRunLists = 0
+        var statStruct = 0
+        var statValidated = 0
+        val votes = mutableMapOf<String, Int>()
+        val revVotes = mutableMapOf<String, Int>()
+        val details = mutableMapOf<String, CandidateDetail>()
+        fun logStats(stage: String) {
+            val best = votes.maxByOrNull { it.value }
+            val top = votes.entries.sortedByDescending { it.value }.take(5)
+                .map { it.key to it.value }
+            val snap = PassStats(
+                label = label,
+                stage = stage,
+                runLists = statRunLists,
+                struct = statStruct,
+                validated = statValidated,
+                keys = votes.size,
+                bestKey = best?.key,
+                bestVotes = best?.value ?: 0,
+                topKeys = top,
+            )
+            synchronized(statsLock) { recentStats = recentStats + snap }
+            android.util.Log.d(
+                NAME,
+                "pass=$label stage=$stage runLists=$statRunLists struct=$statStruct " +
+                    "validated=$statValidated keys=${votes.size} " +
+                    "best=${best?.key}@${best?.value}",
+            )
+        }
         try {
                 // Gray-derived run lists are identical across binarization variants,
                 // so collect them ONCE per copy (counting the same observation N
@@ -227,6 +282,7 @@ class MsiPlesseyDecoder(
                     }
                     for (runs in runLists) {
                         ensureActive()
+                        statRunLists++
                         // Every checksum-validated candidate votes (no longest-only
                         // filter): a longer junk-extended window must not steal its
                         // observation's vote from the true sub-window it contains —
@@ -240,6 +296,7 @@ class MsiPlesseyDecoder(
                             if (candidate.length !in MsiCodeTable.MIN_DIGITS..MsiCodeTable.MAX_DIGITS + 2) return
                             val validation = MsiChecksumValidator.validate(candidate, checksumPolicy)
                             if (!validation.valid) return
+                            statValidated++
                             val key = validation.payloadWithoutChecksum
                             votes[key] = (votes[key] ?: 0) + 1
                             if (rev) revVotes[key] = (revVotes[key] ?: 0) + 1
@@ -251,8 +308,11 @@ class MsiPlesseyDecoder(
                                 )
                             }
                         }
-                        for (candidate in scanlineCandidates(runs)) consider(candidate, false)
-                        for (candidate in scanlineCandidatesReversed(runs)) consider(candidate, true)
+                        val fwd = scanlineCandidates(runs)
+                        val rev = scanlineCandidatesReversed(runs)
+                        statStruct += fwd.size + rev.size
+                        for (candidate in fwd) consider(candidate, false)
+                        for (candidate in rev) consider(candidate, true)
                     }
                     // Cooperative early exit: a strong consensus after any variant
                     // short-circuits the remaining binarizations (pristine labels
@@ -268,11 +328,13 @@ class MsiPlesseyDecoder(
                     ) {
                         val rev = revVotes[early.key] ?: 0
                         val upsideDown = frame.isUpsideDownCandidate || rev * 2 > early.value
+                        logStats("early")
                         return success(early.key, details.getValue(early.key), frame, upsideDown)
                     }
                 }
 
                 val winner = pickWinner()
+                logStats("final")
                 // All policies require ≥2 agreeing observations: a lone checksum
                 // collision (1/10 per lottery, certain at scale across hundreds of
                 // windows) must never be emitted. Fallback scales additionally

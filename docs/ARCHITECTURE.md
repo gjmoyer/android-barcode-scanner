@@ -35,11 +35,13 @@ CameraX / Bitmap
   → PreprocessingPipeline stage 0: DownscaleTransform (≤1280 long edge)
   → ContrastNormalizationTransform
   → OrientationCandidates.expand (upright-first, sensor-compensated: 2 default, 4 robust)
-  → per orientation in REGISTRY order (MLKit → ZXingCpp → MSI):
+  → per orientation in REGISTRY order (MLKit → MSI → ZXingCpp):
   engines with internal rotation (ML Kit hint, zxing TryRotate) get the primary
   view only; MSI receives every candidate. LastResort engines (MsiOcr) run once,
   only after all bar engines miss
   → confident hit (≥0.95) stops scan; else pool/dedup and best-confidence wins
+  → per-engine timings + final result go to logcat under `FusedDecoder`
+  (always emitted at DEBUG; filter with `adb logcat -s FusedDecoder`)
   → live path: per-key duplicate suppression → ScanResult.Success
   → one-shot path: pure return, never touches the results Flow
 ```

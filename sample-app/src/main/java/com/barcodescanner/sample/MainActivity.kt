@@ -84,6 +84,17 @@ class MainActivity : ComponentActivity() {
         preview = PreviewView(this).apply {
             scaleType = PreviewView.ScaleType.FILL_CENTER
         }
+        // Viewfinder box: same upright fractions as ScannerConfig.scanRegion
+        // below (approximate alignment — the box is generous on purpose).
+        val viewfinder = ViewfinderView(
+            this,
+            widthFraction = VIEWFINDER_W,
+            heightFraction = VIEWFINDER_H,
+        )
+        val previewStack = android.widget.FrameLayout(this).apply {
+            addView(preview, android.widget.FrameLayout.LayoutParams(-1, -1))
+            addView(viewfinder, android.widget.FrameLayout.LayoutParams(-1, -1))
+        }
         scanButton = Button(this).apply { text = "Scan" }
         toggleRobust = Button(this).apply { text = "Robust mode: ON" }
 
@@ -120,7 +131,7 @@ class MainActivity : ComponentActivity() {
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(pad, pad, pad, pad)
-            addView(preview, LinearLayout.LayoutParams(-1, 0, 1f))
+            addView(previewStack, LinearLayout.LayoutParams(-1, 0, 1f))
             addView(buttonRow)
             addView(resultCard)
             addView(status)
@@ -188,6 +199,12 @@ class MainActivity : ComponentActivity() {
             // OCR is the last engine; give the fallback room to run after the
             // bar engines on a bad label (default 1.5s cut it off).
             .decodeTimeoutMillis(4_000)
+            // Viewfinder ROI: decode only the aimed box (faster frames, less
+            // competing print). Fractions match the ViewfinderView overlay.
+            .scanRegion(VIEWFINDER_W, VIEWFINDER_H)
+            // Debug: persist the first live MsiOcr frame as PNG for offline
+            // bar-miss forensics (adb pull .../files/ocr-debug).
+            .debugOcrFrameDump(true)
             .build()
         scanner = BarcodeScannerFactory.create(this, config)
         bindResults()
@@ -344,6 +361,9 @@ class MainActivity : ComponentActivity() {
     }
 
     private companion object {
-        const val READY_TEXT = "Ready — tap Scan, then point at a barcode (QR, DataBar, MSI…)"
+        const val READY_TEXT = "Ready — tap Scan, aim inside the box, then point at a barcode (QR, DataBar, MSI…)"
+        /** Viewfinder fractions (upright): must match scanRegion() in recreateScanner. */
+        const val VIEWFINDER_W = 0.9f
+        const val VIEWFINDER_H = 0.5f
     }
 }

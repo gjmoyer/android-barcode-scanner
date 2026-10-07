@@ -18,8 +18,10 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.filterIsInstance
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -57,6 +59,8 @@ internal class DefaultBarcodeScanner(
     /** Live-path dedup: key -> last emitted elapsed-realtime. */
     private val dedup = ConcurrentHashMap<String, Long>()
     private val emitMutex = Mutex()
+    /** Debug dump fires once per scanner instance (see [ScannerConfig.debugOcrFrameDump]). */
+    private val ocrDumpDone = AtomicBoolean(false)
 
     override suspend fun scanBitmap(bitmap: Bitmap, rotationDegrees: Int): ScanResult =
         scanFrame(
@@ -109,6 +113,7 @@ internal class DefaultBarcodeScanner(
                     val result = scanFrame(frame)
                     if (result is ScanResult.Success) {
                         emitLiveDeduped(result)
+                        maybeDumpOcrFrame(frame, result)
                     }
                 },
             )
@@ -151,9 +156,48 @@ internal class DefaultBarcodeScanner(
         _results.emit(result)
     }
 
+    /**
+     * Debug dump of the first live `MsiOcr` frame (see
+     * [ScannerConfig.debugOcrFrameDump]). Runs synchronously through bitmap
+     * copy (the camera manager recycles [frame.bitmap] after `onFrame`
+     * returns, so the copy must happen here); PNG encode happens on IO.
+     * Capped to [OCR_DUMP_MAX_FILES] files in the app-private `ocr-debug/`
+     * dir — pull with
+     * `adb pull /sdcard/Android/data/<pkg>/files/ocr-debug`.
+     */
+    private fun maybeDumpOcrFrame(frame: ScanFrame, result: ScanResult.Success) {
+        if (!config.debugOcrFrameDump) return
+        if (result.barcode.engineName != OCR_DUMP_ENGINE) return
+        if (!ocrDumpDone.compareAndSet(false, true)) return
+        val snapshot = runCatching {
+            frame.bitmap.copy(frame.bitmap.config ?: Bitmap.Config.ARGB_8888, false)
+        }.getOrNull() ?: return
+        scope.launch(Dispatchers.IO) {
+            try {
+                val dir = File(container.app.getExternalFilesDir(null), OCR_DUMP_DIR)
+                dir.mkdirs()
+                dir.listFiles()
+                    ?.sortedByDescending { it.name }
+                    ?.drop(OCR_DUMP_MAX_FILES - 1)
+                    ?.forEach { runCatching { it.delete() } }
+                val sku = result.barcode.rawValue.filter { it.isLetterOrDigit() }
+                val out = File(dir, "ocr_${System.currentTimeMillis()}_${sku}.png")
+                out.outputStream().use { snapshot.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                android.util.Log.d("OcrDump", "wrote ${out.absolutePath}")
+            } catch (t: Throwable) {
+                android.util.Log.w("OcrDump", "dump failed", t)
+            } finally {
+                runCatching { snapshot.recycle() }
+            }
+        }
+    }
+
     private companion object {
         /** Prune the live dedup map once it holds more than this many keys. */
         const val DEDUP_PRUNE_THRESHOLD = 64
+        const val OCR_DUMP_ENGINE = "MsiOcr"
+        const val OCR_DUMP_DIR = "ocr-debug"
+        const val OCR_DUMP_MAX_FILES = 3
     }
 }
 

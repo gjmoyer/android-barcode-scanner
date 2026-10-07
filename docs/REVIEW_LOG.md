@@ -377,3 +377,56 @@ untested. Added:
   the committed DataBar fixtures (real ML Kit + native zxing TryRotate), rotating
   pixels and reporting the compensating sensor rotation for each combination.
 All JVM suites green (92 tests).
+
+## Pass 17 — MSI-before-ZXing order + fusion timing diagnostics (2026-10-07)
+
+User: the Starbucks MSI shelf tag returns OCR 99% of the time live, although the
+same tag decodes from bars as a still (`DeviceMsiTest` proven-exact). Since OCR
+only runs when the bar pool is empty, this is an MSI miss on live frames, not
+budget starvation (a started engine call always runs to completion; the bar
+deadline only stops *starting* new work). Changes:
+- Registry order ML Kit -> MSI -> zxing-cpp (was ML Kit -> zxing-cpp -> MSI):
+  cheap-first — MSI tags resolve without paying for the zxing TryHarder sweep
+  first (~0.5-1 s saved per live frame). QR/EAN (ML Kit early-exit) unaffected;
+  DataBar frames pay one MSI miss before the native hit.
+- `FusedDecoder.TAG = "FusedDecoder"` with unconditional `Log.d` per-engine
+  timings (engine/relative-rotation/ms/hit-or-miss, plus skip reasons and a
+  final frame line). No `setprop` needed: `adb logcat -s FusedDecoder` either
+  shows lines (current build running) or is empty (stale APK) — a binary
+  build discriminator. Absent `MsiPlessey` engine lines with present MLKit/ZXing
+  lines would mean MSI filtered via `wantsFrame` (logged as `skip=...`); absent
+  tag output entirely means the old build is installed.
+- Follow-up (live logcat: MSI runs all 4 orientations, misses in 82-334 ms while
+  OCR hits `0168971`): absolute-px quiet minimums (edge 6, window-boundary 4)
+  veto small in-frame barcodes before any window forms. The 1440 fallback pass
+  now runs relaxed (edge 3, boundary 2; 6-digit floor retained), and each MSI
+  pass logs `MsiPlessey pass=… runLists=… struct=… validated=… keys=… best=…`
+  to separate "no windows" from "no checksum agreement" on device.
+- Follow-up (pulled failing frame via first-`MsiOcr`-hit PNG dump, new
+  `ScannerConfig.debugOcrFrameDump`): the frame shows truth/junk TIED
+  (`016897`/`0168971`/`01689710` all @4 — length×votes emits the 8-digit junk
+  extension). A center-crop retry was tried: it isolates truth on a hand-fitted
+  bbox but floods the pool with correlated short-junk votes in production
+  geometry (live forensic `best=0128@45`), so it was reverted, as were
+  unique-top early-exit and extension-tie silence — the pristine fixture itself
+  ties truth `1234567` with suffix-luck `4567` at equal votes, so ties are
+  NORMAL (sub-windows of truth always co-validate) and any tie rule breaks
+  clean renders. Conclusion: a tied longer-vs-shorter vote is internally
+  undecidable (length resolves pristine correctly and moiré frames wrongly
+  with identical structure); only cross-geometry persistence separates them.
+  Kept: shared-pool removal reverted to tested behavior + per-pass forensics
+  (`MsiPlessey pass=… runLists/struct/validated/keys/top`). 98/98 green.
+
+## Pass 18 — viewfinder ROI (2026-10-07)
+
+User: would a smaller scan area help? Verdict from forensics: crop alone doesn't
+change barcode px, but it drops competing print/moiré (a hand-fitted native-res
+crop let truth win where full-frame tied) and halves pixel-bound stage costs;
+crop+upscale hurts (bilinear ripples fuse narrow bars, probe-verified). The
+reliable win is user-aimed: the box gets the human to fill the frame.
+- `ScannerConfig.ScanRegion(widthFraction, heightFraction)` (immutable fraction
+  pair, centered by construction so portrait-buffer transposition is just an
+  axis swap; null = full frame) + `CameraScanManager.roiToBuffer` (unit-tested
+  mapping incl. sensor-crop offsets) applied in the direct YUV→ARGB conversion,
+  so every engine shares the ROI. Sample draws the matching `ViewfinderView`
+  box and configures 0.9×0.5. 109/109 unit green (6 ROI + 5 config tests).

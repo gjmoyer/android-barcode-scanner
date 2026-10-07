@@ -42,6 +42,28 @@ data class ScannerConfig(
      * DataBar effort from MSI effort (e.g. fast DataBar + thorough MSI).
      */
     val zxingTryHarder: Boolean? = null,
+    /**
+     * Debug only: write the first live frame that yields an `MsiOcr` hit as a
+     * lossless PNG into the app's external `ocr-debug/` dir (capped, app-private
+     * storage, no extra permission). Lets developers pull the exact failing
+     * pixels via `adb pull` and reproduce bar-decode misses offline. Never
+     * affects decode results. Default false.
+     */
+    val debugOcrFrameDump: Boolean = false,
+    /**
+     * Viewfinder region as centered upright fractions (null = full frame). The
+     * camera decodes only this region: fewer pixels (≈2× faster image stages
+     * at 45% area), less competing print, and — most importantly — the box
+     * tells the user where to aim so the tag fills it.
+     *
+     * A plain immutable fraction pair (not android RectF: mutable, and its
+     * copy constructor is unreliable under test shadows). Centered by
+     * construction so it survives sensor rotation (portrait buffers are
+     * transposed; a centered box maps to a centered box with swapped axes).
+     * Null default preserves full-frame behavior. If the barcode lies outside
+     * the box it can never decode — keep the box generous.
+     */
+    val scanRegion: ScanRegion? = null,
 ) {
     init {
         require(enabledSymbologies.isNotEmpty()) { "At least one symbology must be enabled" }
@@ -85,6 +107,15 @@ data class ScannerConfig(
         NONE,
     }
 
+    /** Centered viewfinder fractions (see [scanRegion]). Immutable by design. */
+    data class ScanRegion(val widthFraction: Float, val heightFraction: Float) {
+        init {
+            require(widthFraction in 0.2f..1.0f && heightFraction in 0.2f..1.0f) {
+                "scanRegion fractions must be 0.2..1.0, was $widthFraction×$heightFraction"
+            }
+        }
+    }
+
     class Builder {
         private var enabled: Set<Symbology> =
             Symbology.entries.filter { it != Symbology.UNKNOWN }.toSet()
@@ -97,6 +128,8 @@ data class ScannerConfig(
         private var msiOcrChecksum = false
         private var minConf = 0.5f
         private var zxingHarder: Boolean? = null
+        private var ocrDump = false
+        private var region: ScanRegion? = null
 
         fun enabledSymbologies(v: Set<Symbology>) = apply { enabled = v.toSet() }
 
@@ -125,6 +158,18 @@ data class ScannerConfig(
         fun minConfidence(v: Float) = apply { minConf = v }
         /** Decouple zxing-cpp TryHarder from [robustMode]; null follows robust. */
         fun zxingTryHarder(v: Boolean?) = apply { zxingHarder = v }
+        /** Debug only: dump the first `MsiOcr` live frame as PNG (see field). */
+        fun debugOcrFrameDump(v: Boolean) = apply { ocrDump = v }
+        /**
+         * Viewfinder region as centered upright fractions (0..1). Null (default)
+         * decodes the full frame. Each fraction must be 0.2..1.0 — smaller boxes
+         * guarantee misses on mis-aim and starve the decoder's context.
+         */
+        fun scanRegion(widthFraction: Float, heightFraction: Float) = apply {
+            region = ScanRegion(widthFraction, heightFraction)
+        }
+        /** Full-frame decoding (clears any [scanRegion]). */
+        fun fullFrame() = apply { region = null }
         fun build(): ScannerConfig {
             val orientations = maxOrientationsOverride ?: if (robust) 4 else 2
             return ScannerConfig(
@@ -138,6 +183,8 @@ data class ScannerConfig(
                 msiOcrRequireChecksum = msiOcrChecksum,
                 minConfidence = minConf,
                 zxingTryHarder = zxingHarder,
+                debugOcrFrameDump = ocrDump,
+                scanRegion = region,
             )
         }
     }
