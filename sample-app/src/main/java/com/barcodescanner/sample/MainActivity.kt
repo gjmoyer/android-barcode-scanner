@@ -57,6 +57,8 @@ class MainActivity : ComponentActivity() {
     private var robust = true
     /** POC: ML Kit ROI assist for tilted MSI labels (off by default). */
     private var roiAssist = false
+    /** Checksum policy under test (tap to cycle — labels vary by printer). */
+    private var msiPolicy = MsiChecksumPolicy.MOD_10
 
     /** True after tapping SCAN, until the next successful decode. */
     private var awaitingScan = false
@@ -70,6 +72,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var scanButton: Button
     private lateinit var toggleRobust: Button
     private lateinit var toggleRoi: Button
+    private lateinit var togglePolicy: Button
     private lateinit var preview: PreviewView
 
     private var toneGenerator: ToneGenerator? = null
@@ -101,6 +104,7 @@ class MainActivity : ComponentActivity() {
         scanButton = Button(this).apply { text = "Scan" }
         toggleRobust = Button(this).apply { text = "Robust mode: ON" }
         toggleRoi = Button(this).apply { text = "ROI assist: OFF" }
+        togglePolicy = Button(this).apply { text = "Checksum: MOD_10" }
 
         val buttonRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -111,7 +115,8 @@ class MainActivity : ComponentActivity() {
         val roiRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            addView(toggleRoi, LinearLayout.LayoutParams(-1, -2))
+            addView(toggleRoi, LinearLayout.LayoutParams(0, -2, 1f))
+            addView(togglePolicy, LinearLayout.LayoutParams(0, -2, 1f))
         }
 
         resultValue = TextView(this).apply {
@@ -190,6 +195,23 @@ class MainActivity : ComponentActivity() {
             if (awaitingScan) startScanner() else status.text = READY_TEXT
         }
 
+        togglePolicy.setOnClickListener {
+            // Cycle the MSI checksum policy: printers vary (single Mod10 vs
+            // double Mod1010), and the emitted value depends on it — compare
+            // the result card against the printed SKU on each setting.
+            msiPolicy = when (msiPolicy) {
+                MsiChecksumPolicy.MOD_10 -> MsiChecksumPolicy.MOD_11
+                MsiChecksumPolicy.MOD_11 -> MsiChecksumPolicy.MOD_10_10
+                MsiChecksumPolicy.MOD_10_10 -> MsiChecksumPolicy.MOD_10_11
+                MsiChecksumPolicy.MOD_10_11 -> MsiChecksumPolicy.MOD_10
+                // NONE is debug-only and never selected by the cycler.
+                MsiChecksumPolicy.NONE -> MsiChecksumPolicy.MOD_10
+            }
+            recreateScanner()
+            togglePolicy.text = "Checksum: $msiPolicy"
+            if (awaitingScan) startScanner() else status.text = READY_TEXT
+        }
+
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
             PackageManager.PERMISSION_GRANTED
         ) {
@@ -206,7 +228,7 @@ class MainActivity : ComponentActivity() {
         val config = ScannerConfigBuilder()
             .enabledSymbologies(Symbology.entries.filter { it != Symbology.UNKNOWN }.toSet())
             .robustMode(robust)
-            .msiChecksumPolicy(MsiChecksumPolicy.MOD_10)
+            .msiChecksumPolicy(msiPolicy)
             // Shelf SKUs are 6+ digits; a lower floor lets blurry live frames
             // emit short false positives (e.g. "0128") with 2 correlated votes.
             .msiMinPayloadDigits(6)
