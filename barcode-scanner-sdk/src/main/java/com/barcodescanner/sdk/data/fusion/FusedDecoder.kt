@@ -123,13 +123,19 @@ class FusedDecoder(
                     // Engines that resolve orientation internally (ML Kit hint,
                     // zxing TryRotate) are fed the primary candidate only, so they
                     // are excluded when deciding whether rotations are needed at
-                    // all: a registry of such engines never allocates them.
+                    // all: a registry of such engines never allocates them. So are
+                    // engines filtered out by symbology (MSI decoders when MSI is
+                    // not enabled): a disabled symbology must not cost even the
+                    // rotated-bitmap allocs.
                     //
                     // Fresh live frames (allowFallbackSweep=false) need exactly
                     // ONE candidate: every fallback engine that would consume a
                     // rotated view is skipped below, and the last-resort phase
                     // runs on the unrotated base — so no rotation is ever reached.
-                    val needsRotatedCandidates = eager.any { !it.resolvesOrientationInternally }
+                    val needsRotatedCandidates = eager.any {
+                        !it.resolvesOrientationInternally &&
+                            it.supportedSymbologies.intersect(config.enabledSymbologies).isNotEmpty()
+                    }
                     val maxCandidates = if (!processed.allowFallbackSweep) {
                         1
                     } else if (needsRotatedCandidates) {
