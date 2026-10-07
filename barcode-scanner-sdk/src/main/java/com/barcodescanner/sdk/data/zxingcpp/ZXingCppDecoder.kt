@@ -16,8 +16,11 @@ import org.json.JSONArray
  * Fallback decoder backed by zxing-cpp via JNI (pinned v3.1.1, see CMakeLists.txt).
  *
  * Coverage: critically **GS1 DataBar (Omnidirectional / Stacked / Limited /
- * Expanded / Expanded Stacked)** plus second-opinion 1D/2D coverage for rotated
- * or inverted frames ML Kit missed.
+ * Expanded / Expanded Stacked)** — the one family ML Kit cannot read — plus an
+ * UNKNOWN passthrough for forward-compat formats (Telepen/MaxiCode/MicroQR/...)
+ * when the host explicitly enables it. ML Kit owns every native symbology;
+ * this engine never second-guesses them (no duplicate inference on frames ML
+ * Kit already resolves).
  *
  * MSI Plessey is deliberately EXCLUDED (zxing-cpp has no MSI reader) and is
  * handled by [com.barcodescanner.sdk.data.msi.MsiPlesseyDecoder].
@@ -49,7 +52,10 @@ class ZXingCppDecoder(
         if (Symbology.DATA_BAR in enabledSymbologies) add(Symbology.DATA_BAR)
         if (Symbology.DATA_BAR_EXPANDED in enabledSymbologies) add(Symbology.DATA_BAR_EXPANDED)
         if (Symbology.DATA_BAR_LIMITED in enabledSymbologies) add(Symbology.DATA_BAR_LIMITED)
-        addAll(enabledSymbologies.intersect(Symbology.mlKitNatives))
+        // UNKNOWN passthrough only: the native filter below emits no names for
+        // it, so the native side falls back to a scan-all pass and anything
+        // unmapped surfaces as UNKNOWN (at reduced confidence — see parse).
+        if (Symbology.UNKNOWN in enabledSymbologies) add(Symbology.UNKNOWN)
     }
 
     override suspend fun decode(frame: ScanFrame): DecodeOutcome = withContext(dispatcher) {
@@ -85,7 +91,8 @@ class ZXingCppDecoder(
     /**
      * Native format filter using v3.1.1 identifiers. DataBar is split by family
      * so a host enabling only LIMITED does not pay for (or receive) omni scans:
-     * omni family (Omni/Stk/StkOmni), Expanded (+ExpStk), Limited.
+     * omni family (Omni/Stk/StkOmni), Expanded (+ExpStk), Limited. Natives are
+     * deliberately never listed — ML Kit owns them.
      */
     internal fun enabledFormatsArg(): String {
         val names = mutableListOf<String>()

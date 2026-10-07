@@ -85,8 +85,31 @@ class ZXingCppDecoderTest {
     }
 
     @Test
+    fun supportedSymbologies_nativesExcluded() {
+        // ML Kit owns natives: ZXing is DataBar (+UNKNOWN passthrough) only.
+        assertEquals(emptySet<Symbology>(), ZXingCppDecoder(setOf(Symbology.QR_CODE)).supportedSymbologies)
+        assertEquals(
+            setOf(Symbology.DATA_BAR),
+            ZXingCppDecoder(setOf(Symbology.DATA_BAR, Symbology.QR_CODE)).supportedSymbologies,
+        )
+        assertEquals(
+            setOf(Symbology.UNKNOWN),
+            ZXingCppDecoder(setOf(Symbology.UNKNOWN)).supportedSymbologies,
+        )
+    }
+
+    @Test
+    fun enabledFormatsArg_neverListsNatives() {
+        val d = ZXingCppDecoder(setOf(Symbology.DATA_BAR, Symbology.QR_CODE, Symbology.EAN_13))
+        val parts = d.enabledFormatsArg().split(",")
+        assertTrue(parts.contains("DataBarOmni"))
+        assertFalse(parts.contains("QRCode"))
+        assertFalse(parts.contains("EAN-13"))
+    }
+
+    @Test
     fun parse_mapsDedupsAndFiltersUnknown() {
-        val d = ZXingCppDecoder(setOf(Symbology.DATA_BAR, Symbology.QR_CODE))
+        val d = ZXingCppDecoder(setOf(Symbology.DATA_BAR, Symbology.DATA_BAR_EXPANDED))
         val json = """
             [
               {"text":"A","format":"DataBar"},
@@ -98,8 +121,9 @@ class ZXingCppDecoderTest {
         val out = d.parse(json, frame())
         assertTrue("expected Success, got $out", out is DecodeOutcome.Success)
         val barcodes = (out as DecodeOutcome.Success).barcodes
-        assertEquals(2, barcodes.size)
-        assertEquals(listOf(Symbology.DATA_BAR, Symbology.QR_CODE), barcodes.map { it.symbology })
+        // QR is ML Kit's (never ZXing's now); MaxiCode has no host opt-in here.
+        assertEquals(1, barcodes.size)
+        assertEquals(Symbology.DATA_BAR, barcodes.single().symbology)
         assertTrue(barcodes.all { it.confidence == 0.9f })
         assertTrue(barcodes.all { it.engineName == ZXingCppDecoder.NAME })
     }
@@ -113,8 +137,8 @@ class ZXingCppDecoderTest {
 
     @Test
     fun parse_upsideDownFlag_isRelativeToSensorRotation() {
-        val d = ZXingCppDecoder(setOf(Symbology.QR_CODE))
-        val json = """[{"text":"A","format":"QR Code"}]"""
+        val d = ZXingCppDecoder(setOf(Symbology.DATA_BAR))
+        val json = """[{"text":"A","format":"DataBar"}]"""
         val upright = d.parse(json, frame()) as DecodeOutcome.Success
         assertFalse(upright.barcodes.single().isUpsideDown)
         // Portrait frame (sensor 90): the upside-down candidate is 270, not 180.
