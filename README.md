@@ -48,6 +48,14 @@ see the sample app) and a camera feature declaration in the host manifest:
 <uses-feature android:name="android.hardware.camera" android:required="false" />
 ```
 
+The SDK itself never vibrates or beeps — scan feedback is host UX. If you copy
+the sample's beep+vibrate pattern, also declare (normal level, auto-granted,
+no runtime prompt — without it `vibrate()` throws `SecurityException`):
+
+```xml
+<uses-permission android:name="android.permission.VIBRATE" />
+```
+
 ```kotlin
 // Live camera mode (see sample-app/.../MainActivity.kt for the full pattern)
 val scanner = BarcodeScannerFactory.create(this, ScannerConfig.default())
