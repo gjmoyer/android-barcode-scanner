@@ -8,9 +8,13 @@ import android.graphics.Paint
 import android.graphics.Point
 import android.graphics.Rect
 import com.barcodescanner.sdk.data.mlkit.MlKitRegionLocalizer
+import com.barcodescanner.sdk.data.ocr.OcrEngine
+import com.barcodescanner.sdk.data.ocr.OcrLine
+import com.barcodescanner.sdk.data.ocr.OcrSkuDecoder
 import com.barcodescanner.sdk.domain.decoder.DecodeOutcome
 import com.barcodescanner.sdk.domain.model.ScanFrame
 import com.barcodescanner.sdk.domain.model.ScannerConfig
+import com.barcodescanner.sdk.domain.model.Symbology
 import com.google.android.gms.tasks.Tasks
 import com.google.mlkit.vision.barcode.BarcodeScanner
 import com.google.mlkit.vision.barcode.common.Barcode
@@ -116,8 +120,7 @@ class MsiRegionAssistDecoderTest {
     }
 
     @Test
-    fun noRegions_isNotFound() {
-        val bmp = renderMsi()
+    fun noRegions_isNotFound() {        val bmp = renderMsi()
         val decoder = assist()
         try {
             val out = decode(decoder, bmp)
@@ -177,6 +180,77 @@ class MsiRegionAssistDecoderTest {
             decoder.close()
             tilted.recycle()
         }
+    }
+
+    @Test
+    fun ocrFastPath_hitWhenBarsMiss() {
+        // Bar decode is forced to miss (min-payload floor above the 7-digit
+        // synthetic payload — the bitmap stays pristine so OCR band gating
+        // still passes), but the printed SKU text is readable: the assist must
+        // fall back to OCR on the expanded region.
+        val bmp = renderMsi()
+        val decoder = assistWithOcr(
+            box = Rect(0, 0, bmp.width, bmp.height),
+            ocrLines = listOf(OcrLine("SKU $payload", Rect(10, 10, 200, 40))),
+        )
+        try {
+            val out = runBlocking { decoder.decode(ScanFrame(bitmap = bmp)) }
+            assertTrue("expected Success, got $out", out is DecodeOutcome.Success)
+            val best = (out as DecodeOutcome.Success).barcodes.maxBy { it.confidence }
+            assertEquals(payload, best.rawValue)
+            assertEquals(OcrSkuDecoder.NAME, best.engineName)
+        } finally {
+            decoder.close()
+            bmp.recycle()
+        }
+    }
+
+    @Test
+    fun ocrFastPath_missFallsThroughAsNotFound() {
+        // Bars miss AND OCR finds no text: overall NotFound so fusion continues
+        // to full-frame MSI + full-frame OCR exactly as without the assist.
+        val bmp = renderMsi()
+        val decoder = assistWithOcr(
+            box = Rect(0, 0, bmp.width, bmp.height),
+            ocrLines = emptyList(),
+        )
+        try {
+            val out = runBlocking { decoder.decode(ScanFrame(bitmap = bmp)) }
+            assertTrue("expected NotFound, got $out", out is DecodeOutcome.NotFound)
+        } finally {
+            decoder.close()
+            bmp.recycle()
+        }
+    }
+
+    private fun assistWithOcr(
+        box: Rect,
+        ocrLines: List<OcrLine>,
+    ): MsiRegionAssistDecoder {
+        val client = mockk<BarcodeScanner>()
+        every { client.process(any<InputImage>()) } returns Tasks.forResult(listOf(barcode(box)))
+        val localizer = MlKitRegionLocalizer(
+            clientProvider = { client },
+            imageProvider = { _, _ -> mockk(relaxed = true) },
+        )
+        val fakeOcr = object : OcrEngine {
+            override suspend fun recognize(bitmap: Bitmap, rotationDegrees: Int) = ocrLines
+            override fun close() = Unit
+        }
+        return MsiRegionAssistDecoder(
+            localizer = localizer,
+            // Payload floor above the 7-digit synthetic payload: bar path
+            // deterministically misses while the bitmap stays pristine.
+            msi = MsiPlesseyDecoder(
+                checksumPolicy = ScannerConfig.MsiChecksumPolicy.MOD_10,
+                robustMode = false,
+                minPayloadDigits = 8,
+            ),
+            ocr = OcrSkuDecoder(
+                enabledSymbologies = setOf(Symbology.MSI_PLESSEY),
+                ocrEngineProvider = { fakeOcr },
+            ),
+        )
     }
 
     private fun rotateCanvas(src: Bitmap, degrees: Float): Bitmap {

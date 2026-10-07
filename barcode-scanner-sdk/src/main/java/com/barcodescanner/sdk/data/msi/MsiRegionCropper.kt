@@ -60,6 +60,33 @@ object MsiRegionCropper {
     }
 
     /**
+     * Expands [box] into an OCR read zone: the printed SKU/GTIN text lives
+     * AROUND the bars (usually below them, but the frame may be sensor-rotated,
+     * so the pad is uniform rather than directional). Uniform [padFraction] on
+     * all sides keeps the crop tight versus the full frame while covering the
+     * human-readable print in any orientation. Clamped to the image; null when
+     * nothing remains.
+     */
+    fun expandForOcr(box: Rect, imageWidth: Int, imageHeight: Int, padFraction: Float = 0.6f): Rect? {
+        if (box.isEmpty || imageWidth <= 0 || imageHeight <= 0) return null
+        val padX = (box.width() * padFraction).toInt()
+        val padY = (box.height() * padFraction).toInt()
+        val out = Rect(
+            (box.left - padX).coerceIn(0, imageWidth),
+            (box.top - padY).coerceIn(0, imageHeight),
+            (box.right + padX).coerceIn(0, imageWidth),
+            (box.bottom + padY).coerceIn(0, imageHeight),
+        )
+        return if (out.isEmpty) null else out
+    }
+
+    /** Shifts [box] by (dx, dy), re-basing crop-space boxes into frame space. */
+    fun shiftBox(box: Rect?, dx: Int, dy: Int): Rect? {
+        if (box == null) return null
+        return Rect(box.left + dx, box.top + dy, box.right + dx, box.bottom + dy)
+    }
+
+    /**
      * Clockwise rotation (degrees, normalized to (-90, 90]) of the quad's longest
      * edge relative to horizontal. Positive = symbol runs downhill left-to-right.
      * Null when fewer than 4 points are supplied.

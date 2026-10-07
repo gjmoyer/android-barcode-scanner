@@ -86,7 +86,7 @@ internal class ScannerContainer(
         // NotFound and fusion falls through to the standard engines.
         val engines = mutableListOf<BarcodeDecoder>(mlKitDecoder)
         if (config.msiRegionAssist && Symbology.MSI_PLESSEY in config.enabledSymbologies) {
-            engines += MsiRegionAssistDecoder(MlKitRegionLocalizer(), msiDecoder)
+            engines += MsiRegionAssistDecoder(MlKitRegionLocalizer(), msiDecoder, ocr = ocrDecoder)
         }
         engines += msiDecoder
         engines += zxingDecoder
