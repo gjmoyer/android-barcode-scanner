@@ -98,7 +98,11 @@ class MLKitDecoder(
                 DecodeOutcome.NotFound("ML Kit found no barcode")
             } else {
                 val mapped = barcodes.mapNotNull { b ->
-                    val raw = b.rawValue ?: return@mapNotNull null
+                    // Blank counts as missing: potential/undecoded barcodes carry
+                    // null OR "" (an "" with a mapped format would otherwise hit
+                    // DecodedBarcode's non-empty require and turn a filtered-out
+                    // miss into an Error outcome).
+                    val raw = b.rawValue?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
                     val symbology = MlKitSymbologyMapper.fromMlKit(b.format)
                     if (symbology !in supportedSymbologies) return@mapNotNull null
                     // Rotated candidates: box coords are in pre-rotated space -> null them

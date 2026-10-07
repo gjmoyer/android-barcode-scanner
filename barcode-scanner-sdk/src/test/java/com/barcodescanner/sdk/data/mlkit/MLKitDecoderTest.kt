@@ -103,6 +103,17 @@ class MLKitDecoderTest {
     }
 
     @Test
+    fun blankRawValue_isNotFound() = runBlocking {
+        val decoder = decoderWith(clientReturning(mlKitBarcode(rawValue = "")), setOf(Symbology.QR_CODE))
+        try {
+            val out = decoder.decode(frame())
+            assertTrue("expected NotFound, got ${describe(out)}", out is DecodeOutcome.NotFound)
+        } finally {
+            decoder.close()
+        }
+    }
+
+    @Test
     fun noResults_isNotFound() = runBlocking {
         val decoder = decoderWith(clientReturning(), setOf(Symbology.QR_CODE))
         try {

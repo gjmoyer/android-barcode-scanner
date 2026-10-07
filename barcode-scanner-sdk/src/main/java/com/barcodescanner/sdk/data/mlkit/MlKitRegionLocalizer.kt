@@ -117,7 +117,10 @@ class MlKitRegionLocalizer(
                         boundingBox = Rect(box),
                         cornerPoints = b.cornerPoints?.toList(),
                         format = b.format,
-                        decoded = b.rawValue != null,
+                        // Empty string counts as undecoded: potential barcodes
+                        // arrive with null OR "" values (observed: format=-1
+                        // with "" on every real MSI strip).
+                        decoded = !b.rawValue.isNullOrEmpty(),
                     )
                     // Forensics: which formats ML Kit reports on MSI labels (it
                     // decodes the strips as SOMETHING with a value, but in a

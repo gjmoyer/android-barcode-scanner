@@ -76,6 +76,20 @@ class MlKitRegionLocalizerTest {
     }
 
     @Test
+    fun emptyRawValue_countsAsUndecoded() = runBlocking {
+        // Observed on-device: potential barcodes arrive with "" (format -1),
+        // not null — both must count as undecoded-but-localized.
+        val localizer = localizerWith(candidate(rawValue = ""))
+        try {
+            val regions = localizer.localize(frame())
+            assertEquals(1, regions.size)
+            assertFalse(regions.single().decoded)
+        } finally {
+            localizer.close()
+        }
+    }
+
+    @Test
     fun marksDecodedCandidate_decoded() = runBlocking {
         val localizer = localizerWith(
             candidate(rawValue = "123", format = Barcode.FORMAT_CODE_128),
