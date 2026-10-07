@@ -113,12 +113,23 @@ class MlKitRegionLocalizer(
                 // space on every candidate. Only overlay use would need mapping.
                 return@withContext barcodes.mapNotNull { b ->
                     val box = b.boundingBox ?: return@mapNotNull null
-                    BarcodeRegion(
+                    val region = BarcodeRegion(
                         boundingBox = Rect(box),
                         cornerPoints = b.cornerPoints?.toList(),
                         format = b.format,
                         decoded = b.rawValue != null,
                     )
+                    // Forensics: which formats ML Kit reports on MSI labels (it
+                    // decodes the strips as SOMETHING with a value, but in a
+                    // format outside the supported map — that is why MLKitDecoder
+                    // misses the same frames). Decoded-ness never gates ROI:
+                    // a misclassified MSI strip is still our best crop.
+                    android.util.Log.d(
+                        TAG,
+                        "region box=$box decoded=${region.decoded} " +
+                            "format=${region.format} value=${b.rawValue}",
+                    )
+                    region
                 }
             } catch (e: CancellationException) {
                 throw e

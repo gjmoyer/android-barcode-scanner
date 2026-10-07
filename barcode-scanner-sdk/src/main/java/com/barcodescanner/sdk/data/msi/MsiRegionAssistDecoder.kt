@@ -27,8 +27,11 @@ import kotlinx.coroutines.withContext
  * - [resolvesOrientationInternally] is true: deskew handles arbitrary tilt, so a
  *   physically rotated candidate is duplicate work — fusion feeds only the
  *   primary candidate. Crop coordinates are bitmap space on every candidate.
- * - already-decoded regions (a supported symbology ML Kit read itself) are
- *   skipped: running MSI over a Code 128 strip only burns latency.
+ * - already-decoded regions are attempted ANYWAY: ML Kit classifies MSI strips
+ *   as a nearby 1D family (or unknown) with a value MLKitDecoder must drop, so
+ *   "decoded" usually means misclassified-MSI, not a competing symbology. The
+ *   MSI checksum + ≥2-vote gate rejects true foreign strips, making the attempt
+ *   safe; skipping them starved ROI on every real shelf label observed.
  * - regions are largest-first, capped at [MAX_REGIONS]; tiny boxes that cannot
  *   hold modules are skipped. Every skip/hit is logged under [TAG] so a device
  *   run (`adb logcat -s MsiRoi`) reports the localizer hit-rate directly.
@@ -67,13 +70,12 @@ class MsiRegionAssistDecoder(
             val candidates = regions
                 .filter { (it.boundingBox?.width() ?: 0) >= MIN_BOX_W }
                 .filter { (it.boundingBox?.height() ?: 0) >= MIN_BOX_H }
-                .filterNot { it.decoded }
                 .sortedByDescending { (it.boundingBox?.width() ?: 0) * (it.boundingBox?.height() ?: 0) }
                 .take(MAX_REGIONS)
             android.util.Log.d(
                 TAG,
                 "localize regions=${regions.size} usable=${candidates.size} " +
-                    "decodedSkipped=${regions.count { it.decoded }} locMs=${locMs}",
+                    "decoded=${regions.count { it.decoded }} locMs=${locMs}",
             )
             if (candidates.isEmpty()) {
                 return@withContext DecodeOutcome.NotFound("MSI-ROI: no usable regions")

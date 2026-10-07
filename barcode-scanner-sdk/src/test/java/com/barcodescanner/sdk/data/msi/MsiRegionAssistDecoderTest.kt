@@ -132,16 +132,19 @@ class MsiRegionAssistDecoderTest {
     }
 
     @Test
-    fun decodedRegion_isSkipped() {
-        // ML Kit already read it as a supported symbology: MSI must not waste a
-        // crop on it, and with nothing else left the outcome is NotFound.
+    fun decodedRegion_isStillAttempted() {
+        // ML Kit classifies MSI strips as a nearby family (or unknown) with a
+        // value the native path must drop — "decoded" usually means
+        // misclassified-MSI, so the region stays ROI-eligible and the
+        // checksum gate (not the flag) decides.
         val bmp = renderMsi()
         val decoder = assist(
             barcode(Rect(0, 0, bmp.width, bmp.height), rawValue = "NOT-MSI"),
         )
         try {
             val out = decode(decoder, bmp)
-            assertTrue("expected NotFound, got $out", out is DecodeOutcome.NotFound)
+            assertTrue("expected Success, got $out", out is DecodeOutcome.Success)
+            assertEquals(payload, valueOf(out))
         } finally {
             decoder.close()
             bmp.recycle()
