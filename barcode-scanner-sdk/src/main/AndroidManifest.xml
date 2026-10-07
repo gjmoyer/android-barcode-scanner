@@ -1,2 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest />
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Merged into host apps automatically: live camera mode needs this.
+         Hosts targeting API 23+ must still request it at runtime (the sample
+         app shows the pattern); headless/one-shot use needs no permission. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+</manifest>

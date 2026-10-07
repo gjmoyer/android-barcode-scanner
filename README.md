@@ -8,7 +8,7 @@ point-and-scan live mode.
 |---|---|
 | EAN-8/13, UPC-A/E, Code 39/93/128, ITF, Codabar, QR, Aztec, PDF-417, Data Matrix | ML Kit (primary, fast) |
 | GS1 DataBar (Omni / Stacked / Limited / Expanded / Expanded Stacked) | zxing-cpp v3.1.1 via JNI (`libzxing_bridge.so`) |
-| MSI Plessey (Mod10 / Mod11 / Mod1010 / Mod1110) | Custom pure-Kotlin scanline decoder (`data/msi/`) |
+| MSI Plessey (Mod10 / Mod11 / Mod1010 / Mod1110) | ML Kit isolation (candidate boxes + deskew → `MsiRoi`), custom pure-Kotlin scanline decoder (`data/msi/`, full-frame fallback `MsiPlessey`) |
 | Rotated / upside-down / blurred | Preprocessing + orientation fusion + multi-binarization |
 
 Why this exists: neither ML Kit nor zxing-cpp ships an MSI Plessey reader, so MSI is
@@ -40,16 +40,17 @@ include(":barcode-scanner-sdk")
 dependencies { implementation(project(":barcode-scanner-sdk")) }
 ```
 
-Live camera mode also needs the camera permission in the host manifest:
+Live camera mode needs the camera permission (also declared by the SDK manifest,
+so it merges automatically — API 23+ hosts must still request it at runtime,
+see the sample app) and a camera feature declaration in the host manifest:
 
 ```xml
-<uses-permission android:name="android.permission.CAMERA" />
 <uses-feature android:name="android.hardware.camera" android:required="false" />
 ```
 
 ```kotlin
 // Live camera mode (see sample-app/.../MainActivity.kt for the full pattern)
-val scanner = BarcodeScannerFactory.create(this, ScannerConfig.robust())
+val scanner = BarcodeScannerFactory.create(this, ScannerConfig.default())
 scanner.startCamera(this, previewView)
 lifecycleScope.launch {
     scanner.results.collect { result ->
@@ -68,12 +69,26 @@ Host apps only touch `api/` (`BarcodeScannerFacade`, `BarcodeScannerFactory`,
 `ScannerConfig`, `ScanResult`) plus `domain/model/` (`Symbology`, `DecodedBarcode`).
 No DI framework is imposed (manual `di/` container inside the SDK).
 
+## Viewfinder overlay (host UI)
+
+All camera work lives in the SDK (`camera/` — CameraX binding, stride-aware
+YUV→ARGB, rotation, 1280px cap, single-flight conflation). The host owns only
+the preview surface and the overlay drawing:
+
+- Pass a `PreviewView` to `startCamera` (or any `Preview.SurfaceProvider` for
+  Compose/headless — overlays are then the host's own drawing).
+- What-you-see-is-what-scans: the SDK crops analysis to the displayed area and
+  places `scanRegion` inside it, so draw the same centered fractions on the
+  `PreviewView` (copy `sample-app/.../ViewfinderView.kt`) and the box on screen
+  is exactly the box being decoded. A barcode outside the drawn box cannot
+  decode — keep it generous. Without a `PreviewView`, fractions fall back to
+  the sensor crop.
+
 ## Configuration
 
 ```kotlin
 val config = ScannerConfigBuilder()
     .only(Symbology.QR_CODE, Symbology.DATA_BAR_EXPANDED, Symbology.MSI_PLESSEY)
-    .robustMode(true)                        // 4 orientations + extra MSI passes
     .msiChecksumPolicy(MsiChecksumPolicy.MOD_10)
     .msiMinPayloadDigits(6)                  // reject short lucky MSI parses (shelf SKUs)
     .msiOcrRequireChecksum(false)            // trust printed SKU (print omits check digit)
@@ -83,10 +98,12 @@ val config = ScannerConfigBuilder()
     .build()
 ```
 
-- `robustMode(false)` (default): upright + upside-down orientations (sensor
-  rotation compensated, so portrait camera frames still start upright), faster
-  per-frame scans; `robustMode(true)`: all 4 orientations, vertical MSI
-  scanlines, extra binarizations, zxing `TryHarder`.
+- There is no fast/degraded mode: the pipeline is always thorough (4 lazy
+  orientations, extra MSI binarizations, vertical MSI scanlines, zxing
+  `TryHarder`) with cheap-first ordering + confident early-exit, so easy frames
+  stay fast. `maxOrientationsTried` (default 4) only bounds the view count for
+  fixed-geometry hosts; `zxingTryHarder(false)` opts the native sweep out of
+  thorough mode (MSI effort stays thorough).
 - MSI checksum must match the label spec; a wrong policy yields `NotFound`
   (never a misread presented as valid — see policy matrix below).
 - `msiMinPayloadDigits` (default 3, spec floor): raise to ~6 for shelf SKUs;
@@ -146,22 +163,23 @@ see `docs/REVIEW_LOG.md` Pass 10) dominate in practice:
 | Stage | Desktop JVM (Zint fixtures) | On-device (arm64) |
 |---|---|---|
 | Preprocessing (downscale + contrast) | ~8 ms | ~15–30 ms |
-| MSI decode (pristine, incl. 2px modules) | 10–30 ms default / 20–100 ms robust | 180–760 ms |
+| MSI decode (pristine, incl. 2px modules) | 10–100 ms (always thorough) | 180–760 ms |
 | DataBar via zxing-cpp (native TryRotate/TryHarder) | n/a (native absent on JVM) | 550–1150 ms (Expanded pays TryHarder) |
 | Full-chain worst case (capped by `decodeTimeoutMillis`) | — | ~1.5 s at default 1500 ms |
 
 Live-mode recipe (already wired, no host code needed):
 - Fusion tries engines in registration order with first-confident-wins: a pointed
   QR/EAN/Code128 resolves on ML Kit alone (~1 frame, no fallback cost).
-- Orientation work is routed per engine: ML Kit (rotation hint) and zxing-cpp
-  (native `TryRotate`) resolve orientation themselves and get the primary view
-  once, so robust mode no longer re-runs their inference on physically rotated
-  copies of the same image. MSI's scanline decoder still receives every
-  candidate (its dense horizontal pass beats the 3-column vertical fallback).
+- MSI frames go through ML Kit isolation first (candidate boxes + deskewed
+  crops via `MsiRoi`); an empty frame costs ~200ms and the next camera frame
+  arrives — the full-frame sweep waits for one-shot scans and stale aim.
+- Orientation work is routed per engine: ML Kit (rotation hint), zxing-cpp
+  (native `TryRotate`) and `MsiRoi` (deskew) resolve orientation themselves and
+  get the primary view once — physically rotated copies are never duplicate
+  work. Full-frame MSI still receives every candidate on sweep frames.
 - Orientation bitmaps materialize lazily — an upright hit never allocates rotations.
-- `ZXingCppDecoder` runs `TryHarder` when `robustMode` is on unless
-  `ScannerConfig.zxingTryHarder` overrides it (decoupled from MSI effort);
-  rotation/inversion retries stay on in both modes.
+- `ZXingCppDecoder` runs `TryHarder` unless `ScannerConfig.zxingTryHarder(false)`
+  opts out; rotation/inversion retries stay on either way.
 - `CameraScanManager` converts YUV→ARGB directly (no JPEG round-trip, so narrow
   bars survive) and is single-flight (`STRATEGY_KEEP_ONLY_LATEST` + decode gate):
   analysis runs at 1/latency fps instead of queueing — a slow frame delays the next
@@ -172,15 +190,13 @@ Live-mode recipe (already wired, no host code needed):
 - When a last-resort engine is registered (MSI OCR), the primary bar phase gets
   the first 60% of `decodeTimeoutMillis` and the rest is **reserved** for the
   fallback, which runs at most once per frame and only after every bar engine
-  missed. Without the reservation, robust mode's extra passes could consume the
-  whole budget and OCR would never run on a bar miss. Budget ~4 s when relying
-  on the OCR fallback.
+  missed. Without the reservation, the thorough passes (orientations,
+  binarizations, `TryHarder`) could consume the whole budget and OCR would
+  never run on a bar miss. Budget ~4 s when relying on the OCR fallback.
 - Why a budget at all: the camera gate is single-flight, so a pathological frame
   that takes 8 s freezes live scanning for 8 s. "Exhaust every option" is the
-  intent — the engines do all run — but cheap-first ordering plus a deadline
-  keeps point-and-scan usable. Robust mode multiplies work (4 orientations, 4
-  MSI binarizations, vertical scanlines, zxing `TryHarder`): it is for difficult
-  sideways/blurred labels, not the fast path.
+  intent — the sweep engines do all run on one-shot and stale frames — but
+  cheap-first ordering plus a deadline keeps point-and-scan usable.
 - `MsiPristineTest` pins the contract: Zint-rendered fixtures (all checksums, tiny
   modules, upside-down, sideways) must decode exactly, each under a 30 s
   absurd-blowup guard.
@@ -193,9 +209,10 @@ check of 10 is unrepresentable and rejected — no 0-mapping guess), `MOD_10_10`
 only; all policies require ≥2 agreeing observations regardless).
 Encoding table + guards verified against Wikipedia "MSI Barcode" + Morovia KB10637
 (see [`docs/MSI_PLESSEY_RESEARCH.md`](docs/MSI_PLESSEY_RESEARCH.md)); NCR Mod11
-(weights 2..9) and white-on-black MSI are documented limitations. Robust mode adds
-vertical scanlines for 90° labels; upside-down labels decode via the reverse
-run-direction path.
+(weights 2..9) and white-on-black MSI are documented limitations. Vertical
+scanlines cover 90° labels (always on); upside-down labels decode via the
+reverse run-direction path. Off-cardinal tilts (15°/30°/…) decode through the
+ML Kit ROI path (`MsiRoi`: isolate + deskew, then the same decoder).
 
 **SKU text fallback** (`MsiOcr`, bundled ML Kit text recognition, offline): when MSI
 is enabled and every bar engine misses, the decoder reads the printed SKU next to
