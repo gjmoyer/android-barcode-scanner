@@ -14,12 +14,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /**
- * MSI-via-ROI decoder (POC, gated by `ScannerConfig.msiRegionAssist`).
+ * MSI-via-ROI decoder: ML Kit isolates, our Plessey decoder decodes.
  *
  * Split pipeline: [MlKitRegionLocalizer] finds candidate 1D regions (ML Kit
- * cannot decode MSI, but `enableAllPotentialBarcodes()` still returns boxes for
- * barcode-looking strips), [MsiRegionCropper] pads + deskews each strip, and the
- * shared [MsiPlesseyDecoder] decodes the rectified crop. A miss here is cheap and
+ * cannot decode MSI — it is not a supported format — but
+ * `enableAllPotentialBarcodes()` still returns boxes for barcode-looking
+ * strips), [MsiRegionCropper] pads + deskews each strip, and the shared
+ * [MsiPlesseyDecoder] decodes the rectified crop. A miss here is cheap and
  * explicit ([DecodeOutcome.NotFound]) so fusion falls through to full-frame MSI.
  *
  * Routing notes:

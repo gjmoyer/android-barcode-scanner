@@ -24,11 +24,11 @@ import kotlinx.coroutines.Dispatchers
  *
  * Internal: host apps share the facade, never this container (prevents
  * bypassing the fusion pipeline). Assembly order mirrors decode priority
- * (cheap-first): ML Kit (broad, fast) -> MSI-ROI assist (flag-gated POC:
- * tilted labels via deskewed crops) -> MSI bar decode (narrow scanline,
- * must precede the slow native sweep so MSI tags resolve without paying for
- * zxing TryHarder first) -> zxing-cpp (broad, thorough) -> MSI OCR text
- * fallback. To add an engine: construct it, call `registry.register(it)` —
+ * (cheap-first): ML Kit (broad, fast) -> MSI-ROI (ML Kit isolation: tilted
+ * labels via deskewed crops) -> MSI bar decode (narrow scanline full-frame
+ * fallback, must precede the slow native sweep so MSI tags resolve without
+ * paying for zxing TryHarder first) -> zxing-cpp (broad, thorough) -> MSI OCR
+ * text fallback. To add an engine: construct it, call `registry.register(it)` —
  * fusion respects registration order, no other change needed.
  */
 internal class ScannerContainer(
@@ -80,12 +80,13 @@ internal class ScannerContainer(
     }
 
     val registry: DecoderRegistry by lazy {
-        // ROI assist (POC, flag-gated) runs BEFORE full-frame MSI: a tilted
-        // label that only decodes from a deskewed crop resolves here without
-        // paying for the full-frame scanline sweep first. A miss is a cheap
-        // NotFound and fusion falls through to the standard engines.
+        // MSI-ROI runs BEFORE full-frame MSI: a tilted label that only decodes
+        // from a deskewed crop resolves here without paying for the full-frame
+        // scanline sweep first. A miss is a cheap NotFound and fusion falls
+        // through to the standard engines. ML Kit isolation is best-effort
+        // (MSI is not a supported format), so the full-frame fallback stays.
         val engines = mutableListOf<BarcodeDecoder>(mlKitDecoder)
-        if (config.msiRegionAssist && Symbology.MSI_PLESSEY in config.enabledSymbologies) {
+        if (Symbology.MSI_PLESSEY in config.enabledSymbologies) {
             engines += MsiRegionAssistDecoder(MlKitRegionLocalizer(), msiDecoder, ocr = ocrDecoder)
         }
         engines += msiDecoder
