@@ -2,6 +2,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-permission android:name="android.permission.CAMERA" />
+    <!-- Normal permission (auto-granted, no runtime prompt): without it
+         Vibrator.vibrate() throws SecurityException on scan feedback. -->
+    <uses-permission android:name="android.permission.VIBRATE" />
     <application
         android:label="Barcode Scanner Sample"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">

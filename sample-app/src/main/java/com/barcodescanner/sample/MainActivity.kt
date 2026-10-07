@@ -303,9 +303,11 @@ class MainActivity : ComponentActivity() {
                         VibrationEffect.DEFAULT_AMPLITUDE,
                     ),
                 )
-            }
-        } catch (_: Exception) {
-            // Sample-app feedback must never crash a scan.
+            } ?: android.util.Log.w("ScanFeedback", "no vibrator service")
+        } catch (t: Throwable) {
+            // Sample-app feedback must never crash a scan — but never fail
+            // silently either (a missing VIBRATE permission hides here).
+            android.util.Log.w("ScanFeedback", "vibrate failed", t)
         }
     }
 
