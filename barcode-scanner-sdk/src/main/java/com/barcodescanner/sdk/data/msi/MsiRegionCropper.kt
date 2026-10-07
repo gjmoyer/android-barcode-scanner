@@ -29,7 +29,7 @@ import kotlin.math.atan2
  *
  * Corner convention: ML Kit returns four points clockwise from the symbol's
  * top-left in input-image coordinates; the quad is not necessarily rectangular
- * under perspective. [angleFromCorners] uses only the longest edge, so mild
+ * under perspective. [rawAngleFromCorners] uses only the longest edge, so mild
  * perspective does not skew the estimate.
  */
 object MsiRegionCropper {
@@ -87,16 +87,15 @@ object MsiRegionCropper {
     }
 
     /**
-     * Clockwise rotation (degrees, normalized to (-90, 90]) of the quad's longest
-     * edge relative to horizontal. Positive = symbol runs downhill left-to-right.
-     * Null when fewer than 4 points are supplied.
+     * Longest-edge angle of the corner quad, clockwise degrees in (-90, 90].
+     * Positive = symbol runs downhill left-to-right. Null when fewer than 4
+     * points are supplied (caller falls back to a plain crop).
+     *
+     * The quad is used unfolded: near-vertical strips transpose losslessly to
+     * horizontal inside [cropAndDeskew], so no folding to a strip axis happens
+     * here — the Mild-perspective note still holds (only the longest edge
+     * matters, so a skewed corner barely moves the estimate).
      */
-    fun angleFromCorners(corners: List<Point>?): Float? {
-        val raw = rawAngleFromCorners(corners) ?: return null
-        return foldToStripAxis(raw)
-    }
-
-    /** Unfolded longest-edge angle in (-90, 90] (module-visible for tests). */
     internal fun rawAngleFromCorners(corners: List<Point>?): Float? {
         if (corners == null || corners.size < 4) return null
         var bestLen = -1.0
@@ -116,17 +115,6 @@ object MsiRegionCropper {
         while (angle <= -90f) angle += 180f
         while (angle > 90f) angle -= 180f
         return angle
-    }
-
-    /**
-     * Folds any edge angle to the strip axis (-45, 45]: MSI bars only need the
-     * strip horizontal; the decoder's reverse path covers 180° content.
-     */
-    private fun foldToStripAxis(angle: Float): Float {
-        var a = angle
-        if (a > 45f) a -= 90f
-        if (a <= -45f) a += 90f
-        return a
     }
 
     /**

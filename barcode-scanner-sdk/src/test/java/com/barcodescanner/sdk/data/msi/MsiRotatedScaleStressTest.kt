@@ -137,29 +137,30 @@ class MsiRotatedScaleStressTest {
     // ------------------------------------------------------------ cropper math
 
     @Test
-    fun cropper_angleFromCorners_foldsToStripAxis() {
+    fun cropper_rawAngleFromCorners_returnsUnfoldedEdgeAngle() {
         // Horizontal quad -> ~0.
         assertEquals(
             0f,
-            MsiRegionCropper.angleFromCorners(
+            MsiRegionCropper.rawAngleFromCorners(
                 listOf(Point(0, 0), Point(100, 0), Point(100, 20), Point(0, 20)),
             )!!, 0.5f,
         )
-        // Vertical quad -> folded to ~0 (strip axis horizontal after deskew).
+        // Vertical quad -> ~90 (unfolded; the transpose step in cropAndDeskew
+        // consumes this, so no folding happens at the estimator).
         assertEquals(
-            0f,
-            MsiRegionCropper.angleFromCorners(
+            90f,
+            MsiRegionCropper.rawAngleFromCorners(
                 listOf(Point(0, 0), Point(20, 0), Point(20, 100), Point(0, 100)),
             )!!, 0.5f,
         )
         // 30° downhill quad -> ~30.
         val tilt = rotateCorners(Rect(0, 0, 100, 20), 50f, 10f, 30f)
-        assertEquals(30f, MsiRegionCropper.angleFromCorners(tilt)!!, 3f)
+        assertEquals(30f, MsiRegionCropper.rawAngleFromCorners(tilt)!!, 3f)
         // Null / short input -> null (caller falls back to plain crop).
-        assertEquals(null, MsiRegionCropper.angleFromCorners(null))
+        assertEquals(null, MsiRegionCropper.rawAngleFromCorners(null))
         assertEquals(
             null,
-            MsiRegionCropper.angleFromCorners(listOf(Point(0, 0), Point(1, 1))),
+            MsiRegionCropper.rawAngleFromCorners(listOf(Point(0, 0), Point(1, 1))),
         )
     }
 
