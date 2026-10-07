@@ -73,7 +73,7 @@ Scandit checksum enum (Mod10/1010/11/1110 naming), tc-lib-barcode (family contex
    requires 2 votes too).
 
 **Rotation / upside-down.**
-- Fusion `OrientationCandidates` expands 0°→180°→90°→270° (default 2, robust 4).
+- Fusion `OrientationCandidates` expands 0°→180°→90°→270° (up to 4, lazy).
   Physical rotation uses nearest-neighbor; ML Kit hint = sensor − attempt (fixed sign).
 - The decoder is forward-only ON PURPOSE: guards are asymmetric and mirrored digits
   are bit-reversed per digit plus digit-order-reversed, so pixel reversal cannot reuse

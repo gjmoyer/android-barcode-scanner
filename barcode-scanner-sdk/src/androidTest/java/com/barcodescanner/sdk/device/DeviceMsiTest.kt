@@ -45,7 +45,7 @@ class DeviceMsiTest {
         )
         val out = StringBuilder()
         out.appendLine("NATIVE_ZXING_AVAILABLE=${ZXingCppBridge.isAvailable}")
-        // Known-exact expectations (robust mode, correct per-label policy).
+        // Known-exact expectations (correct per-label policy).
         val expected = mapOf(
             "msi-quakotml-0186477.png" to
                 Expectation(MsiChecksumPolicy.MOD_10_10, "0186477"),
@@ -66,7 +66,6 @@ class DeviceMsiTest {
             org.junit.Assert.assertNotNull("cannot decode asset $name", bmp)
             for (policy in policies) {
                 val config = ScannerConfigBuilder()
-                    .robustMode(true)
                     .msiChecksumPolicy(policy)
                     .build()
                 val scanner = BarcodeScannerFactory.create(appContext, config)
@@ -103,7 +102,6 @@ class DeviceMsiTest {
             val bmp = BitmapFactory.decodeStream(stream)
             stream.close()
             val config = ScannerConfigBuilder()
-                .robustMode(true)
                 .msiChecksumPolicy(exp.policy)
                 .build()
             val scanner = BarcodeScannerFactory.create(appContext, config)
@@ -142,7 +140,6 @@ class DeviceMsiTest {
         assumeTrue("no committed databar fixtures found", fixtures.isNotEmpty())
 
         val config = ScannerConfigBuilder()
-            .robustMode(true)
             .decodeTimeoutMillis(10_000)
             .build()
         val scanner = BarcodeScannerFactory.create(appContext, config)

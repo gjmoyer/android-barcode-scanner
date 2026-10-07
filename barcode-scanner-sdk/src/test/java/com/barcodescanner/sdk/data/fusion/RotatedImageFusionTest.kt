@@ -48,10 +48,9 @@ class RotatedImageFusionTest {
         return bmp
     }
 
-    private fun config(robust: Boolean) = ScannerConfig(
+    private fun config() = ScannerConfig(
         enabledSymbologies = setOf(Symbology.MSI_PLESSEY),
-        maxOrientationsTried = if (robust) 4 else 2,
-        robustMode = robust,
+        maxOrientationsTried = 4,
         decodeTimeoutMillis = 10_000,
         duplicateSuppressionMillis = 0,
         msiChecksumPolicy = ScannerConfig.MsiChecksumPolicy.MOD_10,
@@ -60,17 +59,17 @@ class RotatedImageFusionTest {
         minConfidence = 0.5f,
     )
 
-    private fun fusedDecoder(robust: Boolean) = FusedDecoder(
+    private fun fusedDecoder() = FusedDecoder(
         DecoderRegistry(
             listOf(
                 MsiPlesseyDecoder(
                     checksumPolicy = ScannerConfig.MsiChecksumPolicy.MOD_10,
-                    robustMode = robust,
+                    robustMode = true,
                 ),
             ),
         ),
         PreprocessingPipeline.of(DownscaleTransform(), ContrastNormalizationTransform()),
-        config(robust),
+        config(),
     )
 
     private fun decodedValue(outcome: DecodeOutcome): String? =
@@ -100,7 +99,7 @@ class RotatedImageFusionTest {
             // restore upright content = 360 - contentRotation.
             val raw = OrientationCandidates.rotate(upright, contentRotation)
             val sensorRotation = (360 - contentRotation) % 360
-            val outcome = fusedDecoder(robust = false).decode(
+            val outcome = fusedDecoder().decode(
                 ScanFrame(bitmap = raw, rotationDegrees = sensorRotation),
             )
             assertEquals(
@@ -114,7 +113,7 @@ class RotatedImageFusionTest {
     @Test
     fun upsideDownContent_decodesThroughFusion() = runBlocking {
         val upsideDown = loadBitmap("mod10_1234567_r180.png")
-        val outcome = fusedDecoder(robust = false).decode(
+        val outcome = fusedDecoder().decode(
             ScanFrame(bitmap = upsideDown, rotationDegrees = 0),
         )
         assertTrue("expected Success, got $outcome", outcome is DecodeOutcome.Success)
@@ -124,21 +123,31 @@ class RotatedImageFusionTest {
     }
 
     @Test
-    fun sidewaysContent_robustDecodes_defaultStaysHonest() = runBlocking {
+    fun sidewaysContent_decodesViaVerticalScanlines() = runBlocking {
         val upright = loadBitmap("mod10_1234567.png")
         val sideways = OrientationCandidates.rotate(upright, 90)
 
-        // Documented default-mode limitation: horizontal-only MSI cannot read
-        // a 90° label, and it must return NotFound, never a misread.
-        val defaultOutcome = fusedDecoder(robust = false).decode(
-            ScanFrame(bitmap = sideways, rotationDegrees = 0),
-        )
-        assertTrue("default mode must not decode sideways content", defaultOutcome is DecodeOutcome.NotFound)
-
-        // Robust mode recovers via vertical scanlines / rotated candidates.
-        val robustOutcome = fusedDecoder(robust = true).decode(
+        val robustOutcome = fusedDecoder().decode(
             ScanFrame(bitmap = sideways, rotationDegrees = 0),
         )
         assertEquals("1234567", decodedValue(robustOutcome))
+    }
+
+    @Test
+    fun sidewaysContent_defaultDecoderStaysHonest() = runBlocking {
+        // Decoder-level contract (the SDK always wires the thorough mode, but
+        // the default scanline mode must still refuse — never misread — a
+        // sideways label: horizontal scanlines cannot read vertical bars.
+        val sideways = loadBitmap("mod10_1234567_r90.png")
+        val decoder = MsiPlesseyDecoder(
+            checksumPolicy = ScannerConfig.MsiChecksumPolicy.MOD_10,
+            robustMode = false,
+        )
+        try {
+            val outcome = decoder.decode(ScanFrame(bitmap = sideways))
+            assertTrue("default mode must not decode sideways content", outcome is DecodeOutcome.NotFound)
+        } finally {
+            decoder.close()
+        }
     }
 }

@@ -31,9 +31,15 @@ import kotlinx.coroutines.withTimeout
  *  - the WHOLE decode — preprocessing, orientation expansion, engine attempts —
  *    runs under [ScannerConfig.decodeTimeoutMillis] (transforms check
  *    cancellation between stages);
+ *  - [ScanFrame.allowFallbackSweep] gates the expensive fallback sweep: fresh
+ *    live frames run ML Kit isolation (decode + ROI crops) and the native
+ *    second opinion only — an empty frame costs ~200ms instead of ~400ms+ and
+ *    the next camera frame arrives sooner. Full-frame MSI and full-frame OCR
+ *    wait for one-shot scans and stale live frames (see DefaultBarcodeScanner),
+ *    so labels ML Kit cannot isolate still resolve via the thorough backstop;
  *  - when a [LastResortDecoder] is registered, the primary bar phase stops at
  *    [BAR_PHASE_PERCENT] of that budget and the remainder is reserved for the
- *    fallback, so robust mode cannot starve it;
+ *    fallback, so the extra orientations/binarizations/TryHarder cannot starve it;
  *  - per orientation candidate, each primary engine whose
  *    [BarcodeDecoder.supportedSymbologies] intersects the enabled set is attempted;
  *  - hits below [ScannerConfig.minConfidence] are ignored; hits at/above
@@ -49,8 +55,10 @@ import kotlinx.coroutines.withTimeout
  * disables ML Kit — set 0.5 default.
  *
  * Robustness layers: preprocessing contrast normalization, upright-first
- * orientation expansion (2 attempts default, 4 robust — upright is relative to
- * the frame's sensor rotation), per-engine binarization retries.
+ * orientation expansion (up to 4 attempts, upright relative to the frame's
+ * sensor rotation), per-engine binarization retries. Cheap engines run first
+ * and a confident hit stops the scan, so easy frames never pay for the
+ * thorough passes they don't need.
  */
 class FusedDecoder(
     private val registry: DecoderRegistry,
@@ -92,10 +100,11 @@ class FusedDecoder(
                     val eager = snapshot.filterNot { it is LastResortDecoder }
                     val lastResort = snapshot.filterIsInstance<LastResortDecoder>()
                     // Last-resort engines (OCR) get a reserved slice of the frame
-                    // budget. Robust mode's extra orientations/binarizations/
-                    // TryHarder may legitimately run long, but must never starve
+                    // budget. The extra orientations/binarizations/TryHarder
+                    // may legitimately run long, but must never starve
                     // the text fallback by consuming the whole timeout first
-                    // (regression: deferring OCR to the end failed in robust mode).
+                    // (regression: deferring OCR to the end failed once the
+                    // thorough passes were added).
                     // No last-resort engines -> the bar phase may use it all.
                     val barDeadlineNanos = if (lastResort.isEmpty()) {
                         Long.MAX_VALUE
@@ -115,8 +124,15 @@ class FusedDecoder(
                     // zxing TryRotate) are fed the primary candidate only, so they
                     // are excluded when deciding whether rotations are needed at
                     // all: a registry of such engines never allocates them.
+                    //
+                    // Fresh live frames (allowFallbackSweep=false) need exactly
+                    // ONE candidate: every fallback engine that would consume a
+                    // rotated view is skipped below, and the last-resort phase
+                    // runs on the unrotated base — so no rotation is ever reached.
                     val needsRotatedCandidates = eager.any { !it.resolvesOrientationInternally }
-                    val maxCandidates = if (needsRotatedCandidates) {
+                    val maxCandidates = if (!processed.allowFallbackSweep) {
+                        1
+                    } else if (needsRotatedCandidates) {
                         config.maxOrientationsTried
                     } else {
                         1
@@ -162,9 +178,12 @@ class FusedDecoder(
                     }
                     // Expensive last-resort engines (OCR text fallback) run at
                     // most ONCE per frame, only when every bar engine missed, in
-                    // the budget slice reserved above. The decoder compensates
-                    // sensor rotation, so the base view is enough.
-                    if (pool.isEmpty() && lastResort.isNotEmpty()) {
+                    // the budget slice reserved above — and only when the frame
+                    // allows the fallback sweep (fresh live frames skip it and
+                    // let the next frame try; one-shot and stale frames sweep).
+                    // The decoder compensates sensor rotation, so the base view
+                    // is enough.
+                    if (pool.isEmpty() && lastResort.isNotEmpty() && processed.allowFallbackSweep) {
                         val base = if (processed.attemptRotation == 0) {
                             processed
                         } else {
@@ -277,13 +296,12 @@ class FusedDecoder(
         if (decoder.supportedSymbologies.intersect(config.enabledSymbologies).isEmpty()) {
             return false
         }
-        if (decoder.name == MsiPlesseyDecoder.NAME) {
-            // MSI scanline decoding is the most expensive bar step; sideways views
-            // are only attempted in robust mode (which also enables vertical
-            // scanlines). "Sideways" is relative to upright: camera frames arrive
-            // rotated (rotationDegrees), so the upright candidate is not always
-            // attemptRotation=0.
-            if (!config.robustMode && frame.relativeRotation in setOf(90, 270)) return false
+        if (!frame.allowFallbackSweep && decoder.name == MsiPlesseyDecoder.NAME) {
+            // Fresh live frame: ML Kit isolation (MLKit decode + MsiRoi crops)
+            // and the native second opinion already ran on this candidate. The
+            // full-frame MSI sweep costs more than the next camera frame, so it
+            // waits for the stale backstop instead of starving the viewfinder.
+            return false
         }
         return true
     }
@@ -302,7 +320,7 @@ class FusedDecoder(
         /**
          * Share of [ScannerConfig.decodeTimeoutMillis] the primary bar engines may
          * consume when a last-resort engine is registered (the rest is reserved for
-         * it). Without the reservation, robust mode's extra orientations/
+         * it). Without the reservation, the extra orientations/
          * binarizations/TryHarder can consume the entire timeout and the OCR text
          * fallback never gets to run on a bar miss.
          */

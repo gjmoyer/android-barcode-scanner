@@ -32,11 +32,10 @@ class ZXingCppDecoder(
     enabledSymbologies: Set<Symbology>,
     private val dispatcher: CoroutineDispatcher = Dispatchers.Default,
     /**
-     * Maps to native TryHarder. Wired from `ScannerConfig.zxingTryHarder ?:
-     * robustMode` in [ScannerContainer]: null follows robust mode (fast default,
-     * thorough warehouse mode); set explicitly to decouple DataBar effort from
-     * MSI effort. Rotation/inversion retries (TryRotate/TryInvert) stay on in
-     * both modes.
+     * Maps to native TryHarder. Wired from `ScannerConfig.zxingTryHarder`
+ * in [ScannerContainer]: null is thorough (fast only when a host opts out
+ * explicitly). Rotation/inversion retries (TryRotate/TryInvert) stay on in
+ * both modes.
      */
     private val thorough: Boolean = true,
 ) : BarcodeDecoder {

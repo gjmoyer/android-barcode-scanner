@@ -24,6 +24,7 @@ import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Default [BarcodeScannerFacade] implementation.
@@ -55,6 +56,14 @@ internal class DefaultBarcodeScanner(
     private var cameraManager: CameraScanManager? = null
     private val cameraLock = Any()
     private val closed = AtomicBoolean(false)
+    /**
+     * Elapsed-realtime of the last live [ScanResult.Success] (any symbology,
+     * even dedup-suppressed). Drives the fallback-sweep policy: fresh frames
+     * skip the expensive sweep and let the next frame try; only aiming that
+     * persists with no success gets thorough sweeps. Starts 0 so the first
+     * frames after launch sweep exactly like one-shot scans.
+     */
+    private val lastSuccessAt = AtomicLong(0)
 
     /** Live-path dedup: key -> last emitted elapsed-realtime. */
     private val dedup = ConcurrentHashMap<String, Long>()
@@ -110,8 +119,11 @@ internal class DefaultBarcodeScanner(
                 config = config,
                 scope = scope,
                 onFrame = { frame ->
-                    val result = scanFrame(frame)
+                    val now = SystemClock.elapsedRealtime()
+                    val stale = now - lastSuccessAt.get() > STALE_SWEEP_AFTER_MILLIS
+                    val result = scanFrame(frame.copy(allowFallbackSweep = stale))
                     if (result is ScanResult.Success) {
+                        lastSuccessAt.set(now)
                         emitLiveDeduped(result)
                         maybeDumpOcrFrame(frame, result)
                     }
@@ -195,6 +207,14 @@ internal class DefaultBarcodeScanner(
     private companion object {
         /** Prune the live dedup map once it holds more than this many keys. */
         const val DEDUP_PRUNE_THRESHOLD = 64
+        /**
+         * Live frames newer than this after the last success skip the fallback
+         * sweep (ML Kit isolation + native second opinion only). Older aiming
+         * re-enables thorough sweeps so un-isolatable labels still resolve.
+         * Not a config knob: it is a frame-scheduling policy, and one-shot
+         * scans always sweep (see ScanFrame.allowFallbackSweep).
+         */
+        const val STALE_SWEEP_AFTER_MILLIS = 2_000L
         const val OCR_DUMP_ENGINE = "MsiOcr"
         const val OCR_DUMP_DIR = "ocr-debug"
         const val OCR_DUMP_MAX_FILES = 3

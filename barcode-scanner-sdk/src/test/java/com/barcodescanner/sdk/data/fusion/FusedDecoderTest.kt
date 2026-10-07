@@ -76,12 +76,10 @@ class FusedDecoderTest {
     private fun config(
         maxOrientations: Int = 1,
         timeout: Long = 1_000,
-        robust: Boolean = false,
         symbologies: Set<Symbology> = setOf(Symbology.QR_CODE),
     ) = ScannerConfig(
         enabledSymbologies = symbologies,
         maxOrientationsTried = maxOrientations,
-        robustMode = robust,
         decodeTimeoutMillis = timeout,
         duplicateSuppressionMillis = 0,
         msiChecksumPolicy = ScannerConfig.MsiChecksumPolicy.MOD_10,
@@ -90,10 +88,15 @@ class FusedDecoderTest {
         minConfidence = 0.5f,
     )
 
-    private fun frame(rotationDegrees: Int = 0, attemptRotation: Int = 0) = ScanFrame(
+    private fun frame(
+        rotationDegrees: Int = 0,
+        attemptRotation: Int = 0,
+        allowFallbackSweep: Boolean = true,
+    ) = ScanFrame(
         bitmap = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888),
         rotationDegrees = rotationDegrees,
         attemptRotation = attemptRotation,
+        allowFallbackSweep = allowFallbackSweep,
     )
 
     private fun fused(config: ScannerConfig, vararg decoders: BarcodeDecoder) = FusedDecoder(
@@ -190,8 +193,8 @@ class FusedDecoderTest {
     }
 
     @Test
-    fun lastResort_runsWhenRobustBarPhaseExhaustsItsBudget() = runBlocking {
-        // Regression: with robust mode's 4 orientations, deferring OCR to the end
+    fun lastResort_runsWhenBarPhaseExhaustsItsBudget() = runBlocking {
+        // Regression: with 4 orientations, deferring OCR to the end
         // under one shared timeout meant slow bar work starved the fallback.
         // The bar phase must stop at its reserved deadline and hand over to OCR.
         val slowBar = FakeDecoder(
@@ -208,7 +211,6 @@ class FusedDecoderTest {
             config(
                 maxOrientations = 4,
                 timeout = 3_000,
-                robust = true,
                 symbologies = setOf(Symbology.MSI_PLESSEY),
             ),
             slowBar,
@@ -244,7 +246,9 @@ class FusedDecoderTest {
     }
 
     @Test
-    fun msiDecoder_skippedOnSidewaysViews_whenNotRobust() = runBlocking {
+    fun msiDecoder_attemptedOnEveryView() = runBlocking {
+        // No degraded mode: MSI is attempted on every orientation candidate
+        // (sideways included — the thorough decoder samples vertical scanlines).
         val msi = FakeDecoder(
             MsiPlesseyDecoder.NAME,
             supportedSymbologies = setOf(Symbology.MSI_PLESSEY),
@@ -254,24 +258,13 @@ class FusedDecoderTest {
             config(maxOrientations = 4, symbologies = setOf(Symbology.MSI_PLESSEY)),
             msi,
         ).decode(frame())
-        assertEquals("upright + upside-down only in default mode", 2, msi.calls)
-
-        val msiRobust = FakeDecoder(
-            MsiPlesseyDecoder.NAME,
-            supportedSymbologies = setOf(Symbology.MSI_PLESSEY),
-            results = listOf(DecodeOutcome.NotFound()),
-        )
-        fused(
-            config(maxOrientations = 4, robust = true, symbologies = setOf(Symbology.MSI_PLESSEY)),
-            msiRobust,
-        ).decode(frame())
-        assertEquals("all orientations in robust mode", 4, msiRobust.calls)
+        assertEquals("all orientations attempted", 4, msi.calls)
     }
 
     @Test
-    fun msiDecoder_sidewaysSkipIsSensorRelative() = runBlocking {
-        // Portrait frame (rotationDegrees=90): priority order is 90,270,180,0 whose
-        // relative rotations are 0,180,90,270 — only the first two may be attempted.
+    fun msiDecoder_uprightFirstOnPortraitFrames() = runBlocking {        // Portrait frame (rotationDegrees=90): priority order is 90,270,180,0 whose
+        // relative rotations are 0,180,90,270 — upright-first ordering is
+        // sensor-relative, so the first candidate is already the upright view.
         val msi = FakeDecoder(
             MsiPlesseyDecoder.NAME,
             supportedSymbologies = setOf(Symbology.MSI_PLESSEY),
@@ -282,13 +275,62 @@ class FusedDecoderTest {
             msi,
         ).decode(frame(rotationDegrees = 90))
         val relatives = msi.seen.map { (it.attemptRotation - it.rotationDegrees + 360) % 360 }
-        assertEquals(listOf(0, 180), relatives)
+        assertEquals(listOf(0, 180, 90, 270), relatives)
+    }
+
+    @Test
+    fun freshFrame_skipsFallbackSweep() = runBlocking {
+        // Fresh live frame (ML Kit isolation just ran elsewhere): the full-frame
+        // MSI sweep and the full-frame OCR fallback wait for the stale backstop
+        // instead of starving the viewfinder — but ROI-style primary engines
+        // still run, on exactly one candidate.
+        val msiFull = FakeDecoder(
+            MsiPlesseyDecoder.NAME,
+            supportedSymbologies = setOf(Symbology.MSI_PLESSEY),
+            results = listOf(DecodeOutcome.NotFound()),
+        )
+        val roi = FakeDecoder(
+            "MsiRoi",
+            supportedSymbologies = setOf(Symbology.MSI_PLESSEY),
+            resolvesOrientationInternally = true,
+            results = listOf(DecodeOutcome.NotFound()),
+        )
+        val ocr = FakeLastResort(DecodeOutcome.NotFound())
+        val out = fused(
+            config(maxOrientations = 4, symbologies = setOf(Symbology.MSI_PLESSEY)),
+            roi,
+            msiFull,
+            ocr,
+        ).decode(frame(allowFallbackSweep = false))
+        assertTrue("expected NotFound, got $out", out is DecodeOutcome.NotFound)
+        assertEquals("ROI path still runs on fresh frames", 1, roi.calls)
+        assertEquals("full-frame MSI waits for the backstop", 0, msiFull.calls)
+        assertEquals("full-frame OCR waits for the backstop", 0, ocr.calls)
+    }
+
+    @Test
+    fun sweepFrame_runsFullChain() = runBlocking {
+        // One-shot and stale live frames sweep everything, all orientations.
+        val msiFull = FakeDecoder(
+            MsiPlesseyDecoder.NAME,
+            supportedSymbologies = setOf(Symbology.MSI_PLESSEY),
+            results = listOf(DecodeOutcome.NotFound()),
+        )
+        val ocr = FakeLastResort(DecodeOutcome.NotFound())
+        val out = fused(
+            config(maxOrientations = 4, symbologies = setOf(Symbology.MSI_PLESSEY)),
+            msiFull,
+            ocr,
+        ).decode(frame(allowFallbackSweep = true))
+        assertTrue("expected NotFound, got $out", out is DecodeOutcome.NotFound)
+        assertEquals("full-frame MSI sweeps", 4, msiFull.calls)
+        assertEquals("full-frame OCR runs once", 1, ocr.calls)
     }
 
     @Test
     fun orientationInternalEngines_getPrimaryCandidateOnly() = runBlocking {
         // ML Kit/zxing handle rotation themselves: feeding them physical
-        // rotations is duplicate work (and every robust candidate paid TryHarder).
+        // rotations is duplicate work (and every extra candidate paid TryHarder).
         val internal = FakeDecoder(
             "Internal",
             resolvesOrientationInternally = true,

@@ -9,10 +9,14 @@ package com.barcodescanner.sdk.domain.model
  */
 data class ScannerConfig(
     val enabledSymbologies: Set<Symbology>,
-    /** Max orientations attempted per frame: 1..4 (see OrientationCandidates). */
+    /**
+     * Max orientations attempted per frame: 1..4 (see OrientationCandidates).
+     * Default 4: the pipeline is cheap-first (upright first, confident
+     * early-exit, lazy rotations), so easy frames never pay for the rotations
+     * they don't try — there is no fast/degraded mode, only this bound for
+     * fixed-geometry hosts that know their aim.
+     */
     val maxOrientationsTried: Int,
-    /** When true: try all 4 rotations + extra MSI binarizations + wider voting. */
-    val robustMode: Boolean,
     /** Per-frame decode timeout; fusion returns best-so-far after this. */
     val decodeTimeoutMillis: Long,
     /** Suppress identical results within this window (live mode dedup). */
@@ -37,9 +41,9 @@ data class ScannerConfig(
     /** Minimum confidence to emit a result. NOTE: >0.9 disables ZXing, >0.95 disables ML Kit. */
     val minConfidence: Float,
     /**
-     * zxing-cpp `TryHarder` override. Null (default) follows [robustMode]:
-     * thorough in robust mode, fast otherwise. Set explicitly to decouple
-     * DataBar effort from MSI effort (e.g. fast DataBar + thorough MSI).
+     * zxing-cpp `TryHarder` override. Null (default) is thorough. Set false to
+     * trade DataBar recall for speed on easy frames; the MSI effort is always
+     * thorough (extra binarizations + vertical scanlines + wider voting).
      */
     val zxingTryHarder: Boolean? = null,
     /**
@@ -120,7 +124,6 @@ data class ScannerConfig(
         private var enabled: Set<Symbology> =
             Symbology.entries.filter { it != Symbology.UNKNOWN }.toSet()
         private var maxOrientationsOverride: Int? = null
-        private var robust = false
         private var timeout = 1_500L
         private var dedup = 1_500L
         private var msi = MsiChecksumPolicy.MOD_10
@@ -144,19 +147,13 @@ data class ScannerConfig(
 
         fun maxOrientationsTried(v: Int) = apply { maxOrientationsOverride = v }
 
-        /**
-         * Robust mode: 4 orientations + extra MSI binarizations + zxing TryHarder
-         * (unless [zxingTryHarder] overrides). Order-independent: an explicit
-         * [maxOrientationsTried] always wins over the robust default.
-         */
-        fun robustMode(v: Boolean) = apply { robust = v }
         fun decodeTimeoutMillis(v: Long) = apply { timeout = v }
         fun duplicateSuppressionMillis(v: Long) = apply { dedup = v }
         fun msiChecksumPolicy(v: MsiChecksumPolicy) = apply { msi = v }
         fun msiMinPayloadDigits(v: Int) = apply { msiMinDigits = v }
         fun msiOcrRequireChecksum(v: Boolean) = apply { msiOcrChecksum = v }
         fun minConfidence(v: Float) = apply { minConf = v }
-        /** Decouple zxing-cpp TryHarder from [robustMode]; null follows robust. */
+        /** Decouple zxing-cpp TryHarder from the always-thorough default; null is thorough. */
         fun zxingTryHarder(v: Boolean?) = apply { zxingHarder = v }
         /** Debug only: dump the first `MsiOcr` live frame as PNG (see field). */
         fun debugOcrFrameDump(v: Boolean) = apply { ocrDump = v }
@@ -171,11 +168,10 @@ data class ScannerConfig(
         /** Full-frame decoding (clears any [scanRegion]). */
         fun fullFrame() = apply { region = null }
         fun build(): ScannerConfig {
-            val orientations = maxOrientationsOverride ?: if (robust) 4 else 2
+            val orientations = maxOrientationsOverride ?: 4
             return ScannerConfig(
                 enabledSymbologies = enabled.toSet(),
                 maxOrientationsTried = orientations,
-                robustMode = robust,
                 decodeTimeoutMillis = timeout,
                 duplicateSuppressionMillis = dedup,
                 msiChecksumPolicy = msi,
@@ -191,6 +187,5 @@ data class ScannerConfig(
 
     companion object {
         fun default() = Builder().build()
-        fun robust() = Builder().robustMode(true).build()
     }
 }

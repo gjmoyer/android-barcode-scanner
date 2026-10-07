@@ -54,7 +54,6 @@ class MainActivity : ComponentActivity() {
 
     private var scanner: BarcodeScannerFacade? = null
     private var collectJob: Job? = null
-    private var robust = true
     /** Checksum policy under test (tap to cycle — labels vary by printer). */
     private var msiPolicy = MsiChecksumPolicy.MOD_10
 
@@ -66,9 +65,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var resultSymbology: TextView
     private lateinit var resultMethod: TextView
     private lateinit var resultDetail: TextView
-    private lateinit var robustHelp: TextView
     private lateinit var scanButton: Button
-    private lateinit var toggleRobust: Button
     private lateinit var togglePolicy: Button
     private lateinit var preview: PreviewView
 
@@ -99,19 +96,13 @@ class MainActivity : ComponentActivity() {
             addView(viewfinder, android.widget.FrameLayout.LayoutParams(-1, -1))
         }
         scanButton = Button(this).apply { text = "Scan" }
-        toggleRobust = Button(this).apply { text = "Robust mode: ON" }
         togglePolicy = Button(this).apply { text = "Checksum: MOD_10" }
 
         val buttonRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             addView(scanButton, LinearLayout.LayoutParams(0, -2, 1f))
-            addView(toggleRobust, LinearLayout.LayoutParams(0, -2, 1f))
-        }
-        val policyRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            addView(togglePolicy, LinearLayout.LayoutParams(-1, -2))
+            addView(togglePolicy, LinearLayout.LayoutParams(0, -2, 1f))
         }
 
         resultValue = TextView(this).apply {
@@ -132,24 +123,18 @@ class MainActivity : ComponentActivity() {
         }
 
         status = TextView(this).apply { text = "Initializing…" }
-        robustHelp = TextView(this).apply {
-            textSize = 12f
-            text = robustExplanation(true)
-        }
 
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(pad, pad, pad, pad)
             addView(previewStack, LinearLayout.LayoutParams(-1, 0, 1f))
             addView(buttonRow)
-            addView(policyRow)
             addView(resultCard)
             addView(status)
-            addView(robustHelp)
         }
         setContentView(layout)
 
-        // Example: all symbologies incl. DataBar + MSI, robust orientations for warehouse labels.
+        // Example: all symbologies incl. DataBar + MSI.
         recreateScanner()
 
         // Or limit to what you need for speed:
@@ -171,16 +156,6 @@ class MainActivity : ComponentActivity() {
             status.text = "Scanning… point at a barcode (QR, DataBar, MSI…)"
             // Engage the camera only now — no constant scanning.
             startScanner()
-        }
-
-        toggleRobust.setOnClickListener {
-            // Re-creating with a different config is the supported way to switch modes.
-            robust = !robust
-            recreateScanner()
-            toggleRobust.text = if (robust) "Robust mode: ON" else "Robust mode: OFF"
-            robustHelp.text = robustExplanation(robust)
-            // Re-engage the camera only if a one-shot capture was in progress.
-            if (awaitingScan) startScanner() else status.text = READY_TEXT
         }
 
         togglePolicy.setOnClickListener {
@@ -215,7 +190,6 @@ class MainActivity : ComponentActivity() {
         scanner?.close()
         val config = ScannerConfigBuilder()
             .enabledSymbologies(Symbology.entries.filter { it != Symbology.UNKNOWN }.toSet())
-            .robustMode(robust)
             .msiChecksumPolicy(msiPolicy)
             // Shelf SKUs are 6+ digits; a lower floor lets blurry live frames
             // emit short false positives (e.g. "0128") with 2 correlated votes.
@@ -300,21 +274,6 @@ class MainActivity : ComponentActivity() {
         "MsiOcr" -> " (OCR text fallback)"
         else -> ""
     }
-
-    /**
-     * What the Robust toggle does: OFF tries 0°/180° only (fast, fine for
-     * upright retail codes); ON also tries 90°/270° plus extra MSI
-     * binarizations and wider fusion voting (slower, catches sideways /
-     * upside-down warehouse labels).
-     */
-    private fun robustExplanation(robust: Boolean): String =
-        if (robust) {
-            "Robust mode ON: tries all 4 rotations (0°/90°/180°/270°) + extra MSI " +
-                "binarizations. Slower, best for sideways/upside-down warehouse labels."
-        } else {
-            "Robust mode OFF: tries 0°/180° only. Faster, best for upright retail codes. " +
-                "Turn ON if sideways or upside-down labels are missed."
-        }
 
     private fun beep() {
         try {

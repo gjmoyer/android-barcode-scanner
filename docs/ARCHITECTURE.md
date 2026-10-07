@@ -34,8 +34,9 @@ CameraX / Bitmap
   → ScanFrame(bitmap, sensorRotation)
   → PreprocessingPipeline stage 0: DownscaleTransform (≤1280 long edge)
   → ContrastNormalizationTransform
-  → OrientationCandidates.expand (upright-first, sensor-compensated: 2 default, 4 robust)
-  → per orientation in REGISTRY order (MLKit → MSI → ZXingCpp):
+  → OrientationCandidates.expand (upright-first, sensor-compensated, up to 4 views;
+  lazy: rotations materialize only until a confident hit stops the scan)
+  → per orientation in REGISTRY order (MLKit → MsiRoi → MSI → ZXingCpp):
   engines with internal rotation (ML Kit hint, zxing TryRotate) get the primary
   view only; MSI receives every candidate. LastResort engines (MsiOcr) run once,
   only after all bar engines miss
@@ -57,9 +58,11 @@ No pipeline change.
 2. `registry.register(MyDecoder())` in `ScannerContainer` (or at runtime from the host).
 3. Done — fusion iterates `registry.snapshot()` order; no fusion edit needed.
 
-**Tune robustness vs speed**:
-- `ScannerConfig(maxOrientationsTried=2)` default: upright + upside-down, fastest.
-- `ScannerConfig.robust()` → 4 orientations + extra MSI binarizations + wider voting.
+**Tune speed vs recall**:
+- `ScannerConfig(maxOrientationsTried=N)` caps orientation views (default 4, lazy —
+  unneeded rotations never materialize thanks to confident early-exit).
+- `zxingTryHarder(false)` opts the native sweep out of thorough mode; MSI effort
+  is always thorough (extra binarizations + vertical scanlines + wider voting).
 
 ## Decisions (ADRs, condensed)
 

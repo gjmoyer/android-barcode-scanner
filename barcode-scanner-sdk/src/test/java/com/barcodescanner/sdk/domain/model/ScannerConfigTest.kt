@@ -2,31 +2,23 @@ package com.barcodescanner.sdk.domain.model
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ScannerConfigTest {
 
     @Test
-    fun default_excludesUnknown_andUsesFastOrientationCount() {
+    fun default_excludesUnknown_andTriesAllOrientations() {
         val config = ScannerConfig.default()
         assertFalse(Symbology.UNKNOWN in config.enabledSymbologies)
-        assertEquals(2, config.maxOrientationsTried)
-        assertFalse(config.robustMode)
-    }
-
-    @Test
-    fun robust_preset_enablesAllOrientations() {
-        val config = ScannerConfig.robust()
-        assertTrue(config.robustMode)
+        // No fast/degraded mode: cheap-first ordering + confident early-exit keep
+        // easy frames fast, so the default is always the thorough 4 views.
         assertEquals(4, config.maxOrientationsTried)
     }
 
     @Test
-    fun builder_robustMode_isSymmetric() {
-        // Regression: robustMode(false) used to leave maxOrientations at 4.
-        assertEquals(2, ScannerConfig.Builder().robustMode(true).robustMode(false).build().maxOrientationsTried)
-        assertEquals(4, ScannerConfig.Builder().robustMode(false).robustMode(true).build().maxOrientationsTried)
+    fun explicitOrientationCount_respected() {
+        assertEquals(2, ScannerConfig.Builder().maxOrientationsTried(2).build().maxOrientationsTried)
+        assertEquals(4, ScannerConfig.Builder().maxOrientationsTried(4).build().maxOrientationsTried)
     }
 
     @Test

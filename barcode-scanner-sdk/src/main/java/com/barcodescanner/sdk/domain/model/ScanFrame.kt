@@ -17,12 +17,21 @@ import android.graphics.Bitmap
  *   used for duplicate suppression and timeout policy. Wall-clock must NOT be used.
  * @param attemptRotation Extra clockwise physical rotation already applied to
  *   [bitmap] by the multi-orientation retry loop (0 for the base frame).
+ * @param allowFallbackSweep True (default): run the full engine chain including
+ *   the expensive fallback sweep (full-frame MSI, thorough native pass,
+ *   full-frame OCR). Live camera frames set this false while results are fresh:
+ *   an empty ML Kit localization then ends the frame immediately and the next
+ *   frame arrives ~100ms later — a 400ms+ sweep would only starve the viewfinder
+ *   of fresh aiming chances. One-shot scans keep true (single chance). When
+ *   aiming persists with no success the live path re-enables the sweep, so
+ *   labels ML Kit cannot isolate still resolve via the thorough backstop.
  */
 data class ScanFrame(
     val bitmap: Bitmap,
     val rotationDegrees: Int = 0,
     val timestampMillis: Long = android.os.SystemClock.elapsedRealtime(),
     val attemptRotation: Int = 0,
+    val allowFallbackSweep: Boolean = true,
 ) {
     init {
         require(rotationDegrees in setOf(0, 90, 180, 270)) {

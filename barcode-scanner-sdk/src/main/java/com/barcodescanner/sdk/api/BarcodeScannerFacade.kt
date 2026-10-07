@@ -9,7 +9,7 @@ import kotlinx.coroutines.flow.Flow
  *
  * Usage (see sample-app):
  * ```
- * val scanner = BarcodeScannerFactory.create(context, ScannerConfig.robust())
+ * val scanner = BarcodeScannerFactory.create(context, ScannerConfig.default())
  * scanner.results.collect { ... }       // Flow<ScanResult>
  * scanner.scanBitmap(frameBitmap)       // one-shot
  * scanner.startCamera(lifecycleOwner, previewView) // live

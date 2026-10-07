@@ -53,14 +53,14 @@ internal class ScannerContainer(
         ZXingCppDecoder(
             config.enabledSymbologies,
             dispatcher,
-            thorough = config.zxingTryHarder ?: config.robustMode,
+            thorough = config.zxingTryHarder ?: true,
         )
     }
 
     val msiDecoder: MsiPlesseyDecoder by lazy {
         MsiPlesseyDecoder(
             checksumPolicy = config.msiChecksumPolicy,
-            robustMode = config.robustMode,
+            robustMode = true,
             dispatcher = dispatcher,
             minPayloadDigits = config.msiMinPayloadDigits,
         )

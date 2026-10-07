@@ -10,7 +10,7 @@ package com.barcodescanner.sdk.api
  * (`ScannerConfig.Builder` does not resolve), so the nested Builder and policy
  * enum get their own top-level aliases below. Host pattern:
  * ```
- * val config = ScannerConfigBuilder().robustMode(true)
+ * val config = ScannerConfigBuilder()
  *     .msiChecksumPolicy(MsiChecksumPolicy.MOD_10).build()
  * ```
  */
