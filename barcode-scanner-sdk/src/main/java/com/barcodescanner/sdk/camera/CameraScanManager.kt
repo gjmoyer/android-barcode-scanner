@@ -49,6 +49,12 @@ internal class CameraScanManager(
     private var previewUseCase: Preview? = null
     private var analysisUseCase: ImageAnalysis? = null
     private var analysisExecutor: ExecutorService? = null
+    /**
+     * Preview view for what-you-see-is-what-scans cropping (null for the
+     * headless SurfaceProvider entry point, where the legacy sensor-centered
+     * ROI applies). Only width/height are ever read.
+     */
+    private var previewView: PreviewView? = null
 
     /** Single-flight gate: true while a decode is in flight. */
     private val decodeInFlight = AtomicBoolean(false)
@@ -57,11 +63,22 @@ internal class CameraScanManager(
     private var stopped = false
 
     fun start(lifecycleOwner: LifecycleOwner, previewView: PreviewView) {
-        start(lifecycleOwner, previewView.surfaceProvider)
+        this.previewView = previewView
+        startInternal(lifecycleOwner, previewView.surfaceProvider)
     }
 
     /** Headless / Compose entry point: binds preview to any SurfaceProvider. */
     fun start(lifecycleOwner: LifecycleOwner, surfaceProvider: Preview.SurfaceProvider) {
+        // No view: a stale size from a previous view session must never crop
+        // a headless one — the legacy sensor-centered ROI applies instead.
+        previewView = null
+        startInternal(lifecycleOwner, surfaceProvider)
+    }
+
+    private fun startInternal(
+        lifecycleOwner: LifecycleOwner,
+        surfaceProvider: Preview.SurfaceProvider,
+    ) {
         // Restart-safe: shut down any previous executor before creating a new one.
         runCatching { analysisExecutor?.shutdownNow() }
         stopped = false
@@ -78,6 +95,7 @@ internal class CameraScanManager(
     fun stop() {
         stopped = true
         decodeInFlight.set(false)
+        previewView = null
         unbindUseCases()
         cameraProvider = null
         runCatching { analysisExecutor?.shutdownNow() }
@@ -188,13 +206,25 @@ internal class CameraScanManager(
         val right = raw.right.coerceIn(left + 1, width)
         val bottom = raw.bottom.coerceIn(top + 1, height)
         val sensor = Rect(left, top, right, bottom)
-        // Viewfinder ROI (null = full sensor crop): fewer pixels for every
-        // engine downstream, less competing print, and the box guides aim.
+        // Viewfinder ROI (null = everything visible): what-you-see-is-what-scans.
+        // The overlay box is drawn in PreviewView space, so the analysis crop is
+        // derived from the displayed area — never the full sensor, which extends
+        // past the FILL_CENTER display crop.
         val rotation = when (imageInfo.rotationDegrees) {
             90, 180, 270 -> imageInfo.rotationDegrees
             else -> 0
         }
-        val crop = roiToBuffer(sensor, width, height, rotation, config.scanRegion)
+        val view = previewView?.let { v ->
+            // Plain int getters; transient zeros fall back to the sensor ROI.
+            val vw = runCatching { v.width }.getOrDefault(0)
+            val vh = runCatching { v.height }.getOrDefault(0)
+            if (vw > 0 && vh > 0) vw to vh else null
+        }
+        val crop = if (view == null) {
+            roiToBuffer(sensor, width, height, rotation, config.scanRegion)
+        } else {
+            viewBoxToBuffer(sensor, width, height, rotation, view.first, view.second, config.scanRegion)
+        }
         val cw = crop.width()
         val ch = crop.height()
         if (cw <= 0 || ch <= 0) return null
@@ -312,6 +342,98 @@ internal class CameraScanManager(
     companion object {
         /** Rejects bogus ImageProxy dimensions before the `w*h*3/2` alloc. */
         const val MAX_FRAME_PIXELS = 16_000_000L
+
+        /**
+         * Maps the on-screen viewfinder box to buffer pixels — the
+         * what-you-see-is-what-scans crop.
+         *
+         * `PreviewView` shows the sensor with `FILL_CENTER`: the displayed area
+         * is the sensor center-cropped to the view aspect, so a box drawn on the
+         * view is NOT a box of the full sensor. This mirrors that display crop
+         * (center-crop sensor to view aspect), then places the overlay [region]
+         * fractions inside the visible area — exactly where the overlay draws
+         * them. Null region = everything visible (not everything sensed).
+         *
+         * @param sensorCrop HAL crop in buffer pixels.
+         * @param rotationDegrees imageInfo rotation (0/90/180/270); the overlay
+         *   fractions are upright/display-space, the inverse map handles rotation.
+         * @param viewWidth/viewHeight PreviewView pixels (>0; otherwise falls
+         *   back to the legacy sensor-centered [roiToBuffer]).
+         */
+        internal fun viewBoxToBuffer(
+            sensorCrop: Rect,
+            imageWidth: Int,
+            imageHeight: Int,
+            rotationDegrees: Int,
+            viewWidth: Int,
+            viewHeight: Int,
+            region: ScannerConfig.ScanRegion?,
+        ): Rect {
+            if (viewWidth <= 0 || viewHeight <= 0) {
+                return roiToBuffer(sensorCrop, imageWidth, imageHeight, rotationDegrees, region)
+            }
+            val buffer = Rect(0, 0, imageWidth, imageHeight)
+            val sensor = Rect(sensorCrop).apply { intersect(buffer) }
+            if (sensor.isEmpty) return Rect(buffer)
+            // Content dims in display (post-rotation) space.
+            val cw = if (rotationDegrees == 90 || rotationDegrees == 270) imageHeight else imageWidth
+            val ch = if (rotationDegrees == 90 || rotationDegrees == 270) imageWidth else imageHeight
+            if (cw <= 0 || ch <= 0) return Rect(sensor)
+            // FILL_CENTER: visible = sensor center-cropped to the view aspect.
+            val viewAspect = viewWidth.toFloat() / viewHeight
+            val contentAspect = cw.toFloat() / ch
+            val visWFrac = minOf(1f, viewAspect / contentAspect)
+            val visHFrac = minOf(1f, contentAspect / viewAspect)
+            // The view spans exactly the visible rect, so overlay fractions of
+            // the view are fractions of the visible rect: a centered box sized
+            // (wf * visW, hf * visH) in content-fraction space.
+            val wf = region?.widthFraction ?: 1f
+            val hf = region?.heightFraction ?: 1f
+            val bw = (wf * visWFrac).coerceIn(0f, 1f)
+            val bh = (hf * visHFrac).coerceIn(0f, 1f)
+            val leftD = (cw * (1 - bw) / 2)
+            val topD = (ch * (1 - bh) / 2)
+            val corners = arrayOf(
+                leftD to topD,
+                leftD + cw * bw to topD,
+                leftD + cw * bw to topD + ch * bh,
+                leftD to topD + ch * bh,
+            )
+            var minX = Float.MAX_VALUE
+            var minY = Float.MAX_VALUE
+            var maxX = -Float.MAX_VALUE
+            var maxY = -Float.MAX_VALUE
+            for ((dx, dy) in corners) {
+                val (bx, by) = displayToBuffer(dx, dy, imageWidth, imageHeight, rotationDegrees)
+                if (bx < minX) minX = bx
+                if (by < minY) minY = by
+                if (bx > maxX) maxX = bx
+                if (by > maxY) maxY = by
+            }
+            val out = Rect(
+                minX.toInt().coerceIn(0, imageWidth),
+                minY.toInt().coerceIn(0, imageHeight),
+                maxX.toInt().coerceIn(0, imageWidth),
+                maxY.toInt().coerceIn(0, imageHeight),
+            )
+            if (out.isEmpty) return Rect(sensor)
+            out.intersect(sensor)
+            return if (out.isEmpty) Rect(sensor) else out
+        }
+
+        /** Inverse of the display rotation: display px -> buffer px. */
+        private fun displayToBuffer(
+            dx: Float,
+            dy: Float,
+            w: Int,
+            h: Int,
+            rotationDegrees: Int,
+        ): Pair<Float, Float> = when (rotationDegrees) {
+            90 -> dy to h - dx
+            180 -> w - dx to h - dy
+            270 -> w - dy to dx
+            else -> dx to dy
+        }
 
         /**
          * Maps a centered upright-normalized viewfinder region to buffer pixels

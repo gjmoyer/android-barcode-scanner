@@ -55,17 +55,23 @@ data class ScannerConfig(
      */
     val debugOcrFrameDump: Boolean = false,
     /**
-     * Viewfinder region as centered upright fractions (null = full frame). The
-     * camera decodes only this region: fewer pixels (≈2× faster image stages
-     * at 45% area), less competing print, and — most importantly — the box
-     * tells the user where to aim so the tag fills it.
+     * Viewfinder region as centered upright fractions (null = everything
+     * visible). The camera decodes only this region: fewer pixels (≈2× faster
+     * image stages at 45% area), less competing print, and — most importantly —
+     * the box tells the user where to aim so the tag fills it.
+     *
+     * What-you-see-is-what-scans: the fractions are of the DISPLAYED preview
+     * (the overlay draws the same fractions on the PreviewView), and analysis
+     * mirrors the preview's center-crop — never the full sensor, which extends
+     * past what FILL_CENTER shows. Headless sessions (no PreviewView) fall back
+     * to the same fractions of the sensor crop.
      *
      * A plain immutable fraction pair (not android RectF: mutable, and its
      * copy constructor is unreliable under test shadows). Centered by
      * construction so it survives sensor rotation (portrait buffers are
      * transposed; a centered box maps to a centered box with swapped axes).
-     * Null default preserves full-frame behavior. If the barcode lies outside
-     * the box it can never decode — keep the box generous.
+     * If the barcode lies outside the box it can never decode — keep the box
+     * generous.
      */
     val scanRegion: ScanRegion? = null,
 ) {

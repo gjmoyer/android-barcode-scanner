@@ -57,4 +57,54 @@ class CameraRoiTest {
         val out = CameraScanManager.roiToBuffer(sensor, 1280, 720, 0, region(1f, 1f))
         assertEquals(sensor, out)
     }
+
+    // ------------------------------------------------- viewBoxToBuffer
+
+    @Test
+    fun view_sameAspect_matchesLegacyBox() {
+        // Portrait phone, view aspect == content aspect: no display crop, so the
+        // view box equals the legacy sensor box (0.9×0.5 → x 320-960, y 36-684).
+        val out = CameraScanManager.viewBoxToBuffer(sensor, 1280, 720, 90, 720, 1280, region(0.9f, 0.5f))
+        assertEquals(Rect(320, 36, 960, 684), out)
+    }
+
+    @Test
+    fun view_widerThanContent_cropsTopBottom() {
+        // Landscape buffer shown on a wider view: FILL_CENTER crops top/bottom.
+        // visH = (1280/720)/(1000/400) = 0.711; box 0.9×0.5 → x 64-1216, y 232-488.
+        val out = CameraScanManager.viewBoxToBuffer(sensor, 1280, 720, 0, 1000, 400, region(0.9f, 0.5f))
+        assertEquals(Rect(64, 232, 1216, 488), out)
+    }
+
+    @Test
+    fun view_nullRegion_decodesOnlyWhatIsVisible() {
+        // Same geometry, no box: the visible rect itself — never sensor strips
+        // the user cannot see (y 103-616, full width; float floor, not a bug).
+        val out = CameraScanManager.viewBoxToBuffer(sensor, 1280, 720, 0, 1000, 400, null)
+        assertEquals(Rect(0, 103, 1280, 616), out)
+    }
+
+    @Test
+    fun view_unknownSize_fallsBackToLegacy() {
+        val expected = CameraScanManager.roiToBuffer(sensor, 1280, 720, 90, region(0.9f, 0.5f))
+        assertEquals(
+            expected,
+            CameraScanManager.viewBoxToBuffer(sensor, 1280, 720, 90, 0, 0, region(0.9f, 0.5f)),
+        )
+    }
+
+    @Test
+    fun view_rotation180_matchesZero() {
+        val a = CameraScanManager.viewBoxToBuffer(sensor, 1280, 720, 0, 1000, 400, region(0.9f, 0.5f))
+        val b = CameraScanManager.viewBoxToBuffer(sensor, 1280, 720, 180, 1000, 400, region(0.9f, 0.5f))
+        assertEquals(a, b)
+    }
+
+    @Test
+    fun view_sensorOffset_respected() {
+        // HAL crop + display crop compose: box lives inside both.
+        val cropped = Rect(100, 100, 1100, 620)
+        val out = CameraScanManager.viewBoxToBuffer(cropped, 1280, 720, 0, 1000, 400, region(0.5f, 0.5f))
+        assertEquals(Rect(320, 232, 960, 488), out)
+    }
 }
