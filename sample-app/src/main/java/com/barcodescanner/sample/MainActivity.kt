@@ -56,6 +56,14 @@ class MainActivity : ComponentActivity() {
     private var collectJob: Job? = null
     /** Checksum policy under test (tap to cycle — labels vary by printer). */
     private var msiPolicy = MsiChecksumPolicy.MOD_10
+    /**
+     * Symbologies the scanner attempts (sample default: everything known).
+     * This is the consumer control for decode scope: narrowing it skips
+     * engines outright (e.g. MSI-only aims never pay for zxing sweeps).
+     */
+    private var enabledSyms: Set<Symbology> =
+        Symbology.entries.filter { it != Symbology.UNKNOWN }.toSet()
+    private val symBoxes = mutableMapOf<Symbology, android.widget.CheckBox>()
 
     /** True after tapping SCAN, until the next successful decode. */
     private var awaitingScan = false
@@ -105,6 +113,50 @@ class MainActivity : ComponentActivity() {
             addView(togglePolicy, LinearLayout.LayoutParams(0, -2, 1f))
         }
 
+        // Symbology scope: one checkbox per known symbology (this is the
+        // consumer control — ScannerConfigBuilder.only/enabledSymbologies).
+        // Changes rebuild the scanner immediately; an in-progress Scan keeps
+        // going with the new scope.
+        val symLabel = TextView(this).apply {
+            text = "Symbologies to detect:"
+            textSize = 13f
+        }
+        val symGrid = android.widget.GridLayout(this).apply {
+            columnCount = 2
+        }
+        for (sym in Symbology.entries.filter { it != Symbology.UNKNOWN }) {
+            val box = android.widget.CheckBox(this).apply {
+                text = sym.displayName
+                textSize = 12f
+                isChecked = sym in enabledSyms
+                setOnCheckedChangeListener { _, checked ->
+                    onSymbologyToggled(sym, checked, this)
+                }
+            }
+            symBoxes[sym] = box
+            symGrid.addView(box)
+        }
+        val symAllNone = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            val all = Button(this@MainActivity).apply {
+                text = "All"
+                textSize = 12f
+                setOnClickListener { setAllSymbologies(true) }
+            }
+            val none = Button(this@MainActivity).apply {
+                text = "MSI only"
+                textSize = 12f
+                setOnClickListener { setAllSymbologies(false) }
+            }
+            addView(all, LinearLayout.LayoutParams(0, -2, 1f))
+            addView(none, LinearLayout.LayoutParams(0, -2, 1f))
+        }
+        val symScroll = android.widget.ScrollView(this).apply {
+            val h = (170 * resources.displayMetrics.density).toInt()
+            layoutParams = LinearLayout.LayoutParams(-1, h)
+            addView(symGrid)
+        }
+
         resultValue = TextView(this).apply {
             text = "Value: —"
             textSize = 16f
@@ -129,6 +181,9 @@ class MainActivity : ComponentActivity() {
             setPadding(pad, pad, pad, pad)
             addView(previewStack, LinearLayout.LayoutParams(-1, 0, 1f))
             addView(buttonRow)
+            addView(symLabel)
+            addView(symScroll)
+            addView(symAllNone)
             addView(resultCard)
             addView(status)
         }
@@ -189,7 +244,7 @@ class MainActivity : ComponentActivity() {
         collectJob?.cancel()
         scanner?.close()
         val config = ScannerConfigBuilder()
-            .enabledSymbologies(Symbology.entries.filter { it != Symbology.UNKNOWN }.toSet())
+            .enabledSymbologies(enabledSyms)
             .msiChecksumPolicy(msiPolicy)
             // Shelf SKUs are 6+ digits; a lower floor lets blurry live frames
             // emit short false positives (e.g. "0128") with 2 correlated votes.
@@ -209,6 +264,37 @@ class MainActivity : ComponentActivity() {
             .build()
         scanner = BarcodeScannerFactory.create(this, config)
         bindResults()
+    }
+
+    private fun onSymbologyToggled(sym: Symbology, checked: Boolean, box: android.widget.CheckBox) {
+        val next = if (checked) enabledSyms + sym else enabledSyms - sym
+        if (next.isEmpty()) {
+            // Config rejects an empty set — refuse the uncheck instead.
+            box.isChecked = true
+            status.text = "At least one symbology must stay enabled"
+            return
+        }
+        enabledSyms = next
+        recreateScanner()
+        if (awaitingScan) startScanner() else status.text = READY_TEXT
+    }
+
+    private fun setAllSymbologies(all: Boolean) {
+        enabledSyms = if (all) {
+            Symbology.entries.filter { it != Symbology.UNKNOWN }.toSet()
+        } else {
+            setOf(Symbology.MSI_PLESSEY)
+        }
+        // Refresh boxes without re-firing listeners.
+        for ((sym, box) in symBoxes) {
+            box.setOnCheckedChangeListener(null)
+            box.isChecked = sym in enabledSyms
+            box.setOnCheckedChangeListener { _, checked ->
+                onSymbologyToggled(sym, checked, box)
+            }
+        }
+        recreateScanner()
+        if (awaitingScan) startScanner() else status.text = READY_TEXT
     }
 
     private fun bindResults() {
