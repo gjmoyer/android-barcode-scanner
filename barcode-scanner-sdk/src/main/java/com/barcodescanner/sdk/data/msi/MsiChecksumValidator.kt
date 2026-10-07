@@ -37,7 +37,7 @@ object MsiChecksumValidator {
                 if (full.length < 2) return Validation(full, false)
                 val payload = full.dropLast(1)
                 val expected = mod11Check(payload)
-                Validation(payload, full.last().digitToInt() == expected)
+                Validation(payload, expected >= 0 && full.last().digitToInt() == expected)
             }
             ScannerConfig.MsiChecksumPolicy.MOD_10_10 -> {
                 if (full.length < 3) return Validation(full, false)
@@ -51,7 +51,7 @@ object MsiChecksumValidator {
                 if (full.length < 3) return Validation(full, false)
                 val payload = full.dropLast(2)
                 val c1 = mod11Check(payload)
-                if (full[full.length - 2].digitToInt() != c1) return Validation(full, false)
+                if (c1 < 0 || full[full.length - 2].digitToInt() != c1) return Validation(full, false)
                 val c2 = mod10Check(payload + full[full.length - 2])
                 Validation(payload, full.last().digitToInt() == c2)
             }
@@ -74,7 +74,14 @@ object MsiChecksumValidator {
         return (10 - (sum % 10)) % 10
     }
 
-    /** IBM Mod11: weights 2..7 repeating from the right, C = (11 - sum%11) % 11. */
+    /**
+     * IBM Mod11: weights 2..7 repeating from the right.
+     *
+     * @return the check digit, or -1 when (11 - sum%11) % 11 is 10 — a value
+     *   with no decimal-digit representation. Some printers map it to 0, but a
+     *   printed 0 then carries only 1/11 discriminating power, so callers treat
+     *   -1 as invalid (honest silence beats a guessed check).
+     */
     fun mod11Check(payload: String): Int {
         var sum = 0
         var weight = 2
@@ -83,6 +90,6 @@ object MsiChecksumValidator {
             weight = if (weight == 7) 2 else weight + 1
         }
         val r = (11 - (sum % 11)) % 11
-        return if (r == 10) 0 else r // some printers map 10 -> 0; strict variants reject, we accept-as-0
+        return if (r == 10) -1 else r
     }
 }

@@ -15,7 +15,7 @@ tradeoffs are documented as such.
 - P0-12 MLKit double rotation + stale boxes → FIXED (effectiveRotation = sensor-attempt; boxes nulled when rotated)
 - P1-2 successes() cast → FIXED (filterIsInstance)
 - P1-3 Builder.enable overwrite → FIXED (only/addSymbologies; enable aliases only)
-- P1-4 DecodedBarcode.equals → FIXED (documented identity = value+symbology; isSameScan for full compare)
+- P1-4 DecodedBarcode.equals → FIXED (documented identity = value+symbology; fusion dedups explicitly)
 - P1-6 MLKit lifecycle race → FIXED (AtomicBoolean + synchronized init)
 - P1-10 hardcoded dispatchers / public container → FIXED (dispatcher injectable; container internal)
 - P1-11 bridge DCL → FIXED (synchronized init + Log.w)
@@ -287,3 +287,93 @@ exact, silkalm `0828593` (true `0826593`, one stable misread). Changes:
 On-device full-chain results (trust mode): yakult exact, dixie exact, silkalm
 one-digit misread (ML Kit limit; undetectable without a check digit in print).
 Sample enables trust mode + min payload 6 + 4 s. Zero confident bar changes.
+
+## Pass 13 — adversarial review + fixes (2026-10-06)
+
+Full-repo picky review (all source, tests, docs). Fixed:
+- **Missing Gradle wrapper** (no gradlew/jar tracked, docs assumed it) → wrapper
+  regenerated at Gradle 9.6.0.
+- **Bitmap recycle vs in-flight ML Kit Task**: plain `Task.await()` does NOT stop
+  the task on coroutine cancellation; fusion's `finally` recycled bitmaps while
+  ML Kit could still read them. Fusion now skips recycling on timeout/cancel and
+  both ML Kit engines ride a `CancellationTokenSource` through `await(cts)`.
+- **`provider.unbindAll()`** in CameraScanManager tore down host CameraX use
+  cases; now only this manager's preview/analysis are unbound.
+- **`isUpsideDown` was absolute (`attemptRotation == 180`)**, wrong for portrait
+  frames where the upside-down candidate is 270; all engines now use
+  `ScanFrame.relativeRotation` / `isUpsideDownCandidate`.
+- **OCR ran once per orientation candidate** and its band anchors were compared
+  against ML Kit boxes across mismatched coordinate spaces. `OcrSkuDecoder` is
+  now a `LastResortDecoder`: fusion runs it once per frame after all bar engines
+  miss, on an upright-rotated copy so bands and boxes share one space.
+- **Timeout didn't cover preprocessing**; pipeline now runs inside `withTimeout`
+  and checks cancellation between transforms.
+- `checksumStripped` was hardcoded true (lied under `NONE`); now derived from
+  validation. Mod11 computed check 10 is rejected instead of guessed as 0.
+- SharedFlow buffer now `DROP_OLDEST` (comment had claimed drop semantics);
+  live dedup map pruned past 64 keys; `Builder.robustMode(false)` restores 2
+  orientations; `DecoderRegistry.register` replaces in place (priority kept).
+- `startCamera` closed-check moved inside the camera lock (TOCTOU).
+- Removed dead code: `BlurScoringTransform` (scored, never consumed) and
+  `ScanFrame.sharpnessScore`, `verticalScanlines`, reversed `decodeScanline`
+  overload, private `deSpeckle`, unreachable branch, `@Suppress("unused")`,
+  unused BuildConfig/viewBinding flags, dead API-26 check, unused
+  `ErrorKind.FATAL/TIMEOUT`, `DatabarDecoder` alias; `DefaultBarcodeScanner`
+  now internal; `estimateBackground` uses a histogram instead of sorting.
+- Docs corrected (README MsiOcr 0.5 vs 0.7, camera permission, sharpness claims;
+  stale EXPERIMENTAL/consensus comments; review-log isSameScan phantom).
+- Tests added: ScannerConfig validation/builder symmetry, PreprocessingPipeline
+  cancellation, FusedDecoder (early break, timeout best-so-far + no-recycle,
+  deferred last-resort, MSI sideways skip), ZXing JSON parsing, facade dedup,
+  MLKitDecoder mapping. GitHub Actions CI added; pristine timing assertion
+  relaxed to an absurd-blowup guard.
+
+## Pass 14 — robust-mode OCR starvation regression (2026-10-06, user report)
+
+Pass 13 deferred `LastResortDecoder`s (OCR) to after the orientation loop under
+one shared `withTimeout`. Robust mode's 4 orientations × (ML Kit + zxing
+TryHarder + 4-variant MSI) can consume the whole 4 s budget, so OCR never ran
+(default mode finished its 2 orientations early enough, which is why only
+robust mode broke). Fix: when a last-resort engine is registered the bar phase
+stops at `BAR_PHASE_PERCENT` (60%) of `decodeTimeoutMillis`; the remainder is
+reserved for the once-per-frame fallback. Deadline checks sit before each
+orientation and each bar engine, so a single slow native call cannot overrun
+far. Regression test:
+`FusedDecoderTest.lastResort_runsWhenRobustBarPhaseExhaustsItsBudget`.
+README documents the split and why the per-frame budget exists (single-flight
+camera gate: an unbounded decode freezes live scanning).
+
+## Pass 15 — duplicated orientation work removed (2026-10-06)
+
+Fusion was feeding physically rotated candidates to engines that already resolve
+rotation internally:
+- ML Kit receives `effectiveRotation = sensor − attempt` on every candidate, so
+  all 2/4 candidates present the SAME upright image to the detector — every extra
+  call was an identical inference.
+- zxing-cpp runs native `TryRotate` (a full 0/90/180/270 sweep) inside every
+  call, so 2/4 candidates re-ran the same 4-orientation search; robust mode paid
+  `TryHarder` on each duplicate. A robust frame could do ~16 native sweeps.
+Fix: `BarcodeDecoder.resolvesOrientationInternally` (default false). ML Kit and
+zxing-cpp declare true and now receive the primary (relative rotation 0)
+candidate only; the expansion is skipped entirely for registries where every
+engine is internal. MSI stays false deliberately: its 3-column vertical fallback
+is thinner than a physically rotated 9-scanline horizontal pass, so rotations are
+real signal there, not duplication. Tests:
+`FusedDecoderTest.orientationInternalEngines_getPrimaryCandidateOnly`,
+`builtInEnginesDeclareInternalRotation`.
+
+## Pass 16 — rotated-image end-to-end test coverage (2026-10-06)
+
+Rotation coverage was previously partial: `MsiPristineTest` decoded committed
+r90/r180 FIXTURES but directly through the MSI decoder, `OrientationCandidatesTest`
+only covered ordering/dimensions, and under the default Robolectric graphics mode
+`Matrix` transforms do not move pixels, so fusion's compensated-rotation path was
+untested. Added:
+- `RotatedImageFusionTest` (JVM, `@GraphicsMode(NATIVE)` — real Skia pixels):
+  full fused pipeline with genuinely rotated content — sensor compensation for
+  0/90/180/270 buffers, reverse-path upside-down with `isUpsideDown`, and the
+  documented default-mode sideways NotFound vs robust success.
+- `DeviceMsiTest.databarFixtures_decodeAtEveryRotation`: on-device matrix over
+  the committed DataBar fixtures (real ML Kit + native zxing TryRotate), rotating
+  pixels and reporting the compensating sensor rotation for each combination.
+All JVM suites green (92 tests).

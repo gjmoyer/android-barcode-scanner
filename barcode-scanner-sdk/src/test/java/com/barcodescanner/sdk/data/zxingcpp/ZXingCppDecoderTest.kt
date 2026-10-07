@@ -1,10 +1,26 @@
 package com.barcodescanner.sdk.data.zxingcpp
 
+import android.graphics.Bitmap
+import com.barcodescanner.sdk.domain.decoder.DecodeOutcome
+import com.barcodescanner.sdk.domain.model.ScanFrame
 import com.barcodescanner.sdk.domain.model.Symbology
-import org.junit.Assert.*
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34])
 class ZXingCppDecoderTest {
+
+    private fun frame(rotationDegrees: Int = 0, attemptRotation: Int = 0) = ScanFrame(
+        bitmap = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888),
+        rotationDegrees = rotationDegrees,
+        attemptRotation = attemptRotation,
+    )
 
     @Test
     fun mapFormat_v311HriStrings() {
@@ -66,5 +82,44 @@ class ZXingCppDecoderTest {
     fun enabledFormatsArg_limitedOnlyStaysNarrow() {
         val d = ZXingCppDecoder(setOf(Symbology.DATA_BAR_LIMITED))
         assertEquals("DataBarLtd", d.enabledFormatsArg())
+    }
+
+    @Test
+    fun parse_mapsDedupsAndFiltersUnknown() {
+        val d = ZXingCppDecoder(setOf(Symbology.DATA_BAR, Symbology.QR_CODE))
+        val json = """
+            [
+              {"text":"A","format":"DataBar"},
+              {"text":"A","format":"DataBar"},
+              {"text":"B","format":"QR Code"},
+              {"text":"X","format":"MaxiCode"}
+            ]
+        """.trimIndent()
+        val out = d.parse(json, frame())
+        assertTrue("expected Success, got $out", out is DecodeOutcome.Success)
+        val barcodes = (out as DecodeOutcome.Success).barcodes
+        assertEquals(2, barcodes.size)
+        assertEquals(listOf(Symbology.DATA_BAR, Symbology.QR_CODE), barcodes.map { it.symbology })
+        assertTrue(barcodes.all { it.confidence == 0.9f })
+        assertTrue(barcodes.all { it.engineName == ZXingCppDecoder.NAME })
+    }
+
+    @Test
+    fun parse_emptyOrInvalid_isNotFound() {
+        val d = ZXingCppDecoder(setOf(Symbology.QR_CODE))
+        assertTrue(d.parse("[]", frame()) is DecodeOutcome.NotFound)
+        assertTrue(d.parse("not json", frame()) is DecodeOutcome.NotFound)
+    }
+
+    @Test
+    fun parse_upsideDownFlag_isRelativeToSensorRotation() {
+        val d = ZXingCppDecoder(setOf(Symbology.QR_CODE))
+        val json = """[{"text":"A","format":"QR Code"}]"""
+        val upright = d.parse(json, frame()) as DecodeOutcome.Success
+        assertFalse(upright.barcodes.single().isUpsideDown)
+        // Portrait frame (sensor 90): the upside-down candidate is 270, not 180.
+        val upsideDown =
+            d.parse(json, frame(rotationDegrees = 90, attemptRotation = 270)) as DecodeOutcome.Success
+        assertTrue(upsideDown.barcodes.single().isUpsideDown)
     }
 }

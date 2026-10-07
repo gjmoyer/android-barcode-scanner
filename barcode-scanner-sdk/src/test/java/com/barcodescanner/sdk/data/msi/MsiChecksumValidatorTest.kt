@@ -68,4 +68,13 @@ class MsiChecksumValidatorTest {
         val v = MsiChecksumValidator.validate("12A45", ScannerConfig.MsiChecksumPolicy.MOD_10)
         assertFalse(v.valid)
     }
+
+    @Test
+    fun mod11_unrepresentableTen_isRejectedNotGuessedAsZero() {
+        // Payload "6": weighted sum 12 -> (11 - 1) = 10, no decimal check digit.
+        assertEquals(-1, MsiChecksumValidator.mod11Check("6"))
+        // A label whose printed check is 0 (printer 10->0 convention) must not
+        // validate: a guessed 0 would accept 1/11 of wrong checks.
+        assertFalse(MsiChecksumValidator.validate("60", ScannerConfig.MsiChecksumPolicy.MOD_11).valid)
+    }
 }

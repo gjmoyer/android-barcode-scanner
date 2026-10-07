@@ -13,6 +13,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
@@ -36,7 +37,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  *    identical (value, symbology) within [ScannerConfig.duplicateSuppressionMillis]
  *    is swallowed there.
  */
-class DefaultBarcodeScanner internal constructor(
+internal class DefaultBarcodeScanner(
     private val container: ScannerContainer,
     override val config: ScannerConfig,
 ) : BarcodeScannerFacade {
@@ -44,7 +45,8 @@ class DefaultBarcodeScanner internal constructor(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val _results = MutableSharedFlow<ScanResult>(
         extraBufferCapacity = 8,
-        // Slow collectors drop oldest, never suspend the decode path.
+        // Slow collectors drop oldest; emitting must never suspend the decode path.
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
     override val results: Flow<ScanResult> = _results.asSharedFlow()
 
@@ -87,8 +89,10 @@ class DefaultBarcodeScanner internal constructor(
     }
 
     override fun startCamera(lifecycleOwner: LifecycleOwner, previewView: PreviewView) {
-        check(!closed.get()) { "Scanner is closed" }
         synchronized(cameraLock) {
+            // Checked inside the lock: close() sets `closed` then grabs the same
+            // lock, so a check outside would allow starting a camera after close.
+            check(!closed.get()) { "Scanner is closed" }
             stopCameraLocked()
             val manager = CameraScanManager(
                 context = container.app,
@@ -122,15 +126,27 @@ class DefaultBarcodeScanner internal constructor(
         runCatching { container.close() }
     }
 
-    private suspend fun emitLiveDeduped(result: ScanResult.Success) {
+    /** Live-path emission with per-key dedup; internal for tests. */
+    internal suspend fun emitLiveDeduped(result: ScanResult.Success) {
         val key = "${result.barcode.symbology}:${result.barcode.rawValue}"
         val now = SystemClock.elapsedRealtime()
         emitMutex.withLock {
+            // Prune stale keys so a long session scanning many unique codes does
+            // not grow the map without bound.
+            if (dedup.size > DEDUP_PRUNE_THRESHOLD) {
+                val cutoff = now - config.duplicateSuppressionMillis
+                dedup.entries.removeAll { it.value < cutoff }
+            }
             val last = dedup[key]
             if (last != null && now - last < config.duplicateSuppressionMillis) return
             dedup[key] = now
         }
         _results.emit(result)
+    }
+
+    private companion object {
+        /** Prune the live dedup map once it holds more than this many keys. */
+        const val DEDUP_PRUNE_THRESHOLD = 64
     }
 }
 

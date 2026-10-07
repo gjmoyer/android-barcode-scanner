@@ -8,7 +8,6 @@ import com.barcodescanner.sdk.data.ocr.OcrSkuDecoder
 import com.barcodescanner.sdk.data.zxingcpp.ZXingCppDecoder
 import com.barcodescanner.sdk.domain.decoder.DecoderRegistry
 import com.barcodescanner.sdk.domain.model.ScannerConfig
-import com.barcodescanner.sdk.domain.pipeline.BlurScoringTransform
 import com.barcodescanner.sdk.domain.pipeline.ContrastNormalizationTransform
 import com.barcodescanner.sdk.domain.pipeline.DownscaleTransform
 import com.barcodescanner.sdk.domain.pipeline.PreprocessingPipeline
@@ -36,7 +35,6 @@ internal class ScannerContainer(
 
     val pipeline: PreprocessingPipeline = pipelineOverride ?: PreprocessingPipeline.of(
         DownscaleTransform(),
-        BlurScoringTransform(),
         ContrastNormalizationTransform(),
     )
 
@@ -65,7 +63,6 @@ internal class ScannerContainer(
         OcrSkuDecoder(
             enabledSymbologies = config.enabledSymbologies,
             checksumPolicy = config.msiChecksumPolicy,
-            robustMode = config.robustMode,
             dispatcher = dispatcher,
             requireChecksum = config.msiOcrRequireChecksum,
         )

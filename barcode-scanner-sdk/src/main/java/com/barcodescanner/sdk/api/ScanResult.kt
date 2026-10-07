@@ -28,5 +28,5 @@ sealed interface ScanResult {
         val kind: ErrorKind = ErrorKind.UNKNOWN,
     ) : ScanResult
 
-    enum class ErrorKind { TRANSIENT, FATAL, TIMEOUT, UNKNOWN }
+    enum class ErrorKind { TRANSIENT, UNKNOWN }
 }

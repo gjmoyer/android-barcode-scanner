@@ -60,9 +60,6 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    buildFeatures {
-        buildConfig = true
-    }
 }
 
 // AGP 9 built-in Kotlin: jvmTarget defaults to compileOptions.targetCompatibility,

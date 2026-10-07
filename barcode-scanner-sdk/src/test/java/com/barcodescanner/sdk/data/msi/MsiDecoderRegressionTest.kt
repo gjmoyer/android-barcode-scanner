@@ -16,7 +16,7 @@ import org.robolectric.annotation.Config
  * End-to-end regression tests for the custom MSI decoder: renders synthetic
  * MSI symbols (spec encoding from [MsiCodeTable]) into bitmaps and asserts
  * full [MsiPlesseyDecoder.decode] recovery, plus unit coverage for the
- * window/soft/consensus machinery. No external files (unlike the temporary
+ * window/soft-decode machinery. No external files (unlike the temporary
  * shelf-photo probes).
  */
 @RunWith(RobolectricTestRunner::class)
@@ -111,7 +111,6 @@ class MsiDecoderRegressionTest {
         )
         val pipeline = com.barcodescanner.sdk.domain.pipeline.PreprocessingPipeline.of(
             com.barcodescanner.sdk.domain.pipeline.DownscaleTransform(),
-            com.barcodescanner.sdk.domain.pipeline.BlurScoringTransform(),
             com.barcodescanner.sdk.domain.pipeline.ContrastNormalizationTransform(),
         )
         val fused = com.barcodescanner.sdk.data.fusion.FusedDecoder(registry, pipeline, config)
@@ -145,6 +144,16 @@ class MsiDecoderRegressionTest {
             "8052",
             (defaultOut as DecodeOutcome.Success).barcodes.maxBy { it.confidence }.rawValue,
         )
+    }
+
+    @Test
+    fun nonePolicy_doesNotClaimChecksumStripped() {
+        val payload = "012345"
+        val out = decode(renderMsi(payload), policy = ScannerConfig.MsiChecksumPolicy.NONE, robust = true)
+        assertTrue("expected Success, got $out", out is DecodeOutcome.Success)
+        val best = (out as DecodeOutcome.Success).barcodes.maxBy { it.confidence }
+        assertEquals(payload, best.rawValue)
+        assertFalse("NONE strips nothing and must not claim it did", best.checksumStripped)
     }
 
     @Test

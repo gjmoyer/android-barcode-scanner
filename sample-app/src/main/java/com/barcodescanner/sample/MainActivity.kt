@@ -284,17 +284,13 @@ class MainActivity : ComponentActivity() {
                     getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
                 }
             vibrator?.let {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    it.vibrate(
-                        VibrationEffect.createOneShot(
-                            200,
-                            VibrationEffect.DEFAULT_AMPLITUDE,
-                        ),
-                    )
-                } else {
-                    @Suppress("DEPRECATION")
-                    it.vibrate(200)
-                }
+                // minSdk 28 > O: VibrationEffect is always available here.
+                it.vibrate(
+                    VibrationEffect.createOneShot(
+                        200,
+                        VibrationEffect.DEFAULT_AMPLITUDE,
+                    ),
+                )
             }
         } catch (_: Exception) {
             // Sample-app feedback must never crash a scan.

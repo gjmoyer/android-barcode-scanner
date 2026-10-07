@@ -84,9 +84,11 @@ data class ScannerConfig(
         fun enable(vararg s: Symbology) = only(*s)
 
         fun maxOrientationsTried(v: Int) = apply { maxOrientations = v }
+
+        /** Also sets [maxOrientationsTried] (4 on, 2 off) — keep calls ordered. */
         fun robustMode(v: Boolean) = apply {
             robust = v
-            if (v) maxOrientations = 4
+            maxOrientations = if (v) 4 else 2
         }
         fun decodeTimeoutMillis(v: Long) = apply { timeout = v }
         fun duplicateSuppressionMillis(v: Long) = apply { dedup = v }

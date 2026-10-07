@@ -8,6 +8,7 @@ import com.barcodescanner.sdk.api.MsiChecksumPolicy
 import com.barcodescanner.sdk.api.ScanResult
 import com.barcodescanner.sdk.api.ScannerConfigBuilder
 import com.barcodescanner.sdk.data.zxingcpp.ZXingCppBridge
+import com.barcodescanner.sdk.domain.pipeline.OrientationCandidates
 import kotlinx.coroutines.runBlocking
 import org.junit.Assume.assumeTrue
 import org.junit.Test
@@ -117,6 +118,58 @@ class DeviceMsiTest {
                 scanner.close()
             }
             bmp!!.recycle()
+        }
+    }
+
+    /**
+     * Rotation matrix over the committed DataBar fixtures: physically rotate each
+     * fixture's pixels (as a camera buffer would be stored) and tell the scanner
+     * the rotation needed to restore upright content. The full production chain
+     * (ML Kit + native zxing-cpp) must decode every combination. This is the
+     * on-device counterpart of `RotatedImageFusionTest` (JVM native-graphics) and
+     * verifies zxing's internal TryRotate routing on real hardware.
+     */
+    @Test
+    fun databarFixtures_decodeAtEveryRotation() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val appContext = instrumentation.targetContext
+        assumeTrue(
+            "zxing-cpp native lib required for DataBar rotation checks",
+            ZXingCppBridge.isAvailable,
+        )
+        val fixtures = listOf("databar-omni.png", "databar-ltd.png", "databar-exp.png")
+            .filter { instrumentation.context.assets.list("msi_samples")?.contains(it) == true }
+        assumeTrue("no committed databar fixtures found", fixtures.isNotEmpty())
+
+        val config = ScannerConfigBuilder()
+            .robustMode(true)
+            .decodeTimeoutMillis(10_000)
+            .build()
+        val scanner = BarcodeScannerFactory.create(appContext, config)
+        try {
+            for (name in fixtures) {
+                val stream = instrumentation.context.assets.open("msi_samples/$name")
+                val upright = BitmapFactory.decodeStream(stream)
+                stream.close()
+                org.junit.Assert.assertNotNull("cannot decode asset $name", upright)
+                try {
+                    for (contentRotation in listOf(0, 90, 180, 270)) {
+                        val raw = OrientationCandidates.rotate(upright!!, contentRotation)
+                        val sensorRotation = (360 - contentRotation) % 360
+                        val result = runBlocking { scanner.scanBitmap(raw, sensorRotation) }
+                        org.junit.Assert.assertTrue(
+                            "$name contentRotation=$contentRotation sensorRotation=$sensorRotation " +
+                                "must decode, got $result",
+                            result is ScanResult.Success,
+                        )
+                        if (raw !== upright) raw.recycle()
+                    }
+                } finally {
+                    upright!!.recycle()
+                }
+            }
+        } finally {
+            scanner.close()
         }
     }
 }

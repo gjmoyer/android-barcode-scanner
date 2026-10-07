@@ -21,7 +21,14 @@ class DecoderRegistry(
 
     fun register(decoder: BarcodeDecoder) {
         synchronized(lock) {
-            decoders = decoders.filterNot { it.name == decoder.name } + decoder
+            // Re-registering a name REPLACES in place: priority order stays
+            // "first registered = highest priority" even after upgrades.
+            val idx = decoders.indexOfFirst { it.name == decoder.name }
+            decoders = if (idx >= 0) {
+                decoders.toMutableList().also { it[idx] = decoder }
+            } else {
+                decoders + decoder
+            }
         }
     }
 

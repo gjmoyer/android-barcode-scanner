@@ -46,7 +46,6 @@ internal object ZXingCppBridge {
      *   rotated / white-on-black labels.
      * @return JSON array string (possibly "[]").
      */
-    @Suppress("unused")
     fun decodeBitmap(
         pixels: IntArray,
         width: Int,

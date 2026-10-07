@@ -15,7 +15,6 @@ import android.graphics.Bitmap
  *   ORIGINAL capture upright (one of 0, 90, 180, 270). 0 = already upright.
  * @param timestampMillis Elapsed-realtime millis (see SystemClock.elapsedRealtime);
  *   used for duplicate suppression and timeout policy. Wall-clock must NOT be used.
- * @param sharpnessScore Optional 0..1 focus quality; null = unknown.
  * @param attemptRotation Extra clockwise physical rotation already applied to
  *   [bitmap] by the multi-orientation retry loop (0 for the base frame).
  */
@@ -23,7 +22,6 @@ data class ScanFrame(
     val bitmap: Bitmap,
     val rotationDegrees: Int = 0,
     val timestampMillis: Long = android.os.SystemClock.elapsedRealtime(),
-    val sharpnessScore: Float? = null,
     val attemptRotation: Int = 0,
 ) {
     init {
@@ -32,9 +30,6 @@ data class ScanFrame(
         }
         require(attemptRotation in setOf(0, 90, 180, 270)) {
             "attemptRotation must be one of 0, 90, 180, 270, was $attemptRotation"
-        }
-        sharpnessScore?.let {
-            require(it in 0f..1f) { "sharpnessScore must be in 0..1, was $it" }
         }
     }
 
@@ -50,4 +45,15 @@ data class ScanFrame(
 
     /** True when this candidate was physically rotated from the base frame. */
     val isRotatedCandidate: Boolean get() = attemptRotation != 0
+
+    /**
+     * This candidate's rotation relative to the sensor-compensated upright view.
+     * 0 = upright, 90/270 = sideways, 180 = upside-down. Use this (never a raw
+     * `attemptRotation` compare) for orientation flags: for a portrait frame
+     * (`rotationDegrees=90`) the upside-down candidate is attemptRotation=270.
+     */
+    val relativeRotation: Int get() = (attemptRotation - rotationDegrees + 360) % 360
+
+    /** True when this candidate is the upside-down (180° relative) view. */
+    val isUpsideDownCandidate: Boolean get() = relativeRotation == 180
 }

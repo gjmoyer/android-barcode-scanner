@@ -33,7 +33,27 @@ interface BarcodeDecoder {
 
     /** Releases native clients / executors. Idempotent. */
     fun close() = Unit
+
+    /**
+     * True when the engine resolves rotation itself: ML Kit applies the
+     * [com.barcodescanner.sdk.domain.model.ScanFrame.effectiveRotation] hint,
+     * zxing-cpp uses native TryRotate. Fusion then feeds it only the primary
+     * (relative rotation 0) candidate — a physically rotated copy is an
+     * equivalent input for such engines, so per-candidate calls are duplicate
+     * work (robust mode used to multiply them). Engines that only decode the
+     * pixel layout they are handed (MSI's scanline decoder relies on physical
+     * rotations for denser sideways sampling) leave this false and receive
+     * every orientation candidate.
+     */
+    val resolvesOrientationInternally: Boolean get() = false
 }
+
+/**
+ * A [BarcodeDecoder] that is only worth running after every primary engine
+ * missed (expensive model inference, text fallback). Fusion defers these out of
+ * the per-orientation loop and runs them at most ONCE per frame.
+ */
+interface LastResortDecoder : BarcodeDecoder
 
 /** Result of a single decoder attempt. */
 sealed interface DecodeOutcome {

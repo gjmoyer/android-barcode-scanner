@@ -41,9 +41,10 @@ import kotlin.math.abs
  *  START = wide bar + narrow space (2 runs); STOP = narrow bar + wide space +
  *  narrow bar (3 runs). Both are stripped before digit slicing.
  *
- * Status: code table + guards follow the published spec but are marked
- * EXPERIMENTAL until the Zint-rendered verification vectors land
- * (see MsiCodeTable docs). Checksum gating keeps false accepts low meanwhile.
+ * Status: code table + guards + checksums are VERIFIED end-to-end against
+ * independent Zint-rendered fixtures (publication vectors 1234567→4, 8052→3);
+ * see MsiCodeTable docs and MsiPristineTest. Checksum gating keeps false
+ * accepts low on top of the table correctness.
  */
 class MsiPlesseyDecoder(
     private val checksumPolicy: ScannerConfig.MsiChecksumPolicy =
@@ -120,7 +121,12 @@ class MsiPlesseyDecoder(
         }
         val h = maxOf(1, (src.height * (width.toFloat() / src.width)).toInt())
         val bmp = android.graphics.Bitmap.createScaledBitmap(src, width, h, true)
-        return GrayCopy(MsiBinarizer.toGray(bmp), bmp, width, h)
+        return try {
+            GrayCopy(MsiBinarizer.toGray(bmp), bmp, width, h)
+        } catch (t: Throwable) {
+            runCatching { bmp.recycle() }
+            throw t
+        }
     }
 
     /**
@@ -234,7 +240,11 @@ class MsiPlesseyDecoder(
                             votes[key] = (votes[key] ?: 0) + 1
                             if (rev) revVotes[key] = (revVotes[key] ?: 0) + 1
                             details.getOrPut(key) {
-                                CandidateDetail(full = candidate, checksumStripped = true)
+                                CandidateDetail(
+                                    full = candidate,
+                                    checksumStripped = validation.payloadWithoutChecksum.length !=
+                                        candidate.length,
+                                )
                             }
                         }
                         for (candidate in scanlineCandidates(runs)) consider(candidate, false)
@@ -255,7 +265,7 @@ class MsiPlesseyDecoder(
                         winner.key.length >= maxOf(minPayload, minPayloadDigits)
                     ) {
                         val rev = revVotes[winner.key] ?: 0
-                        val upsideDown = frame.attemptRotation == 180 || rev * 2 > winner.value
+                        val upsideDown = frame.isUpsideDownCandidate || rev * 2 > winner.value
                         success(winner.key, details.getValue(winner.key), frame, upsideDown)
                     } else {
                         DecodeOutcome.NotFound("MSI: no checksum-valid scanline")
@@ -272,7 +282,7 @@ class MsiPlesseyDecoder(
         payload: String,
         detail: CandidateDetail,
         frame: ScanFrame,
-        upsideDown: Boolean = frame.attemptRotation == 180,
+        upsideDown: Boolean = frame.isUpsideDownCandidate,
     ): DecodeOutcome {
         return DecodeOutcome.Success(
             listOf(
@@ -318,24 +328,6 @@ class MsiPlesseyDecoder(
             if (count == 1) (top + bottom) / 2
             else top + ((bottom - top) * i / (count - 1))
         }
-    }
-
-    /** Vertical scanlines (for 90/270° labels in robust mode); returned as row-equivalents. */
-    internal fun verticalScanlines(img: MsiBinarizer.BinaryImage, count: Int): List<BooleanArray> {
-        val cols = mutableListOf<BooleanArray>()
-        if (img.width <= 0 || img.height <= 0) return cols
-        val left = (img.width * 0.05).toInt()
-        val right = (img.width * 0.95).toInt()
-        if (right <= left) {
-            cols += BooleanArray(img.height) { y -> img.get(img.width / 2, y) }
-            return cols
-        }
-        for (i in 0 until count) {
-            val x = if (count == 1) (left + right) / 2
-            else left + ((right - left) * i / (count - 1))
-            cols += BooleanArray(img.height) { y -> img.get(x.coerceIn(0, img.width - 1), y) }
-        }
-        return cols
     }
 
     // ------------------------------------------------------------- scanline 1D
@@ -636,14 +628,6 @@ class MsiPlesseyDecoder(
         return s.reversed()
     }
 
-    /** Backward-compat overload: reversed=true reuses orientation expansion; kept for tests. */
-    internal fun decodeScanline(row: BooleanArray, reversed: Boolean): String? {
-        // NOTE: reversed pixel streams keep STOP-first guards and mirrored digit
-        // bit order, so they only decode palindromic payloads. Callers should use
-        // the 180° orientation candidate instead. Preserved for unit tests.
-        return decodeScanline(if (reversed) row.reversedArray() else row)
-    }
-
     internal data class Run(val isBlack: Boolean, val length: Float)
 
     internal fun runLengths(row: BooleanArray): List<Run>? {
@@ -793,11 +777,7 @@ class MsiPlesseyDecoder(
         val bounded = mutableListOf<Bounded>()
         bounded += Bounded(lead.toFloat(), (alt[0].v + alt[1].v) / 2f)
         for (k in edges.indices) {
-            val level = if (k < alt.size - 1) {
-                (alt[k].v + alt[k + 1].v) / 2f
-            } else {
-                (alt[alt.size - 2].v + alt[alt.size - 1].v) / 2f
-            }
+            val level = (alt[k].v + alt[k + 1].v) / 2f
             bounded += Bounded(edges[k], level)
         }
         bounded += Bounded(
@@ -845,10 +825,17 @@ class MsiPlesseyDecoder(
     private fun estimateBackground(profile: IntArray): Int {
         // 70th percentile of the whole profile: background dominates (bars are
         // narrow dips), and dark shelf/text at the ends can't drag it down the
-        // way an ends-median can.
+        // way an ends-median can. Histogram (not sort): called per scanline/profile.
         if (profile.isEmpty()) return 255
-        val sorted = profile.sorted()
-        return sorted[(sorted.size * 7 / 10).coerceIn(0, sorted.size - 1)]
+        val hist = IntArray(256)
+        for (v in profile) hist[v.coerceIn(0, 255)]++
+        val target = profile.size * 7 / 10
+        var acc = 0
+        for (i in 0..255) {
+            acc += hist[i]
+            if (acc >= target) return i
+        }
+        return 255
     }
 
     /**
@@ -884,13 +871,6 @@ class MsiPlesseyDecoder(
             i++
         }
         return out
-    }
-
-    /** Legacy overload for tests (absolute 1px rule). Prefer [deSpeckle] with cut. */
-    private fun deSpeckle(runs: List<Run>): List<Run> {
-        if (runs.isEmpty()) return runs
-        val cut = splitThreshold(runs.map { it.length })
-        return deSpeckle(runs, cut)
     }
 
     /**

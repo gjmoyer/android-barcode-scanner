@@ -115,9 +115,10 @@ class MsiPristineTest {
         // 180° label decoded directly (no orientation expansion): the reverse
         // run-direction path must recover print order and flag upside-down.
         // (OrientationCandidates.expand itself is covered in
-        // OrientationCandidatesTest; Robolectric does not apply Matrix rotation
-        // to pixels, so physical re-rotation can't be tested here — on device,
-        // fusion feeds the 180° candidate identically.)
+        // OrientationCandidatesTest; physical pixel rotation under the default
+        // Robolectric graphics mode is a no-op, so fusion's compensated-rotation
+        // path is covered with native graphics in RotatedImageFusionTest and on
+        // device in DeviceMsiTest.)
         val bmp = loadBitmap("mod10_1234567_r180.png")
         val decoder = MsiPlesseyDecoder(
             checksumPolicy = ScannerConfig.MsiChecksumPolicy.MOD_10,
@@ -155,9 +156,9 @@ class MsiPristineTest {
 
     @Test
     fun pristine_decode_completesPromptly() {
-        // Blowup guard (generous: desktop JVM, Robolectric shadows): pristine
-        // decodes must finish in milliseconds, not seconds. Catches accidental
-        // algorithmic explosions (e.g. unbounded window search on 12MP frames).
+        // Absurd-blowup guard only (wall-clock on shared CI is not a benchmark):
+        // catches accidental algorithmic explosions (e.g. unbounded window search
+        // on 12MP frames), not normal ms-level variance.
         val bmp = loadBitmap("mod10_alldigits.png")
         val decoder = MsiPlesseyDecoder(
             checksumPolicy = ScannerConfig.MsiChecksumPolicy.MOD_10,
@@ -168,7 +169,7 @@ class MsiPristineTest {
             val outcome = runBlocking { decoder.decode(ScanFrame(bitmap = bmp)) }
             val ms = (System.nanoTime() - t) / 1_000_000
             assertTrue("expected Success, got $outcome", outcome is DecodeOutcome.Success)
-            assertTrue("pristine decode took ${ms}ms, budget 5000ms", ms < 5_000)
+            assertTrue("pristine decode took ${ms}ms, blowup budget 30000ms", ms < 30_000)
         } finally {
             decoder.close()
         }

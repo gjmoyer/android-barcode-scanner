@@ -16,19 +16,20 @@ import kotlinx.coroutines.flow.Flow
  * scanner.close()
  * ```
  *
- * Implementations must be thread-safe and idempotent on [close].
+ * Implementations must be thread-safe. [close] is idempotent; decode/camera
+ * calls made after [close] throw [IllegalStateException] (programming error).
  */
 interface BarcodeScannerFacade : AutoCloseable {
     /** Hot flow of results for live camera mode. */
     val results: Flow<ScanResult>
 
-    /** One-shot decode of a bitmap (gallery import, tests). */
+    /** One-shot decode of a bitmap (gallery import, tests). Throws after [close]. */
     suspend fun scanBitmap(bitmap: Bitmap, rotationDegrees: Int = 0): ScanResult
 
-    /** One-shot decode of an already-wrapped frame (advanced use). */
+    /** One-shot decode of an already-wrapped frame (advanced use). Throws after [close]. */
     suspend fun scanFrame(frame: ScanFrame): ScanResult
 
-    /** Live CameraX mode; binds to [lifecycleOwner]. */
+    /** Live CameraX mode; binds to [lifecycleOwner]. Throws after [close]. */
     fun startCamera(
         lifecycleOwner: androidx.lifecycle.LifecycleOwner,
         previewView: androidx.camera.view.PreviewView,

@@ -4,13 +4,14 @@ import android.graphics.Bitmap
 import android.graphics.Rect
 import com.barcodescanner.sdk.data.msi.MsiBinarizer
 import com.barcodescanner.sdk.data.msi.MsiChecksumValidator
-import com.barcodescanner.sdk.domain.decoder.BarcodeDecoder
 import com.barcodescanner.sdk.domain.decoder.DecodeOutcome
 import com.barcodescanner.sdk.domain.decoder.DecoderException
+import com.barcodescanner.sdk.domain.decoder.LastResortDecoder
 import com.barcodescanner.sdk.domain.model.DecodedBarcode
 import com.barcodescanner.sdk.domain.model.ScanFrame
 import com.barcodescanner.sdk.domain.model.ScannerConfig
 import com.barcodescanner.sdk.domain.model.Symbology
+import com.barcodescanner.sdk.domain.pipeline.OrientationCandidates
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -21,8 +22,9 @@ import java.util.concurrent.atomic.AtomicBoolean
  * MSI SKU text fallback ("OCR once bar decoding missed").
  *
  * Shelf tags print the SKU next to the barcode; when blur/glare/occlusion defeat
- * bar decoding, the printed digits often still read. This decoder runs LAST in the
- * fusion chain (only when MSI is enabled and every bar engine missed) and:
+ * bar decoding, the printed digits often still read. This decoder is a
+ * [LastResortDecoder]: fusion runs it at most once per frame, only when MSI is
+ * enabled and every bar engine missed, and it:
  *
  *  1. finds content bands by edge density (lenient gate: a frame with no dense
  *     structure has no label and is rejected without paying for OCR),
@@ -55,7 +57,6 @@ class OcrSkuDecoder(
     enabledSymbologies: Set<Symbology>,
     private val checksumPolicy: ScannerConfig.MsiChecksumPolicy =
         ScannerConfig.MsiChecksumPolicy.MOD_10,
-    private val robustMode: Boolean = false,
     private val dispatcher: CoroutineDispatcher = Dispatchers.Default,
     /**
      * False (default): emit the best plain 7+ digit run as printed (confidence
@@ -64,7 +65,7 @@ class OcrSkuDecoder(
      */
     private val requireChecksum: Boolean = false,
     private val ocrEngineProvider: () -> OcrEngine = { MlKitOcrEngine() },
-) : BarcodeDecoder {
+) : LastResortDecoder {
 
     override val name: String = NAME
 
@@ -90,21 +91,27 @@ class OcrSkuDecoder(
         if (supportedSymbologies.isEmpty()) {
             return@withContext DecodeOutcome.NotFound("MSI not enabled")
         }
+        // Upright the frame first so band detection and ML Kit boxes share one
+        // coordinate space: ML Kit reports boxes rotated-upright even when fed a
+        // rotation hint, while bands are computed on raw pixels.
+        val rotation = frame.effectiveRotation
+        val upright = if (rotation == 0) null else OrientationCandidates.rotate(frame.bitmap, rotation)
+        var cancelled = false
         try {
-            val working = downscaleIfNeeded(frame.bitmap)
-            val owned = working !== frame.bitmap
+            val source = upright ?: frame.bitmap
+            val working = downscaleIfNeeded(source)
             try {
                 val gray = MsiBinarizer.toGray(working)
                 val bands = denseBands(gray, working.width, working.height)
                 if (bands.isEmpty()) {
                     return@withContext DecodeOutcome.NotFound("no content bands for OCR anchoring")
                 }
-                val lines = engine().recognize(frame.bitmap, frame.effectiveRotation)
+                val lines = engine().recognize(source, 0)
                 if (lines.isEmpty()) {
                     return@withContext DecodeOutcome.NotFound("OCR found no text")
                 }
-                // Bands are in working coords; ML Kit boxes are in frame coords.
-                val scale = frame.bitmap.height.toFloat() / working.height
+                // Bands are in working coords; ML Kit boxes are in source coords.
+                val scale = source.height.toFloat() / working.height
                 val pick = pickSku(lines, bands, scale)
                     ?: return@withContext DecodeOutcome.NotFound("no SKU-like digit run")
                 val rotated = frame.isRotatedCandidate
@@ -120,19 +127,23 @@ class OcrSkuDecoder(
                             boundingBox = if (rotated) null else pick.box,
                             engineName = NAME,
                             checksumStripped = false,
-                            isUpsideDown = frame.attemptRotation == 180,
+                            isUpsideDown = frame.isUpsideDownCandidate,
                         ),
                     ),
                 )
             } finally {
-                if (owned) working.recycle()
+                if (working !== source) working.recycle()
             }
         } catch (e: CancellationException) {
+            cancelled = true
             throw e
         } catch (e: DecoderException) {
             DecodeOutcome.Error(e, recoverable = false)
         } catch (t: Throwable) {
             DecodeOutcome.Error(DecoderException("OCR fallback failed", t), recoverable = true)
+        } finally {
+            // A cancelled ML Kit OCR task may still be reading the upright copy.
+            if (!cancelled) runCatching { upright?.recycle() }
         }
     }
 

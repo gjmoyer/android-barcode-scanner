@@ -58,19 +58,19 @@ Scandit checksum enum (Mod10/1010/11/1110 naming), tc-lib-barcode (family contex
 
 **Blur / defocus / low contrast.**
 1. `DownscaleTransform` (stage 0, nearest-neighbor) bounds work to ≤1280px long edge.
-2. `BlurScoringTransform` (single-getPixels Laplacian variance) scores, never drops.
-3. `ContrastNormalizationTransform` (2/98-percentile stretch) normalizes exposure.
-4. `MsiBinarizer.binarizeVariants` tries Otsu, Otsu±18, adaptive-mean (integral image)
+2. `ContrastNormalizationTransform` (2/98-percentile stretch) normalizes exposure.
+3. `MsiBinarizer.binarizeVariants` tries Otsu, Otsu±18, adaptive-mean (integral image)
    — up to 4 variants in robust mode. Each variant × each scanline votes independently.
-5. Per-scanline k-means (k=2) narrow/wide split absorbs ±module distortion; `deSpeckle`
+4. Per-scanline k-means (k=2) narrow/wide split absorbs ±module distortion; `deSpeckle`
    is relative (≤25% of cut, neighbors ≥3×) so far-field 1–2px narrow bars survive;
    MSI working copy downscales with `filter=false`.
-6. `trySingleBitRepair` flips each of 8 bits once. Table min Hamming distance is 2
+5. `trySingleBitRepair` flips each of 8 bits once. Table min Hamming distance is 2
    (computed over all 45 pairs; 15 pairs at distance 2, none at 1), so a 1-bit error
    never lands exactly on another digit — but ~80/256 random patterns sit within 1 flip
    of *some* digit (≈31%), and several corruptions are ambiguous (e.g. '5'+bit3 →
    {'1','5'} → repair returns null). Hence repair + checksum + cross-scanline voting:
-   2+ agreeing scanlines → confidence 1.0; single vote → 0.75; NONE policy requires 2 votes.
+   2+ agreeing scanlines → confidence 1.0 (single votes are withheld; NONE policy
+   requires 2 votes too).
 
 **Rotation / upside-down.**
 - Fusion `OrientationCandidates` expands 0°→180°→90°→270° (default 2, robust 4).

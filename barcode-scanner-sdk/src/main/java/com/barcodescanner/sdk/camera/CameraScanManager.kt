@@ -48,6 +48,8 @@ internal class CameraScanManager(
     private val onFrame: suspend (ScanFrame) -> Unit,
 ) {
     private var cameraProvider: ProcessCameraProvider? = null
+    private var previewUseCase: Preview? = null
+    private var analysisUseCase: ImageAnalysis? = null
     private var analysisExecutor: ExecutorService? = null
 
     /** Single-flight gate: true while a decode is in flight. */
@@ -73,10 +75,23 @@ internal class CameraScanManager(
     fun stop() {
         stopped = true
         decodeInFlight.set(false)
-        runCatching { cameraProvider?.unbindAll() }
+        unbindUseCases()
         cameraProvider = null
         runCatching { analysisExecutor?.shutdownNow() }
         analysisExecutor = null
+    }
+
+    /**
+     * Unbinds ONLY this manager's use cases. Never `unbindAll()`: the
+     * ProcessCameraProvider is process-wide and hosts may have their own
+     * preview/video use cases bound to it.
+     */
+    private fun unbindUseCases() {
+        val provider = cameraProvider ?: return
+        val cases = listOfNotNull(previewUseCase, analysisUseCase)
+        if (cases.isNotEmpty()) runCatching { provider.unbind(*cases.toTypedArray()) }
+        previewUseCase = null
+        analysisUseCase = null
     }
 
     @SuppressLint("UnsafeOptInUsageError")
@@ -86,6 +101,7 @@ internal class CameraScanManager(
         previewView: PreviewView,
     ) {
         val executor = analysisExecutor ?: return
+        unbindUseCases()
         val preview = Preview.Builder().build().also {
             it.surfaceProvider = previewView.surfaceProvider
         }
@@ -123,7 +139,8 @@ internal class CameraScanManager(
                 }
             }
         }
-        provider.unbindAll()
+        previewUseCase = preview
+        analysisUseCase = analysis
         provider.bindToLifecycle(
             lifecycleOwner,
             CameraSelector.DEFAULT_BACK_CAMERA,

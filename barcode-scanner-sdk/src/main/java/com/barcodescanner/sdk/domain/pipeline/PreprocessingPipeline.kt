@@ -1,6 +1,8 @@
 package com.barcodescanner.sdk.domain.pipeline
 
 import com.barcodescanner.sdk.domain.model.ScanFrame
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 
 /**
  * A single preprocessing step: denoise, normalize rotation, enhance contrast, etc.
@@ -17,20 +19,26 @@ fun interface FrameTransform {
 /**
  * Ordered chain of [FrameTransform]s applied before decoding.
  *
- * The default chain (see [PreprocessingPipelines.default]) handles the
- * robustness requirements — blur, rotation, upside-down, low contrast:
+ * The default chain (assembled in ScannerContainer) handles the robustness
+ * requirements — bounded scale and low contrast:
  *
- *  1. Sharpness scoring (informational; weak frames are still attempted, just ranked lower).
+ *  1. Downscale to a bounded long edge (narrow bars survive nearest-neighbor).
  *  2. Grayscale + contrast normalization (cheap, big win for MSI/DataBar narrow bars).
  *  3. Multi-orientation expansion happens in the fusion decoder, not here, so this
  *     pipeline stays single-frame in / single-frame out.
+ *
+ * [process] checks cancellation between transforms so the fusion decode timeout
+ * bounds preprocessing too.
  */
 class PreprocessingPipeline(
     private val transforms: List<FrameTransform>,
 ) {
     suspend fun process(frame: ScanFrame): ScanFrame {
         var current = frame
-        for (t in transforms) current = t.transform(current)
+        for (t in transforms) {
+            currentCoroutineContext().ensureActive()
+            current = t.transform(current)
+        }
         return current
     }
 

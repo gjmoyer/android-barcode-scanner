@@ -1,5 +1,6 @@
 package com.barcodescanner.sdk.data.mlkit
 
+import android.graphics.Bitmap
 import com.barcodescanner.sdk.domain.decoder.BarcodeDecoder
 import com.barcodescanner.sdk.domain.decoder.DecodeOutcome
 import com.barcodescanner.sdk.domain.decoder.DecoderException
@@ -10,6 +11,7 @@ import com.google.mlkit.vision.barcode.BarcodeScanner
 import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.common.InputImage
+import com.google.android.gms.tasks.CancellationTokenSource
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.tasks.await
@@ -37,9 +39,16 @@ class MLKitDecoder(
     private val clientProvider: (BarcodeScannerOptions) -> BarcodeScanner = {
         BarcodeScanning.getClient(it)
     },
+    /** Seam for unit tests: ML Kit's InputImage needs an initialized MlKitContext. */
+    private val imageProvider: (Bitmap, Int) -> InputImage = { bitmap, rotation ->
+        InputImage.fromBitmap(bitmap, rotation)
+    },
 ) : BarcodeDecoder {
 
     override val name: String = NAME
+
+    /** ML Kit normalizes the view via the rotation hint; any candidate is the same image. */
+    override val resolvesOrientationInternally: Boolean = true
 
     override val supportedSymbologies: Set<Symbology> =
         enabledSymbologies.intersect(Symbology.mlKitNatives)
@@ -74,8 +83,11 @@ class MLKitDecoder(
             return@withContext DecodeOutcome.NotFound("no ML Kit symbologies enabled")
         }
         try {
-            val image = InputImage.fromBitmap(frame.bitmap, frame.effectiveRotation)
-            val barcodes = client().process(image).await()
+            val image = imageProvider(frame.bitmap, frame.effectiveRotation)
+            // CancellationTokenSource rides coroutine cancellation into the ML Kit
+            // Task (plain await() leaves the Task running after timeout).
+            val cts = CancellationTokenSource()
+            val barcodes = client().process(image).await(cts)
             if (barcodes.isEmpty()) {
                 DecodeOutcome.NotFound("ML Kit found no barcode")
             } else {
@@ -95,7 +107,7 @@ class MLKitDecoder(
                         boundingBox = if (rotated) null else b.boundingBox,
                         cornerPoints = if (rotated) null else b.cornerPoints?.toList(),
                         engineName = NAME,
-                        isUpsideDown = frame.attemptRotation == 180,
+                        isUpsideDown = frame.isUpsideDownCandidate,
                     )
                 }
                 if (mapped.isEmpty()) DecodeOutcome.NotFound("ML Kit results filtered out")

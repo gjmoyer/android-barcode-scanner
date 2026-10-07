@@ -42,6 +42,9 @@ class ZXingCppDecoder(
 
     override val name: String = NAME
 
+    /** Native TryRotate already sweeps 0/90/180/270 inside one call. */
+    override val resolvesOrientationInternally: Boolean = true
+
     override val supportedSymbologies: Set<Symbology> = buildSet {
         if (Symbology.DATA_BAR in enabledSymbologies) add(Symbology.DATA_BAR)
         if (Symbology.DATA_BAR_EXPANDED in enabledSymbologies) add(Symbology.DATA_BAR_EXPANDED)
@@ -109,7 +112,8 @@ class ZXingCppDecoder(
         return names.joinToString(",")
     }
 
-    private fun parse(json: String, frame: ScanFrame): DecodeOutcome {
+    /** Parses the native JSON array into SDK barcodes (internal for tests). */
+    internal fun parse(json: String, frame: ScanFrame): DecodeOutcome {
         val arr = runCatching { JSONArray(json) }.getOrNull()
             ?: return DecodeOutcome.NotFound("invalid native JSON")
         if (arr.length() == 0) return DecodeOutcome.NotFound("zxing found no barcode")
@@ -131,7 +135,7 @@ class ZXingCppDecoder(
                 // Fixed 0.9 documents the fusion coupling (minConfidence > 0.9 disables ZXing).
                 confidence = 0.9f,
                 engineName = NAME,
-                isUpsideDown = frame.attemptRotation == 180,
+                isUpsideDown = frame.isUpsideDownCandidate,
             )
         }
         return if (out.isEmpty()) DecodeOutcome.NotFound("zxing results filtered out")
@@ -178,6 +182,3 @@ class ZXingCppDecoder(
         const val NAME = "ZXingCpp"
     }
 }
-
-/** Convenience alias: DataBar decoding IS the ZXing-C++ path (documented for host apps). */
-typealias DatabarDecoder = ZXingCppDecoder

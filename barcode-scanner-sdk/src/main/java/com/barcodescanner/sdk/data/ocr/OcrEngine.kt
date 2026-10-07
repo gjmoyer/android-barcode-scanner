@@ -2,6 +2,7 @@ package com.barcodescanner.sdk.data.ocr
 
 import android.graphics.Bitmap
 import android.graphics.Rect
+import com.google.android.gms.tasks.CancellationTokenSource
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
@@ -53,7 +54,10 @@ class MlKitOcrEngine : OcrEngine {
         withContext(Dispatchers.Default) {
             try {
                 val image = InputImage.fromBitmap(bitmap, rotationDegrees)
-                val text = client().process(image).await()
+                // CancellationTokenSource rides coroutine cancellation into the ML
+                // Kit Task (plain await() leaves the Task running after timeout).
+                val cts = CancellationTokenSource()
+                val text = client().process(image).await(cts)
                 val out = mutableListOf<OcrLine>()
                 for (block in text.textBlocks) {
                     for (line in block.lines) {
