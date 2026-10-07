@@ -56,8 +56,13 @@ class MsiDecoderRegressionTest {
         bitmap: Bitmap,
         policy: ScannerConfig.MsiChecksumPolicy = ScannerConfig.MsiChecksumPolicy.MOD_10,
         robust: Boolean = false,
+        stripChecksum: Boolean = true,
     ): DecodeOutcome = runBlocking {
-        MsiPlesseyDecoder(checksumPolicy = policy, robustMode = robust).decode(ScanFrame(bitmap = bitmap))
+        MsiPlesseyDecoder(
+            checksumPolicy = policy,
+            robustMode = robust,
+            stripChecksum = stripChecksum,
+        ).decode(ScanFrame(bitmap = bitmap))
     }
 
     @Test
@@ -85,6 +90,20 @@ class MsiDecoderRegressionTest {
         assertTrue("expected Success, got $out", out is DecodeOutcome.Success)
         val best = (out as DecodeOutcome.Success).barcodes.maxBy { it.confidence }
         assertEquals(payload, best.rawValue)
+    }
+
+    @Test
+    fun noStrip_emitsFullValidatedCodeword() {
+        // Host-interprets contract: validation still gates (unvalidated windows
+        // never emit), but rawValue carries the checks and nothing is claimed
+        // stripped — e.g. double-Mod10 labels read under MOD_10 arrive whole.
+        val payload = "012345"
+        val full = payload + MsiChecksumValidator.mod10Check(payload)
+        val out = decode(renderMsi(full), stripChecksum = false)
+        assertTrue("expected Success, got $out", out is DecodeOutcome.Success)
+        val best = (out as DecodeOutcome.Success).barcodes.maxBy { it.confidence }
+        assertEquals(full, best.rawValue)
+        assertFalse(best.checksumStripped)
     }
 
     @Test

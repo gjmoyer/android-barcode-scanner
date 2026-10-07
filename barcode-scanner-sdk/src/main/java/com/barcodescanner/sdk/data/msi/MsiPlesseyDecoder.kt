@@ -58,6 +58,14 @@ class MsiPlesseyDecoder(
      * Hosts scanning shelf SKUs should raise this to ~6.
      */
     private val minPayloadDigits: Int = MsiCodeTable.MIN_DIGITS,
+    /**
+     * Emit the full validated codeword WITH check digits (host interprets).
+     * Default true preserves the stripped-payload contract; false still
+     * validates every window under [checksumPolicy] (precision gate stays —
+     * only the stripping is skipped) and reports `checksumStripped=false`.
+     * Length floors then count codeword digits, not payload digits.
+     */
+    private val stripChecksum: Boolean = true,
 ) : BarcodeDecoder {
 
     override val name: String = NAME
@@ -299,14 +307,16 @@ class MsiPlesseyDecoder(
                             val validation = MsiChecksumValidator.validate(candidate, checksumPolicy)
                             if (!validation.valid) return
                             statValidated++
-                            val key = validation.payloadWithoutChecksum
+                            // Stripping is an output contract, not a precision
+                            // gate: validation above already rejected junk.
+                            val key = if (stripChecksum) validation.payloadWithoutChecksum else candidate
                             votes[key] = (votes[key] ?: 0) + 1
                             if (rev) revVotes[key] = (revVotes[key] ?: 0) + 1
                             details.getOrPut(key) {
                                 CandidateDetail(
                                     full = candidate,
-                                    checksumStripped = validation.payloadWithoutChecksum.length !=
-                                        candidate.length,
+                                    checksumStripped = stripChecksum &&
+                                        validation.payloadWithoutChecksum.length != candidate.length,
                                 )
                             }
                         }

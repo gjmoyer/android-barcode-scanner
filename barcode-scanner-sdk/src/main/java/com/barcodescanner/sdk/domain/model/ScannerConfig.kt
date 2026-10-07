@@ -41,6 +41,17 @@ data class ScannerConfig(
     /** Minimum confidence to emit a result. NOTE: >0.9 disables ZXing, >0.95 disables ML Kit. */
     val minConfidence: Float,
     /**
+     * Strip the validated check digit(s) from emitted MSI bar values (default
+     * true: `rawValue` is the SKU payload, `checksumStripped` true). Set false
+     * when the host interprets the codeword itself: the SDK still validates
+     * under [msiChecksumPolicy] (unvalidated windows never emit), but `rawValue`
+     * carries the full codeword WITH check digits and `checksumStripped` is
+     * false — e.g. double-Mod10 labels read under MOD_10 arrive as SKU+C1 and
+     * the host strips per its own label spec. OCR text reads are always
+     * as-printed either way.
+     */
+    val msiStripChecksum: Boolean = true,
+    /**
      * zxing-cpp `TryHarder` override. Null (default) is thorough. Set false to
      * trade DataBar recall for speed on easy frames; the MSI effort is always
      * thorough (extra binarizations + vertical scanlines + wider voting).
@@ -134,6 +145,7 @@ data class ScannerConfig(
         private var dedup = 1_500L
         private var msi = MsiChecksumPolicy.MOD_10
         private var msiMinDigits = 3
+        private var msiStripCheck = true
         private var msiOcrChecksum = false
         private var minConf = 0.5f
         private var zxingHarder: Boolean? = null
@@ -157,6 +169,8 @@ data class ScannerConfig(
         fun duplicateSuppressionMillis(v: Long) = apply { dedup = v }
         fun msiChecksumPolicy(v: MsiChecksumPolicy) = apply { msi = v }
         fun msiMinPayloadDigits(v: Int) = apply { msiMinDigits = v }
+        /** Emit full MSI codewords with checks (see [ScannerConfig.msiStripChecksum]). */
+        fun msiStripChecksum(v: Boolean) = apply { msiStripCheck = v }
         fun msiOcrRequireChecksum(v: Boolean) = apply { msiOcrChecksum = v }
         fun minConfidence(v: Float) = apply { minConf = v }
         /** Decouple zxing-cpp TryHarder from the always-thorough default; null is thorough. */
@@ -182,6 +196,7 @@ data class ScannerConfig(
                 duplicateSuppressionMillis = dedup,
                 msiChecksumPolicy = msi,
                 msiMinPayloadDigits = msiMinDigits,
+                msiStripChecksum = msiStripCheck,
                 msiOcrRequireChecksum = msiOcrChecksum,
                 minConfidence = minConf,
                 zxingTryHarder = zxingHarder,

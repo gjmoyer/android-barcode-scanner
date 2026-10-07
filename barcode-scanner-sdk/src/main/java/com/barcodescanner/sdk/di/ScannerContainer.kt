@@ -63,6 +63,7 @@ internal class ScannerContainer(
             robustMode = true,
             dispatcher = dispatcher,
             minPayloadDigits = config.msiMinPayloadDigits,
+            stripChecksum = config.msiStripChecksum,
         )
     }
 
