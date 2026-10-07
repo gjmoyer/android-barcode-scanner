@@ -56,8 +56,14 @@ class MlKitOcrEngine : OcrEngine {
                 val image = InputImage.fromBitmap(bitmap, rotationDegrees)
                 // CancellationTokenSource rides coroutine cancellation into the ML
                 // Kit Task (plain await() leaves the Task running after timeout).
+                // Cancelling in `finally` keeps a timed-out OCR task from reading
+                // the upright bitmap copy fusion is trying to recycle.
                 val cts = CancellationTokenSource()
-                val text = client().process(image).await(cts)
+                val text = try {
+                    client().process(image).await(cts)
+                } finally {
+                    runCatching { cts.cancel() }
+                }
                 val out = mutableListOf<OcrLine>()
                 for (block in text.textBlocks) {
                     for (line in block.lines) {

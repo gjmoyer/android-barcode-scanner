@@ -60,10 +60,12 @@ class OcrSkuDecoderTest {
         ocrEngineProvider = { fake },
     )
 
-    private fun successRaw(outcome: DecodeOutcome): String {
+    private fun successBarcode(outcome: DecodeOutcome): com.barcodescanner.sdk.domain.model.DecodedBarcode {
         assertTrue("expected Success, got $outcome", outcome is DecodeOutcome.Success)
-        return (outcome as DecodeOutcome.Success).barcodes.maxBy { it.confidence }.rawValue
+        return (outcome as DecodeOutcome.Success).barcodes.maxBy { it.confidence }
     }
+
+    private fun successRaw(outcome: DecodeOutcome): String = successBarcode(outcome).rawValue
 
     private fun successConfidence(outcome: DecodeOutcome): Float {
         assertTrue("expected Success, got $outcome", outcome is DecodeOutcome.Success)
@@ -213,5 +215,97 @@ class OcrSkuDecoderTest {
         assertFalse(OcrSkuDecoder.isPlainRun("000-42000-15121", 4, 9))
         assertFalse(OcrSkuDecoder.isPlainRun("09/14/22", 0, 2))
         assertFalse(OcrSkuDecoder.isPlainRun("10-48 CT", 0, 2))
+    }
+
+    @Test
+    fun pair_dixieStyle_skuPlusDashedGtin() {
+        // Real shelf shape: plain SKU + dashed GTIN + count on one line.
+        val fake = FakeOcrEngine(
+            listOf(OcrLine("0087573 000-42000-15121 10-48 CT", Rect(10, 120, 300, 150))),
+        )
+        val d = decoder(fake)
+        val out = runBlocking { d.decode(ScanFrame(bitmap = labelWithBars())) }
+        val b = successBarcode(out)
+        assertEquals("0087573", b.rawValue)
+        assertEquals("0004200015121", b.gtin)
+        assertEquals("000-42000-15121", b.gtinRaw)
+        d.close()
+    }
+
+    @Test
+    fun pair_spaceSplitGtin_reconstructed() {
+        // OCR inserted a space inside the GTIN: runs must rejoin over spaces.
+        val fake = FakeOcrEngine(
+            listOf(OcrLine("0828147 006 99235-00100 10 13.5 OZ", Rect(10, 120, 300, 150))),
+        )
+        val d = decoder(fake)
+        val out = runBlocking { d.decode(ScanFrame(bitmap = labelWithBars())) }
+        val b = successBarcode(out)
+        assertEquals("0828147", b.rawValue)
+        assertEquals("0069923500100", b.gtin)
+        d.close()
+    }
+
+    @Test
+    fun pair_intactDashedGtin() {
+        val fake = FakeOcrEngine(
+            listOf(OcrLine("0828147 006-99235-00100", Rect(10, 120, 300, 150))),
+        )
+        val d = decoder(fake)
+        val out = runBlocking { d.decode(ScanFrame(bitmap = labelWithBars())) }
+        val b = successBarcode(out)
+        assertEquals("0828147", b.rawValue)
+        assertEquals("0069923500100", b.gtin)
+        assertEquals("006-99235-00100", b.gtinRaw)
+        d.close()
+    }
+
+    @Test
+    fun pair_absent_leavesGtinNull() {
+        // Backward compat: SKU alone still emits, gtin stays null.
+        val fake = FakeOcrEngine(listOf(OcrLine("0168971", Rect(10, 120, 220, 150))))
+        val d = decoder(fake)
+        val out = runBlocking { d.decode(ScanFrame(bitmap = labelWithBars())) }
+        val b = successBarcode(out)
+        assertEquals("0168971", b.rawValue)
+        assertNull(b.gtin)
+        assertNull(b.gtinRaw)
+        d.close()
+    }
+
+    @Test
+    fun pair_rejectsDatesAndCounts() {
+        // Date (6 digits) and count (4 digits) are dashed but too short.
+        val fake = FakeOcrEngine(
+            listOf(
+                OcrLine("09/14/22", Rect(10, 200, 300, 230)),
+                OcrLine("0168971 10-48 CT", Rect(10, 120, 220, 150)),
+            ),
+        )
+        val d = decoder(fake)
+        val out = runBlocking { d.decode(ScanFrame(bitmap = labelWithBars())) }
+        val b = successBarcode(out)
+        assertEquals("0168971", b.rawValue)
+        assertNull("date/count must not become GTIN, got ${b.gtin}", b.gtin)
+        d.close()
+    }
+
+    @Test
+    fun gtinCandidates_prefersFullOverPartial() {
+        val d = decoder(FakeOcrEngine(emptyList()))
+        val cands = d.gtinCandidates("0087573 000-42000-15121")
+        val digits = cands.map { it.digits }
+        assertTrue("expected full GTIN, got $digits", "0004200015121" in digits)
+        // Maximal dash groups only: sub-windows ("4200015121") and the plain
+        // SKU run must never surface as GTIN candidates (they were the
+        // over-merge false-positive source).
+        assertFalse("sub-window must not surface, got $digits", "4200015121" in digits)
+        assertFalse(d.gtinCandidates("0168971").any { it.digits == "0168971" })
+        // Price fragments never merge across dots.
+        assertTrue(d.gtinCandidates("13.5 OZ").isEmpty())
+        // Split GTIN upgrades to full while keeping the bare partial.
+        val split = d.gtinCandidates("006 99235-00100").map { it.digits }
+        assertTrue("expected upgraded full GTIN, got $split", "0069923500100" in split)
+        d.close()
     }
 }

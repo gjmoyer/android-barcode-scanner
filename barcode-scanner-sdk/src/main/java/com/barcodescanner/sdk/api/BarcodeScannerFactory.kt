@@ -89,6 +89,13 @@ internal class DefaultBarcodeScanner(
     }
 
     override fun startCamera(lifecycleOwner: LifecycleOwner, previewView: PreviewView) {
+        startCamera(lifecycleOwner, previewView.surfaceProvider)
+    }
+
+    override fun startCamera(
+        lifecycleOwner: LifecycleOwner,
+        surfaceProvider: androidx.camera.core.Preview.SurfaceProvider,
+    ) {
         synchronized(cameraLock) {
             // Checked inside the lock: close() sets `closed` then grabs the same
             // lock, so a check outside would allow starting a camera after close.
@@ -106,7 +113,7 @@ internal class DefaultBarcodeScanner(
                 },
             )
             cameraManager = manager
-            manager.start(lifecycleOwner, previewView)
+            manager.start(lifecycleOwner, surfaceProvider)
         }
     }
 

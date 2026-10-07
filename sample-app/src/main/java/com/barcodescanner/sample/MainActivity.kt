@@ -214,12 +214,20 @@ class MainActivity : ComponentActivity() {
         awaitingScan = false
 
         val b = result.barcode
-        resultValue.text = "Value: ${b.rawValue}"
+        // OCR shelf-tag reads carry the paired GTIN (sku↔gtin must be validated
+        // against the same backend record — that join is the checksum the
+        // printed SKU lacks). Bar reads never set it.
+        resultValue.text = if (b.gtin != null) {
+            "SKU: ${b.rawValue}  GTIN: ${b.gtin}"
+        } else {
+            "Value: ${b.rawValue}"
+        }
         resultSymbology.text = "Symbology: ${b.symbology.displayName}"
         resultMethod.text = "Method: ${b.engineName}${friendlyEngineSuffix(b.engineName)}"
         val rotated = if (result.fromRotatedFrame) "rotated frame" else "upright frame"
         val checksum = if (b.checksumStripped) ", checksum verified" else ""
-        resultDetail.text = "($rotated, confidence ${"%.2f".format(b.confidence)}$checksum)"
+        val pair = if (b.gtin != null) ", pair-check via record lookup" else ""
+        resultDetail.text = "($rotated, confidence ${"%.2f".format(b.confidence)}$checksum$pair)"
 
         beep()
         vibrate()

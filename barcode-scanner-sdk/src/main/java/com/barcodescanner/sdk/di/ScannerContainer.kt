@@ -43,7 +43,11 @@ internal class ScannerContainer(
     }
 
     val zxingDecoder: ZXingCppDecoder by lazy {
-        ZXingCppDecoder(config.enabledSymbologies, dispatcher, thorough = config.robustMode)
+        ZXingCppDecoder(
+            config.enabledSymbologies,
+            dispatcher,
+            thorough = config.zxingTryHarder ?: config.robustMode,
+        )
     }
 
     val msiDecoder: MsiPlesseyDecoder by lazy {

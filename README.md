@@ -139,14 +139,16 @@ docs/                         # ARCHITECTURE.md, MSI_PLESSEY_RESEARCH.md, REVIEW
 ## Performance (point-and-scan latency)
 
 Design rule: pristine labels — the overwhelmingly common case — take the fast path;
-difficult labels may take the thorough path. Measured on desktop JVM (devices run
-~2–4× for CPU-bound Kotlin; ML Kit/ZXing inference dominates on device):
+difficult labels may take the thorough path. JVM numbers below are desktop
+(Robolectric); on-device full-chain measurements (Pixel 6a / emulator-5554,
+see `docs/REVIEW_LOG.md` Pass 10) dominate in practice:
 
-| Stage (pristine MSI, 762×300) | Default | Robust |
+| Stage | Desktop JVM (Zint fixtures) | On-device (arm64) |
 |---|---|---|
-| Preprocessing (downscale + contrast) | ~8 ms | ~8 ms |
-| MSI decode (Zint-rendered fixtures, incl. 2px modules) | 10–30 ms | 20–100 ms |
-| Upside-down / sideways pristine | — (fusion 180°/90°) | 30–90 ms |
+| Preprocessing (downscale + contrast) | ~8 ms | ~15–30 ms |
+| MSI decode (pristine, incl. 2px modules) | 10–30 ms default / 20–100 ms robust | 180–760 ms |
+| DataBar via zxing-cpp (native TryRotate/TryHarder) | n/a (native absent on JVM) | 550–1150 ms (Expanded pays TryHarder) |
+| Full-chain worst case (capped by `decodeTimeoutMillis`) | — | ~1.5 s at default 1500 ms |
 
 Live-mode recipe (already wired, no host code needed):
 - Fusion tries engines in registration order with first-confident-wins: a pointed
@@ -157,9 +159,11 @@ Live-mode recipe (already wired, no host code needed):
   copies of the same image. MSI's scanline decoder still receives every
   candidate (its dense horizontal pass beats the 3-column vertical fallback).
 - Orientation bitmaps materialize lazily — an upright hit never allocates rotations.
-- `ZXingCppDecoder` runs `TryHarder` only in robust mode (`thorough = robustMode`);
+- `ZXingCppDecoder` runs `TryHarder` when `robustMode` is on unless
+  `ScannerConfig.zxingTryHarder` overrides it (decoupled from MSI effort);
   rotation/inversion retries stay on in both modes.
-- `CameraScanManager` is single-flight (`STRATEGY_KEEP_ONLY_LATEST` + decode gate):
+- `CameraScanManager` converts YUV→ARGB directly (no JPEG round-trip, so narrow
+  bars survive) and is single-flight (`STRATEGY_KEEP_ONLY_LATEST` + decode gate):
   analysis runs at 1/latency fps instead of queueing — a slow frame delays the next
   attempt, never piles up work.
 - Per-frame worst case is capped by `ScannerConfig.decodeTimeoutMillis` (default

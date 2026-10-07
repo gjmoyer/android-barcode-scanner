@@ -12,14 +12,14 @@ Clean-architecture, enterprise-style layering. Dependency rule: **outer layers d
 │ domain/decoder    BarcodeDecoder (strategy),           │  Open/Closed: add engine =>
 │                   DecoderRegistry, DecodeOutcome       │  implement interface + register
 │ domain/pipeline   PreprocessingPipeline,               │  Pure, testable transforms
-│                   Contrast/Blur/Orientation            │
+│                   Contrast/Downscale/Orientation       │
 ├────────────────────────────────────────────────────────┤
 │ data/mlkit        MLKitDecoder (+mapper)               │  Primary engine
 │ data/zxingcpp     ZXingCppDecoder + ZXingCppBridge     │  DataBar engine (native)
 │ data/msi          MsiPlesseyDecoder + table/checksum/  │  Custom MSI engine
 │                   binarizer                            │
 │ data/ocr          OcrSkuDecoder + OcrEngine (ML Kit    │  MSI SKU text fallback
-│                   text recognition, last resort)        │  (0.7, engine MsiOcr)
+│                   text recognition, last resort)        │  (0.5 trust / 0.7 strict, engine MsiOcr)
 │ data/fusion       FusedDecoder                         │  Orchestrates all engines
 ├────────────────────────────────────────────────────────┤
 │ camera/           CameraScanManager (CameraX)          │  Frame producer only

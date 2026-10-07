@@ -11,6 +11,8 @@
 #include <sstream>
 #include <vector>
 
+#include <android/log.h>
+
 using namespace ZXing;
 
 static std::string EscapeJson(const std::string& s) {
@@ -44,6 +46,17 @@ static std::string Trim(const std::string& s) {
 
 std::string DecodeImage(const int32_t* argb, int width, int height, const ScanOptions& opts) {
     if (!argb || width <= 0 || height <= 0) return "[]";
+    // Guard int overflow + absurd allocs before the native loop: a corrupt
+    // w/h pair must not become a multi-GB vector (which would look like
+    // "not found" after the catch-all). 16MP covers 1280x1920 pipelines.
+    {
+        int64_t pixels = static_cast<int64_t>(width) * static_cast<int64_t>(height);
+        if (pixels <= 0 || pixels > 16'000'000) {
+            __android_log_print(ANDROID_LOG_WARN, "ZXingBridge",
+                "DecodeImage rejected bogus dims %dx%d", width, height);
+            return "[]";
+        }
+    }
     try {
         // ARGB int[] -> 8-bit luminance. vector<uint8_t> (NOT std::string/char:
         // char is signed on ARM and corrupts luminances > 127).
@@ -98,7 +111,11 @@ std::string DecodeImage(const int32_t* argb, int width, int height, const ScanOp
         }
         json << "]";
         return json.str();
+    } catch (const std::exception& e) {
+        __android_log_print(ANDROID_LOG_WARN, "ZXingBridge", "DecodeImage failed: %s", e.what());
+        return "[]";
     } catch (...) {
+        __android_log_print(ANDROID_LOG_WARN, "ZXingBridge", "DecodeImage failed: unknown");
         return "[]";
     }
 }

@@ -36,6 +36,12 @@ data class ScannerConfig(
     val msiOcrRequireChecksum: Boolean,
     /** Minimum confidence to emit a result. NOTE: >0.9 disables ZXing, >0.95 disables ML Kit. */
     val minConfidence: Float,
+    /**
+     * zxing-cpp `TryHarder` override. Null (default) follows [robustMode]:
+     * thorough in robust mode, fast otherwise. Set explicitly to decouple
+     * DataBar effort from MSI effort (e.g. fast DataBar + thorough MSI).
+     */
+    val zxingTryHarder: Boolean? = null,
 ) {
     init {
         require(enabledSymbologies.isNotEmpty()) { "At least one symbology must be enabled" }
@@ -47,6 +53,25 @@ data class ScannerConfig(
         require(duplicateSuppressionMillis >= 0) { "duplicateSuppressionMillis must be >= 0" }
         require(msiMinPayloadDigits in 3..32) { "msiMinPayloadDigits must be 3..32" }
         require(minConfidence in 0f..1f) { "minConfidence must be 0..1" }
+        // Silent footgun guard: fixed engine confidences are ML Kit 0.95 /
+        // ZXing 0.9 / MSI 1.0 / OCR 0.5-0.7, so a high floor silently disables
+        // engines instead of being "stricter". Warn, don't fail (hosts may
+        // intend to isolate MSI at 1.0).
+        if (minConfidence > 0.9f) {
+            android.util.Log.w(
+                "ScannerConfig",
+                "minConfidence=$minConfidence disables ZXing (0.9)" +
+                    (if (minConfidence > 0.95f) " and ML Kit (0.95)" else "") +
+                    "; only MSI(1.0)/OCR-gated hits can pass.",
+            )
+        }
+        if (Symbology.UNKNOWN in enabledSymbologies) {
+            android.util.Log.w(
+                "ScannerConfig",
+                "UNKNOWN enabled: unsupported formats (Telepen/MaxiCode/MicroQR/...) " +
+                    "will emit as UNKNOWN at reduced confidence; keep disabled unless needed.",
+            )
+        }
     }
 
     enum class MsiChecksumPolicy {
@@ -63,7 +88,7 @@ data class ScannerConfig(
     class Builder {
         private var enabled: Set<Symbology> =
             Symbology.entries.filter { it != Symbology.UNKNOWN }.toSet()
-        private var maxOrientations = 2
+        private var maxOrientationsOverride: Int? = null
         private var robust = false
         private var timeout = 1_500L
         private var dedup = 1_500L
@@ -71,6 +96,7 @@ data class ScannerConfig(
         private var msiMinDigits = 3
         private var msiOcrChecksum = false
         private var minConf = 0.5f
+        private var zxingHarder: Boolean? = null
 
         fun enabledSymbologies(v: Set<Symbology>) = apply { enabled = v.toSet() }
 
@@ -83,30 +109,37 @@ data class ScannerConfig(
         /** Backward-compat alias for [only]. Prefer [only]/[addSymbologies]. */
         fun enable(vararg s: Symbology) = only(*s)
 
-        fun maxOrientationsTried(v: Int) = apply { maxOrientations = v }
+        fun maxOrientationsTried(v: Int) = apply { maxOrientationsOverride = v }
 
-        /** Also sets [maxOrientationsTried] (4 on, 2 off) — keep calls ordered. */
-        fun robustMode(v: Boolean) = apply {
-            robust = v
-            maxOrientations = if (v) 4 else 2
-        }
+        /**
+         * Robust mode: 4 orientations + extra MSI binarizations + zxing TryHarder
+         * (unless [zxingTryHarder] overrides). Order-independent: an explicit
+         * [maxOrientationsTried] always wins over the robust default.
+         */
+        fun robustMode(v: Boolean) = apply { robust = v }
         fun decodeTimeoutMillis(v: Long) = apply { timeout = v }
         fun duplicateSuppressionMillis(v: Long) = apply { dedup = v }
         fun msiChecksumPolicy(v: MsiChecksumPolicy) = apply { msi = v }
         fun msiMinPayloadDigits(v: Int) = apply { msiMinDigits = v }
         fun msiOcrRequireChecksum(v: Boolean) = apply { msiOcrChecksum = v }
         fun minConfidence(v: Float) = apply { minConf = v }
-        fun build() = ScannerConfig(
-            enabledSymbologies = enabled.toSet(),
-            maxOrientationsTried = maxOrientations,
-            robustMode = robust,
-            decodeTimeoutMillis = timeout,
-            duplicateSuppressionMillis = dedup,
-            msiChecksumPolicy = msi,
-            msiMinPayloadDigits = msiMinDigits,
-            msiOcrRequireChecksum = msiOcrChecksum,
-            minConfidence = minConf,
-        )
+        /** Decouple zxing-cpp TryHarder from [robustMode]; null follows robust. */
+        fun zxingTryHarder(v: Boolean?) = apply { zxingHarder = v }
+        fun build(): ScannerConfig {
+            val orientations = maxOrientationsOverride ?: if (robust) 4 else 2
+            return ScannerConfig(
+                enabledSymbologies = enabled.toSet(),
+                maxOrientationsTried = orientations,
+                robustMode = robust,
+                decodeTimeoutMillis = timeout,
+                duplicateSuppressionMillis = dedup,
+                msiChecksumPolicy = msi,
+                msiMinPayloadDigits = msiMinDigits,
+                msiOcrRequireChecksum = msiOcrChecksum,
+                minConfidence = minConf,
+                zxingTryHarder = zxingHarder,
+            )
+        }
     }
 
     companion object {

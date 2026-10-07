@@ -19,7 +19,7 @@ set(ZXING_EXPERIMENTAL_API ON CACHE BOOL "" FORCE)
 FetchContent_Declare(
   zxingcpp
   GIT_REPOSITORY https://github.com/zxing-cpp/zxing-cpp.git
-  GIT_TAG v3.1.1
+  GIT_TAG 287c85df6f961c8efbfb5ffd736cd9457b8b890e # v3.1.1, pinned full SHA (see git ls-remote)
   GIT_SHALLOW TRUE
 )
 FetchContent_MakeAvailable(zxingcpp)

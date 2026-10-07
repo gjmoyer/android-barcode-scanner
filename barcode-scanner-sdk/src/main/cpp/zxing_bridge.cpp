@@ -25,7 +25,12 @@ Java_com_barcodescanner_sdk_data_zxingcpp_ZXingCppBridge_nativeDecode(
     jsize len = env->GetArrayLength(pixels);
     // Never trust the caller's dimensions: validate against the array length
     // before the native loop reads width*height ints (heap OOB otherwise).
-    if (len < width * height) return env->NewStringUTF("[]");
+    // 64-bit multiply: width*height as jint would overflow for bogus dims.
+    {
+        int64_t need = static_cast<int64_t>(width) * static_cast<int64_t>(height);
+        if (need <= 0 || need > 16'000'000 || static_cast<int64_t>(len) < need)
+            return env->NewStringUTF("[]");
+    }
 
     jint* data = env->GetIntArrayElements(pixels, nullptr);
     if (!data) return env->NewStringUTF("[]");

@@ -3,10 +3,7 @@ package com.barcodescanner.sdk.camera
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.graphics.ImageFormat
 import android.graphics.Rect
-import android.graphics.YuvImage
 import android.os.SystemClock
 import android.util.Size
 import androidx.camera.core.CameraSelector
@@ -23,7 +20,6 @@ import com.barcodescanner.sdk.domain.model.ScanFrame
 import com.barcodescanner.sdk.domain.model.ScannerConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
-import java.io.ByteArrayOutputStream
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -35,8 +31,9 @@ import java.util.concurrent.atomic.AtomicBoolean
  *  - 1280x720 cap via ResolutionSelector (bounds MSI/preprocessing cost),
  *  - STRATEGY_KEEP_ONLY_LATEST + single-flight decode gate: at most ONE decode
  *    in flight; while a slow MSI frame decodes, newer frames are dropped (not queued),
- *  - stride-aware YUV_420_888 -> NV21 -> Bitmap conversion (rowStride/pixelStride
- *    respected; the naive buffer-concat path shears on Pixel/Samsung),
+ *  - stride-aware YUV_420_888 -> ARGB conversion (rowStride/pixelStride and
+ *    cropRect respected; direct integer BT.601, no JPEG round-trip so narrow
+ *    bars survive; the naive buffer-concat path shears on Pixel/Samsung),
  *  - structured [scope] (no GlobalScope): stop()/close() cancels in-flight work,
  *  - sensor rotation forwarded into [ScanFrame.rotationDegrees] so still-image
  *    and live paths share one orientation pipeline.
@@ -59,6 +56,11 @@ internal class CameraScanManager(
     private var stopped = false
 
     fun start(lifecycleOwner: LifecycleOwner, previewView: PreviewView) {
+        start(lifecycleOwner, previewView.surfaceProvider)
+    }
+
+    /** Headless / Compose entry point: binds preview to any SurfaceProvider. */
+    fun start(lifecycleOwner: LifecycleOwner, surfaceProvider: Preview.SurfaceProvider) {
         // Restart-safe: shut down any previous executor before creating a new one.
         runCatching { analysisExecutor?.shutdownNow() }
         stopped = false
@@ -68,7 +70,7 @@ internal class CameraScanManager(
             if (stopped) return@addListener
             val provider = runCatching { future.get() }.getOrNull() ?: return@addListener
             cameraProvider = provider
-            bind(provider, lifecycleOwner, previewView)
+            bind(provider, lifecycleOwner, surfaceProvider)
         }, ContextCompat.getMainExecutor(context))
     }
 
@@ -98,12 +100,12 @@ internal class CameraScanManager(
     private fun bind(
         provider: ProcessCameraProvider,
         lifecycleOwner: LifecycleOwner,
-        previewView: PreviewView,
+        surfaceProvider: Preview.SurfaceProvider,
     ) {
         val executor = analysisExecutor ?: return
         unbindUseCases()
         val preview = Preview.Builder().build().also {
-            it.surfaceProvider = previewView.surfaceProvider
+            it.surfaceProvider = surfaceProvider
         }
         val analysis = ImageAnalysis.Builder()
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
@@ -165,17 +167,34 @@ internal class CameraScanManager(
     }.getOrNull()
 
     /**
-     * Stride-aware YUV_420_888 -> NV21 -> Bitmap.
-     * Respects rowStride/pixelStride and cropRect; JPEG quality 70 (bars survive,
-     * bandwidth halved vs 85). Result capped at 1280px long edge.
+     * Stride-aware YUV_420_888 -> Bitmap via direct NV21 -> ARGB conversion.
+     *
+     * No JPEG round-trip: the old `YuvImage.compressToJpeg(70)` + decode path
+     * low-passed the 2-3px narrow bars MSI/DataBar depend on (while the rest of
+     * the pipeline uses `filter=false` precisely to preserve them). Direct
+     * integer BT.601 conversion preserves edges and is faster (~1 pass vs
+     * encode+decode). Honors [ImageProxy.getCropRect], rowStride and
+     * pixelStride. Result capped at 1280px long edge with nearest-neighbor
+     * scaling (`filter=false`) so narrow bars survive.
      */
     private fun ImageProxy.toStrideAwareBitmap(): Bitmap? = runCatching {
         val nv21 = toNv21() ?: return null
-        val yuv = YuvImage(nv21, ImageFormat.NV21, width, height, null)
-        val out = ByteArrayOutputStream(width * height / 2)
-        yuv.compressToJpeg(Rect(0, 0, width, height), 70, out)
-        val bytes = out.toByteArray()
-        val full = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+        // Clamp sensor crop to image bounds (defensive: some HALs report a
+        // crop larger than the buffer on rotation).
+        val raw = cropRect
+        val left = raw.left.coerceIn(0, width)
+        val top = raw.top.coerceIn(0, height)
+        val right = raw.right.coerceIn(left + 1, width)
+        val bottom = raw.bottom.coerceIn(top + 1, height)
+        val crop = Rect(left, top, right, bottom)
+        val cw = crop.width()
+        val ch = crop.height()
+        if (cw <= 0 || ch <= 0) return null
+        // Defensive: packed NV21 must hold the full frame; otherwise the
+        // stride packer produced a short array (should not happen).
+        if (nv21.size < width * height * 3 / 2) return null
+        val argb = nv21ToArgb(nv21, width, height, crop)
+        val full = Bitmap.createBitmap(argb, cw, ch, Bitmap.Config.ARGB_8888)
         val scale = minOf(1f, 1280f / maxOf(full.width, full.height))
         if (scale >= 1f) full
         else {
@@ -183,21 +202,64 @@ internal class CameraScanManager(
                 full,
                 (full.width * scale).toInt().coerceAtLeast(1),
                 (full.height * scale).toInt().coerceAtLeast(1),
-                true,
+                false,
             )
             full.recycle()
             scaled
         }
     }.getOrNull()
 
-    /** Packs YUV_420_888 planes into NV21 respecting strides. */
+    /**
+     * Packed NV21 (as produced by [toNv21]: Y `w*h` + interleaved VU `w*h/2`)
+     * to ARGB, converting only [crop]. Integer BT.601 full-range approx:
+     * R=Y+1.402(V-128), G=Y-0.344(U-128)-0.714(V-128), B=Y+1.772(U-128).
+     * Color accuracy is irrelevant for barcodes; edge preservation is.
+     */
+    internal fun nv21ToArgb(nv21: ByteArray, w: Int, h: Int, crop: Rect): IntArray {
+        val cw = crop.width()
+        val ch = crop.height()
+        require(cw > 0 && ch > 0) { "empty crop" }
+        require(nv21.size >= w * h * 3 / 2) { "short NV21 buffer" }
+        val out = IntArray(cw * ch)
+        val yBase = 0
+        val vuBase = w * h
+        var dst = 0
+        for (y in 0 until ch) {
+            val srcY = crop.top + y
+            val yRow = yBase + srcY * w
+            val uvRow = vuBase + (srcY shr 1) * w
+            for (x in 0 until cw) {
+                val srcX = crop.left + x
+                val yy = nv21[yRow + srcX].toInt() and 0xFF
+                val uvOffset = uvRow + (srcX shr 1) * 2
+                val vv = nv21[uvOffset].toInt() and 0xFF
+                val uu = nv21[uvOffset + 1].toInt() and 0xFF
+                val vOff = vv - 128
+                val uOff = uu - 128
+                var r = yy + ((360 * vOff) shr 8)
+                var g = yy - ((88 * uOff + 183 * vOff) shr 8)
+                var b = yy + ((454 * uOff) shr 8)
+                if (r < 0) r = 0 else if (r > 255) r = 255
+                if (g < 0) g = 0 else if (g > 255) g = 255
+                if (b < 0) b = 0 else if (b > 255) b = 255
+                out[dst++] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+            }
+        }
+        return out
+    }
+
+    /** Packs YUV_420_888 planes into NV21 respecting strides and cropRect source size. */
     private fun ImageProxy.toNv21(): ByteArray? = runCatching {
         val w = width
         val h = height
+        if (w <= 0 || h <= 0) return null
+        // Guard against bogus dimensions (int overflow / OOM before native loop).
+        val pixels = w.toLong() * h.toLong()
+        if (pixels > MAX_FRAME_PIXELS) return null
         val yPlane = planes[0]
         val uPlane = planes[1]
         val vPlane = planes[2]
-        val out = ByteArray(w * h * 3 / 2)
+        val out = ByteArray((pixels * 3 / 2).toInt())
 
         // Y plane: row-by-row (rowStride may exceed width).
         val yBuf = yPlane.buffer
@@ -238,4 +300,9 @@ internal class CameraScanManager(
         }
         out
     }.getOrNull()
+
+    companion object {
+        /** Rejects bogus ImageProxy dimensions before the `w*h*3/2` alloc. */
+        const val MAX_FRAME_PIXELS = 16_000_000L
+    }
 }

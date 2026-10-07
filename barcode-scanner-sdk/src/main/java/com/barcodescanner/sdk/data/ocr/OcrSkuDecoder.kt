@@ -31,11 +31,13 @@ import java.util.concurrent.atomic.AtomicBoolean
  *  2. runs ML Kit text recognition once over the frame,
  *  3. picks the best digit run by checksum validity, dash-adjacency (shelf case
  *     codes print dashed: `000-42000-15121`; SKUs print plain), length, and
- *     proximity to a dense band.
+ *     proximity to a dense band,
+ *  4. pairs the SKU with the dashed GTIN on the tag (`000-42000-15121`,
+ *     `006-99235-00100`, possibly space-split by OCR as `006 99235-00100`).
  *
  * Dash-adjacency matters: runs are split on non-digits, and a run touching `-`
  * or `/` in its line is marked dashed, so a case-code segment loses to a plain
- * SKU run.
+ * SKU run — but the dashed run itself becomes the GTIN candidate.
  *
  * Checksum semantics: shelf labels print the SKU WITHOUT the check digit(s)
  * (those live in the barcode), so validating the printed text is usually
@@ -46,7 +48,16 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * Reported value: the digit run EXACTLY AS PRINTED (never stripped — the old
  * strip silently truncated real SKUs, e.g. Starbucks payload `0168971` is
- * itself a valid Mod10 codeword and became `016897`).
+ * itself a valid Mod10 codeword and became `016897`). The paired GTIN is
+ * reported alongside as digits-only ([DecodedBarcode.gtin]) plus as-printed
+ * ([DecodedBarcode.gtinRaw]).
+ *
+ * Pair validation: neither the SKU nor the GTIN carries a verifiable check
+ * digit in print, so this decoder cannot validate either alone. The pair
+ * validates via record lookup — `sku ↔ gtin` must belong to the same record.
+ * A one-digit OCR misread in either field fails the join instead of emitting
+ * a confident misread. Hosts must perform that join; an unpaired SKU
+ * (`gtin == null`) is lower-trust than a paired one at the same confidence.
  *
  * Precision note: unvalidated OCR reads depend on read quality (one misread
  * digit cannot be detected without the check digit) — hosts should treat
@@ -114,6 +125,16 @@ class OcrSkuDecoder(
                 val scale = source.height.toFloat() / working.height
                 val pick = pickSku(lines, bands, scale)
                     ?: return@withContext DecodeOutcome.NotFound("no SKU-like digit run")
+                // Pair the SKU with the dashed GTIN on the same tag when present.
+                // GTIN absence never vetoes the SKU (backward compat); the host's
+                // sku↔gtin record join is the validator.
+                val gtin = pickGtin(
+                    lines = lines,
+                    skuLineIndex = pick.lineIndex,
+                    skuBox = pick.box,
+                    bands = bands,
+                    scale = scale,
+                )
                 val rotated = frame.isRotatedCandidate
                 DecodeOutcome.Success(
                     listOf(
@@ -128,6 +149,8 @@ class OcrSkuDecoder(
                             engineName = NAME,
                             checksumStripped = false,
                             isUpsideDown = frame.isUpsideDownCandidate,
+                            gtin = gtin?.digits,
+                            gtinRaw = gtin?.raw,
                         ),
                     ),
                 )
@@ -155,7 +178,16 @@ class OcrSkuDecoder(
         }
     }
 
-    internal data class SkuPick(val digits: String, val box: Rect?, val validated: Boolean)
+    internal data class SkuPick(
+        val digits: String,
+        val box: Rect?,
+        val validated: Boolean,
+        /** Index into the OCR `lines` list the SKU came from (-1 if unknown). */
+        val lineIndex: Int = -1,
+    )
+
+    /** A dashed GTIN candidate: digits-only for lookup plus as-printed for display. */
+    internal data class GtinPick(val digits: String, val raw: String, val box: Rect?)
 
     /**
      * Picks the SKU digit run across OCR lines.
@@ -187,9 +219,10 @@ class OcrSkuDecoder(
             val box: Rect?,
             val plain: Boolean,
             val proximity: Float,
+            val lineIndex: Int,
         )
         val scored = mutableListOf<Scored>()
-        for (line in lines) {
+        for ((lineIndex, line) in lines.withIndex()) {
             val box = line.box
             val proximity = if (box == null || bands.isEmpty()) {
                 Float.MAX_VALUE
@@ -216,7 +249,7 @@ class OcrSkuDecoder(
                 } else {
                     digits
                 }
-                scored += Scored(digits, payload, box, plain, proximity)
+                scored += Scored(digits, payload, box, plain, proximity, lineIndex)
             }
         }
         if (scored.isEmpty()) return null
@@ -226,8 +259,165 @@ class OcrSkuDecoder(
                 .thenBy { it.proximity },
         ).first()
         // Emit the run as printed; `payload` only gated/ranked.
-        return SkuPick(best.digits, best.box?.let { Rect(it) }, validated = mustValidate)
+        return SkuPick(
+            digits = best.digits,
+            box = best.box?.let { Rect(it) },
+            validated = mustValidate,
+            lineIndex = best.lineIndex,
+        )
     }
+
+    /**
+     * Pairs the chosen SKU with the dashed GTIN printed on the same shelf tag.
+     *
+     * Shelf format (per host): plain SKU (`0828147`) + dashed GTIN
+     * (`000-42000-15121`, `006-99235-00100`). OCR may split the GTIN over a
+     * space (`006 99235-00100`), so candidates are windows of consecutive digit
+     * runs joined by single ` `/`-`/`/` separators with at least one dash/slash
+     * join (this is what distinguishes a GTIN from a second plain number).
+     * Total digits must be [GTIN_MIN_DIGITS]..[GTIN_MAX_DIGITS] (rejects dates
+     * like `09/14/22` and counts like `10-48` by length, not by format guess).
+     *
+     * Ranking: full-length GTINs (12-14 digits) beat partials, then longer,
+     * then same-line-as-SKU, then nearer the SKU box (same label) / content
+     * band. Returns null when no GTIN-like window exists — the SKU still emits
+     * alone (backward compat); the host join simply has nothing to check.
+     */
+    internal fun pickGtin(
+        lines: List<OcrLine>,
+        skuLineIndex: Int,
+        skuBox: Rect?,
+        bands: List<IntRange>,
+        scale: Float,
+    ): GtinPick? {
+        data class Scored(
+            val digits: String,
+            val raw: String,
+            val box: Rect?,
+            val fullLength: Boolean,
+            val sameLine: Boolean,
+            val distance: Float,
+        )
+        val scored = mutableListOf<Scored>()
+        for ((lineIndex, line) in lines.withIndex()) {
+            val box = line.box
+            for (c in gtinCandidates(line.text)) {
+                val sameLine = lineIndex == skuLineIndex
+                val distance = if (skuBox != null && box != null) {
+                    val sx = (skuBox.left + skuBox.right) / 2f
+                    val sy = (skuBox.top + skuBox.bottom) / 2f
+                    val gx = (box.left + box.right) / 2f
+                    val gy = (box.top + box.bottom) / 2f
+                    kotlin.math.abs(sx - gx) + kotlin.math.abs(sy - gy) * 2f
+                } else if (box != null && bands.isNotEmpty()) {
+                    val cy = (box.top + box.bottom) / 2f
+                    bands.minOf { band ->
+                        val bc = (band.first + band.last) / 2f * scale
+                        kotlin.math.abs(cy - bc)
+                    }
+                } else {
+                    Float.MAX_VALUE
+                }
+                scored += Scored(
+                    digits = c.digits,
+                    raw = c.raw,
+                    box = box,
+                    fullLength = c.digits.length in GTIN_PREFERRED_MIN..GTIN_MAX_DIGITS,
+                    sameLine = sameLine,
+                    distance = distance,
+                )
+            }
+        }
+        if (scored.isEmpty()) return null
+        val best = scored.sortedWith(
+            compareByDescending<Scored> { it.fullLength }
+                .thenByDescending { it.digits.length }
+                .thenByDescending { it.sameLine }
+                .thenBy { it.distance },
+        ).first()
+        return GtinPick(best.digits, best.raw, best.box?.let { Rect(it) })
+    }
+
+    /**
+     * Dashed digit windows on one OCR line (see [pickGtin]).
+     *
+     * Windowing rule (precision-critical): maximal dash/slash-joined groups
+     * first; at most ONE short leading space-joined run (≤5 digits, e.g. `006`
+     * in `006 99235-00100`) is prepended when the dashed core is partial
+     * (<12 digits). Never extend right over spaces (that absorbs trailing
+     * counts: `000-42000-15121 10-48` must not become 14 digits), and never
+     * prepend a long run (a 7+ digit SKU is not a GTIN segment:
+     * `0168971 10-48` must stay NotFound, not an 11-digit pseudo-GTIN).
+     */
+    internal fun gtinCandidates(line: String): List<GtinWindow> {
+        val runs = DIGIT_RUN.findAll(line).toList()
+        if (runs.isEmpty()) return emptyList()
+        // 1. Maximal dash/slash groups (spaces always break).
+        data class Group(val fromRun: Int, val toRun: Int, val digits: String)
+        val groups = mutableListOf<Group>()
+        var gStart = 0
+        val gDigits = StringBuilder(runs[0].value)
+        for (k in 1 until runs.size) {
+            val sep = line.substring(runs[k - 1].range.last + 1, runs[k].range.first)
+            val trimmed = sep.trim()
+            val isDash = sep.length <= 3 && trimmed.length == 1 && trimmed[0] in "-/"
+            if (isDash) {
+                gDigits.append(runs[k].value)
+            } else {
+                groups += Group(gStart, k - 1, gDigits.toString())
+                gStart = k
+                gDigits.clear()
+                gDigits.append(runs[k].value)
+            }
+        }
+        groups += Group(gStart, runs.size - 1, gDigits.toString())
+        // 2. Emit qualifying groups, with one short left-prepend for partials.
+        val out = mutableListOf<GtinWindow>()
+        val seen = HashSet<String>()
+        fun emit(fromRun: Int, toRun: Int, digits: String) {
+            if (digits.length !in GTIN_MIN_DIGITS..GTIN_MAX_DIGITS) return
+            val raw = line.substring(runs[fromRun].range.first, runs[toRun].range.last + 1)
+            if (seen.add(raw)) out += GtinWindow(digits = digits, raw = raw)
+        }
+        for (g in groups) {
+            val dashed = g.toRun > g.fromRun // dash-joined by construction
+            if (!dashed) continue
+            if (g.digits.length in GTIN_MIN_DIGITS..GTIN_MAX_DIGITS) {
+                emit(g.fromRun, g.toRun, g.digits)
+                // Partial cores (<12) may be split GTINs: try upgrading with one
+                // short left segment (`006 99235-00100` → 13). Full cores stand.
+                if (g.digits.length >= GTIN_PREFERRED_MIN || g.fromRun == 0) continue
+                val prev = runs[g.fromRun - 1]
+                if (prev.value.length > GTIN_LEAD_SEGMENT_MAX) continue
+                val sep = line.substring(prev.range.last + 1, runs[g.fromRun].range.first)
+                if (!sep.isBlank() || sep.length !in 1..3) continue
+                val combined = prev.value + g.digits
+                if (combined.length in GTIN_MIN_DIGITS..GTIN_MAX_DIGITS) {
+                    emit(g.fromRun - 1, g.toRun, combined)
+                }
+                continue
+            }
+            // Partial core (<10 or >14 handled below): try one short left
+            // segment over whitespace (split GTIN). Long left runs are SKUs.
+            if (g.digits.length < GTIN_MIN_DIGITS && g.fromRun > 0) {
+                val prev = runs[g.fromRun - 1]
+                if (prev.value.length <= GTIN_LEAD_SEGMENT_MAX) {
+                    val sep = line.substring(prev.range.last + 1, runs[g.fromRun].range.first)
+                    if (sep.isBlank() && sep.length in 1..3) {
+                        val combined = prev.value + g.digits
+                        if (combined.length in GTIN_MIN_DIGITS..GTIN_MAX_DIGITS) {
+                            emit(g.fromRun - 1, g.toRun, combined)
+                            continue
+                        }
+                    }
+                }
+            }
+            // Over-long dashed groups (>14) are corrupt merges, never GTINs.
+        }
+        return out
+    }
+
+    internal data class GtinWindow(val digits: String, val raw: String)
 
     /**
      * Content bands (y-ranges in working coords) via edge density: rows whose
@@ -295,6 +485,21 @@ class OcrSkuDecoder(
          * runs validating by 1/10-1/11 luck would be confident misreads.
          */
         const val MIN_SINGLE_DIGITS = 6
+        /**
+         * GTIN digit bounds: 12-14 is a full GTIN (preferred), 10-11 a partial
+         * (split across OCR lines or truncated read — still emitted for the
+         * host join to judge). Below 10 are dates/counts/prices, not GTINs.
+         */
+        const val GTIN_MIN_DIGITS = 10
+        const val GTIN_MAX_DIGITS = 14
+        const val GTIN_PREFERRED_MIN = 12
+        /**
+         * Longest run that may be prepended as a split-GTIN leading segment.
+         * SKUs are 7+ digits by definition ([pickSku] floor), so a ≤5 cap cleanly
+         * separates `006` (segment) from `0168971` (SKU that must not merge with
+         * a following `10-48` count).
+         */
+        const val GTIN_LEAD_SEGMENT_MAX = 5
         private val DIGIT_RUN = Regex("\\d+")
 
         /**

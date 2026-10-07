@@ -29,17 +29,43 @@ fun interface FrameTransform {
  *
  * [process] checks cancellation between transforms so the fusion decode timeout
  * bounds preprocessing too.
+ *
+ * Bitmap ownership: the caller's `frame.bitmap` is NEVER recycled here. When a
+ * transform returns a frame with a different bitmap object, the previous
+ * intermediate is recycled immediately (so a Downscale->Contrast chain leaves
+ * exactly one processed bitmap, not two). On cancellation/exception
+ * intermediates are recycled and the original frame is returned to the caller
+ * via the exception path (fusion falls back to the raw frame). The final
+ * processed bitmap is owned by the caller (FusedDecoder recycles it when it
+ * differs from the input).
  */
 class PreprocessingPipeline(
     private val transforms: List<FrameTransform>,
 ) {
     suspend fun process(frame: ScanFrame): ScanFrame {
+        val original = frame.bitmap
         var current = frame
-        for (t in transforms) {
-            currentCoroutineContext().ensureActive()
-            current = t.transform(current)
+        try {
+            for (t in transforms) {
+                currentCoroutineContext().ensureActive()
+                val prev = current
+                current = t.transform(prev)
+                // Recycle the intermediate we just replaced, never the caller's.
+                if (current.bitmap !== prev.bitmap && prev.bitmap !== original) {
+                    runCatching { prev.bitmap.recycle() }
+                }
+            }
+            return current
+        } catch (e: Throwable) {
+            // Drop intermediates produced so far; never the caller's bitmap.
+            if (current.bitmap !== original) {
+                // `current` may be a half-built intermediate: recycle it only if
+                // it is not the original frame (fusion rethrows cancellation and
+                // falls back to `frame` for other Throwables).
+                if (current !== frame) runCatching { current.bitmap.recycle() }
+            }
+            throw e
         }
-        return current
     }
 
     fun plus(transform: FrameTransform): PreprocessingPipeline =

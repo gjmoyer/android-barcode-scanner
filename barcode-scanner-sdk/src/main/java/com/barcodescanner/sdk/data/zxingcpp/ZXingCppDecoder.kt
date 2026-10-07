@@ -32,10 +32,11 @@ class ZXingCppDecoder(
     enabledSymbologies: Set<Symbology>,
     private val dispatcher: CoroutineDispatcher = Dispatchers.Default,
     /**
-     * Maps to native TryHarder. Default true (thorough). Live default-mode hosts
-     * get `thorough = robustMode` from [ScannerContainer]: faster per-frame scans
-     * when the user just points the phone, full effort in robust/warehouse mode.
-     * Rotation/inversion retries (TryRotate/TryInvert) stay on in both modes.
+     * Maps to native TryHarder. Wired from `ScannerConfig.zxingTryHarder ?:
+     * robustMode` in [ScannerContainer]: null follows robust mode (fast default,
+     * thorough warehouse mode); set explicitly to decouple DataBar effort from
+     * MSI effort. Rotation/inversion retries (TryRotate/TryInvert) stay on in
+     * both modes.
      */
     private val thorough: Boolean = true,
 ) : BarcodeDecoder {
@@ -125,15 +126,19 @@ class ZXingCppDecoder(
             val text = o.optString("text").orEmpty()
             if (text.isEmpty()) continue
             val symbology = mapFormat(o.optString("format").orEmpty())
-            // UNKNOWN only passes when the host explicitly enabled it.
+            // UNKNOWN only passes when the host explicitly enabled it, at reduced
+            // confidence: Telepen/MaxiCode/MicroQR/add-ons must never outrank a
+            // real symbology hit or trip the 0.95 early-exit, and hosts can filter
+            // them with minConfidence > 0.6.
             if (symbology == Symbology.UNKNOWN && Symbology.UNKNOWN !in supportedSymbologies) continue
             if (symbology != Symbology.UNKNOWN && symbology !in supportedSymbologies) continue
             if (!seen.add("$symbology|$text")) continue
+            val confidence = if (symbology == Symbology.UNKNOWN) 0.6f else 0.9f
             out += DecodedBarcode(
                 rawValue = text,
                 symbology = symbology,
                 // Fixed 0.9 documents the fusion coupling (minConfidence > 0.9 disables ZXing).
-                confidence = 0.9f,
+                confidence = confidence,
                 engineName = NAME,
                 isUpsideDown = frame.isUpsideDownCandidate,
             )

@@ -20,7 +20,11 @@ import kotlinx.coroutines.flow.Flow
  * calls made after [close] throw [IllegalStateException] (programming error).
  */
 interface BarcodeScannerFacade : AutoCloseable {
-    /** Hot flow of results for live camera mode. */
+    /**
+     * Hot flow of results for live camera mode. Buffer holds 8 with
+     * DROP_OLDEST: a slow collector misses scans rather than backpressuring
+     * the decode path — collect promptly (e.g. `repeatOnLifecycle`) in live UI.
+     */
     val results: Flow<ScanResult>
 
     /** One-shot decode of a bitmap (gallery import, tests). Throws after [close]. */
@@ -33,6 +37,17 @@ interface BarcodeScannerFacade : AutoCloseable {
     fun startCamera(
         lifecycleOwner: androidx.lifecycle.LifecycleOwner,
         previewView: androidx.camera.view.PreviewView,
+    )
+
+    /**
+     * Headless / Compose live mode: binds preview to any [Preview.SurfaceProvider]
+     * (e.g. `PreviewView.surfaceProvider`, Compose `AndroidView` provider, or a
+     * custom surface). Prefer this over the [PreviewView] overload in new code —
+     * it keeps the CameraX *view* out of the scanner API. Throws after [close].
+     */
+    fun startCamera(
+        lifecycleOwner: androidx.lifecycle.LifecycleOwner,
+        surfaceProvider: androidx.camera.core.Preview.SurfaceProvider,
     )
 
     fun stopCamera()

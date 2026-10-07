@@ -59,7 +59,15 @@ class FusedDecoder(
 ) : BarcodeDecoder {
 
     override val name: String = NAME
-    override val supportedSymbologies: Set<Symbology> = config.enabledSymbologies
+    /**
+     * Live view of the enabled set (not a construction-time snapshot): hosts
+     * may register additional decoders at runtime and [DecoderRegistry] order
+     * drives execution, while this set drives filtering. Since [ScannerConfig]
+     * is immutable the value is stable per container, but a getter avoids a
+     * stale copy if the decoder outlives registry mutations.
+     */
+    override val supportedSymbologies: Set<Symbology>
+        get() = config.enabledSymbologies
 
     override suspend fun decode(frame: ScanFrame): DecodeOutcome {
         // Owned by this call; recycled below unless decoding was cancelled

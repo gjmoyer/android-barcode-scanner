@@ -181,7 +181,8 @@ internal object MsiBinarizer {
         return out
     }
 
-    data class BinaryImage(val bits: BooleanArray, val width: Int, val height: Int) {
+    /** Packed binary row field (true = black). Plain class (not data): content equality is never used. */
+    class BinaryImage(private val bits: BooleanArray, val width: Int, val height: Int) {
         fun get(x: Int, y: Int): Boolean = bits[y * width + x]
     }
 }

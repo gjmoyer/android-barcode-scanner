@@ -85,9 +85,15 @@ class MLKitDecoder(
         try {
             val image = imageProvider(frame.bitmap, frame.effectiveRotation)
             // CancellationTokenSource rides coroutine cancellation into the ML Kit
-            // Task (plain await() leaves the Task running after timeout).
+            // Task (plain await() leaves the Task running after timeout). Cancelling
+            // the token in `finally` guarantees a timed-out frame never leaks
+            // inference that keeps reading the bitmap fusion is trying to recycle.
             val cts = CancellationTokenSource()
-            val barcodes = client().process(image).await(cts)
+            val barcodes: List<com.google.mlkit.vision.barcode.common.Barcode> = try {
+                client().process(image).await(cts)
+            } finally {
+                runCatching { cts.cancel() }
+            }
             if (barcodes.isEmpty()) {
                 DecodeOutcome.NotFound("ML Kit found no barcode")
             } else {

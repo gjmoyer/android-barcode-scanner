@@ -82,6 +82,10 @@ class MsiPlesseyDecoder(
                     val primary = decodeWithGray(frame, working, variants, copies)
                     if (primary is DecodeOutcome.Success) return@withContext primary
                     // Fallback (tiny modules): 1440w alone, long payloads only.
+                    // Cooperative: check cancellation before the expensive upscale
+                    // so a fusion timeout / bar-phase deadline skips it instead of
+                    // allocating 1440w only to be cancelled mid-decode.
+                    ensureActive()
                     val scaled1440 = grayCopy(frame.bitmap, FALLBACK_GRAY_WIDTH)
                     try {
                         val fallback = decodeWithGray(
@@ -250,8 +254,22 @@ class MsiPlesseyDecoder(
                         for (candidate in scanlineCandidates(runs)) consider(candidate, false)
                         for (candidate in scanlineCandidatesReversed(runs)) consider(candidate, true)
                     }
-                    // No early return: accumulate ALL binarization variants, then take
-                    // the max-vote winner (a later variant may out-vote an early one).
+                    // Cooperative early exit: a strong consensus after any variant
+                    // short-circuits the remaining binarizations (pristine labels
+                    // reach 4+ agreeing observations on the first Otsu pass; the
+                    // old code always ran ALL variants). Threshold is stricter
+                    // than the final ≥2 gate so a lucky 2-vote short FP can never
+                    // early-exit — it still needs the full vote pool to be
+                    // outranked by length×votes. Length floor applies here too.
+                    val early = pickWinner()
+                    if (early != null &&
+                        early.value >= EARLY_EXIT_VOTES &&
+                        early.key.length >= maxOf(minPayload, minPayloadDigits)
+                    ) {
+                        val rev = revVotes[early.key] ?: 0
+                        val upsideDown = frame.isUpsideDownCandidate || rev * 2 > early.value
+                        return success(early.key, details.getValue(early.key), frame, upsideDown)
+                    }
                 }
 
                 val winner = pickWinner()
@@ -1084,6 +1102,13 @@ class MsiPlesseyDecoder(
         const val FALLBACK_GRAY_WIDTH = 1440
         /** Fallback hits shorter than this are withheld (Luhn luck at this scale). */
         const val MIN_FALLBACK_DIGITS = 6
+        /**
+         * Strong-consensus early exit: after any binarization variant, a winner
+         * with this many agreeing observations returns immediately (pristine
+         * fast path). Strictly above the ≥2 final gate so lucky 2-vote shorts
+         * can never short-circuit the full ranking.
+         */
+        const val EARLY_EXIT_VOTES = 4
         const val MIN_RUNS = 12
         const val MIN_QUIET = 6
         /** START(2) + STOP(3) guard runs framing every candidate window. */
