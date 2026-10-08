@@ -18,17 +18,6 @@ android {
         minSdk = 28
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         consumerProguardFiles("consumer-rules.pro")
-
-        // zxing-cpp native bridge. ABIs needed for Play distribution.
-        ndk {
-            abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86_64")
-        }
-        externalNativeBuild {
-            cmake {
-                cppFlags += listOf("-std=c++20", "-frtti", "-fexceptions")
-                arguments += listOf("-DZXING_EXAMPLES=OFF", "-DZXING_WRITERS=OFF")
-            }
-        }
     }
 
     // NOTE: testOptions lives directly under android{} in AGP 8.x+
@@ -46,13 +35,6 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-        }
-    }
-
-    externalNativeBuild {
-        cmake {
-            path = file("CMakeLists.txt")
-            version = "3.22.1+"
         }
     }
 
@@ -88,6 +70,8 @@ dependencies {
     implementation(libs.coroutines.android)
     // Task<T>.await() for ML Kit's GMS Task API.
     implementation(libs.coroutines.play.services)
+    // Prebuilt zxing-cpp reader (bundles native lib + BarcodeReader JNI wrapper).
+    implementation(libs.zxingcpp.android)
 
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)

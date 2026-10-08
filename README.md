@@ -7,7 +7,7 @@ point-and-scan live mode.
 | Symbology | Engine |
 |---|---|
 | EAN-8/13, UPC-A/E, Code 39/93/128, ITF, Codabar, QR, Aztec, PDF-417, Data Matrix | ML Kit (primary, fast) |
-| GS1 DataBar (Omni / Stacked / Limited / Expanded / Expanded Stacked) | zxing-cpp v3.1.1 via JNI (`libzxing_bridge.so`) |
+| GS1 DataBar (Omni / Stacked / Limited / Expanded / Expanded Stacked) | zxing-cpp v3.1.1 prebuilt AAR (`io.github.zxing-cpp:android`) |
 | MSI Plessey (Mod10 / Mod11 / Mod1010 / Mod1110) | ML Kit isolation (candidate boxes + deskew → `MsiRoi`), custom pure-Kotlin scanline decoder (`data/msi/`, full-frame fallback `MsiPlessey`) |
 | Rotated / upside-down / blurred | Preprocessing + orientation fusion + multi-binarization |
 
@@ -18,11 +18,10 @@ reverse-direction reading for upside-down labels). See
 
 ## Requirements
 
-- Android Studio with **SDK 36+** (compileSdk 37, targetSdk 36), **NDK 28.2+**,
-  **CMake 3.22+** (SDK Manager → SDK Tools → NDK, CMake)
+- Android Studio with **SDK 36+** (compileSdk 37, targetSdk 36)
 - AGP 9.4.1, Kotlin 2.4.20 (built-in — no kotlin-android plugin), Gradle 9.6.0, JDK 17+
-- minSdk 28 (Android 9). First build fetches **zxing-cpp v3.1.1** via CMake
-  `FetchContent` — needs network once (readers-only C++20 build, no extra deps).
+- minSdk 28 (Android 9). zxing-cpp v3.1.1 arrives as a prebuilt Maven Central AAR
+  — no NDK/CMake source build, network fetch happens once via Gradle.
 
 ## Open in Android Studio
 
@@ -129,14 +128,13 @@ val config = ScannerConfigBuilder()
 
 ```
 barcode-scanner-sdk/          # the reusable library (only depend on this)
-  src/main/cpp/               # JNI bridge → zxing-cpp (DataBar path)
   src/main/java/com/barcodescanner/sdk/
     api/                      # public surface: facade, factory, config, result
     domain/model/             # Symbology, ScannerConfig, ScanFrame, DecodedBarcode
     domain/decoder/           # BarcodeDecoder strategy + DecoderRegistry
     domain/pipeline/          # downscale/contrast/orientation preprocessing
     data/mlkit/               # primary engine
-    data/zxingcpp/            # DataBar engine (JNI)
+    data/zxingcpp/            # DataBar engine (prebuilt zxing-cpp AAR)
     data/msi/                 # custom MSI Plessey engine
     data/ocr/                 # MSI SKU text fallback (ML Kit text recognition)
     data/fusion/              # multi-engine, multi-orientation voter
@@ -239,7 +237,7 @@ unvalidated text reads).
 
 ```bash
 ./gradlew :barcode-scanner-sdk:testDebugUnitTest   # unit tests (Robolectric + JUnit)
-./gradlew :sample-app:assembleDebug                # sample APK (builds native lib too)
+./gradlew :sample-app:assembleDebug                # sample APK
 ```
 
 ## License

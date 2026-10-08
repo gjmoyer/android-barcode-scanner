@@ -11,10 +11,9 @@ If you distribute the built AAR/APK, pass these notices on to your recipients.
 - Copyright: © the zxing-cpp authors (per-file copyright notices live in the
   upstream sources; see the project link above)
 - Use: DataBar (Omni/Stacked/Limited/Expanded) and general 1D/2D reader engine.
-  Fetched at build time via CMake `FetchContent` (`GIT_TAG v3.1.1`, readers-only,
-  `ZXING_WRITERS OFF`) and linked into `libzxing_bridge.so`. **The library is
-  used unmodified** — our JNI bridge (`barcode-scanner-sdk/src/main/cpp/`) only
-  calls its public reader API.
+  Consumed as a prebuilt Maven Central AAR (`io.github.zxing-cpp:android:3.1.1`,
+  which bundles the native library plus its `zxingcpp.BarcodeReader` JNI
+  wrapper) and used unmodified via its public `BarcodeReader` API.
 
 ## Google ML Kit — proprietary (no license text to reproduce)
 

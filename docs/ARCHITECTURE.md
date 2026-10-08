@@ -1,7 +1,7 @@
 # Architecture — barcode-scanner-sdk
 
 Clean-architecture, enterprise-style layering. Dependency rule: **outer layers depend inward**;
-`domain/` knows nothing about ML Kit, CameraX, or JNI.
+`domain/` knows nothing about ML Kit, CameraX, or zxing-cpp.
 
 ```
 ┌────────────────────────────────────────────────────────┐
@@ -15,7 +15,7 @@ Clean-architecture, enterprise-style layering. Dependency rule: **outer layers d
 │                   Contrast/Downscale/Orientation       │
 ├────────────────────────────────────────────────────────┤
 │ data/mlkit        MLKitDecoder (+mapper)               │  Primary engine
-│ data/zxingcpp     ZXingCppDecoder + ZXingCppBridge     │  DataBar engine (native)
+│ data/zxingcpp     ZXingCppDecoder (prebuilt AAR)       │  DataBar engine (native)
 │ data/msi          MsiPlesseyDecoder + table/checksum/  │  Custom MSI engine
 │                   binarizer                            │
 │ data/ocr          OcrSkuDecoder + OcrEngine (ML Kit    │  MSI SKU text fallback
@@ -71,10 +71,11 @@ No pipeline change.
   api->data->api cycle; hosts import from `api` (identical type via typealias).
 - **Manual DI, internal container** over Hilt: libraries must not force a DI framework on hosts,
   and hosts must not bypass fusion via public decoder handles.
-- **JNI to zxing-cpp v3.1.1** (not the Java `zxing` port): DataBar-Omni/Stacked/Limited/
-  Expanded/Expanded-Stacked + maintained C++ core; graceful `isAvailable=false`
-  fallback when the `.so` is absent (tests). Native filter/mapping use v3 identifiers
-  and space-tolerant HRI matching (`ToString` returns "DataBar Expanded", "QR Code").
+- **Prebuilt zxing-cpp v3.1.1 AAR** (not the Java `zxing` port, not a source
+  build): DataBar-Omni/Stacked/Limited/Expanded/Expanded-Stacked + maintained
+  C++ core via the `io.github.zxing-cpp:android` artifact's public
+  `BarcodeReader` API; graceful `NotFound` fallback when the native lib is
+  absent (tests). Native format filter/mapping use the wrapper `Format` enum.
 - **Pure-Kotlin MSI first, native optional later**: tables + scanline logic stay in Kotlin for
   testability; the `MsiPlesseyDecoder` boundary is the seam for a future NEON/C++ fast path.
   The code table/guards/checksums are verified end-to-end (Zint-rendered fixtures →

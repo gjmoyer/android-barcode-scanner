@@ -7,7 +7,7 @@ import com.barcodescanner.sdk.api.BarcodeScannerFactory
 import com.barcodescanner.sdk.api.MsiChecksumPolicy
 import com.barcodescanner.sdk.api.ScanResult
 import com.barcodescanner.sdk.api.ScannerConfigBuilder
-import com.barcodescanner.sdk.data.zxingcpp.ZXingCppBridge
+import com.barcodescanner.sdk.data.zxingcpp.ZXingCppDecoder
 import com.barcodescanner.sdk.domain.pipeline.OrientationCandidates
 import kotlinx.coroutines.runBlocking
 import org.junit.Assume.assumeTrue
@@ -44,7 +44,7 @@ class DeviceMsiTest {
             assetNames.isNotEmpty(),
         )
         val out = StringBuilder()
-        out.appendLine("NATIVE_ZXING_AVAILABLE=${ZXingCppBridge.isAvailable}")
+        out.appendLine("NATIVE_ZXING_AVAILABLE=${ZXingCppDecoder.isAvailable}")
         // Known-exact expectations (correct per-label policy).
         val expected = mapOf(
             "msi-quakotml-0186477.png" to
@@ -133,7 +133,7 @@ class DeviceMsiTest {
         val appContext = instrumentation.targetContext
         assumeTrue(
             "zxing-cpp native lib required for DataBar rotation checks",
-            ZXingCppBridge.isAvailable,
+            ZXingCppDecoder.isAvailable,
         )
         val fixtures = listOf("databar-omni.png", "databar-ltd.png", "databar-exp.png")
             .filter { instrumentation.context.assets.list("msi_samples")?.contains(it) == true }

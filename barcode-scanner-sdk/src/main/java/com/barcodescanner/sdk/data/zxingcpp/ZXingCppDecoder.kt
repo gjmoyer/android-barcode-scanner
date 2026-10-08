@@ -10,10 +10,12 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import org.json.JSONArray
+import zxingcpp.BarcodeReader
 
 /**
- * Fallback decoder backed by zxing-cpp via JNI (pinned v3.1.1, see CMakeLists.txt).
+ * Fallback decoder backed by the prebuilt zxing-cpp Android AAR
+ * (`io.github.zxing-cpp:android`, see `gradle/libs.versions.toml`) via its
+ * public [BarcodeReader] API — no in-repo JNI/CMake source.
  *
  * Coverage: critically **GS1 DataBar (Omnidirectional / Stacked / Limited /
  * Expanded / Expanded Stacked)** — the one family ML Kit cannot read — plus an
@@ -25,22 +27,26 @@ import org.json.JSONArray
  * MSI Plessey is deliberately EXCLUDED (zxing-cpp has no MSI reader) and is
  * handled by [com.barcodescanner.sdk.data.msi.MsiPlesseyDecoder].
  *
- * v3.x notes: native `ToString(format)` returns the human-readable name
- * ("DataBar Expanded", "QR Code", "Data Matrix", ...), and
- * `BarcodeFormatFromString` is case-insensitive ignoring " -_/" (and throws on
- * unknown names — the native side skips those). Filter + mapping below use the
- * v3.1.1 identifier set (DataBarOmni/DataBarStk/DataBarLtd/DataBarExp/...).
+ * Format filtering uses the wrapper's [BarcodeReader.Format] set: an empty set
+ * is the wrapper default and means "scan all formats" (same as the old
+ * empty-filter fallback), which is how the UNKNOWN-only passthrough works.
  */
 class ZXingCppDecoder(
     enabledSymbologies: Set<Symbology>,
     private val dispatcher: CoroutineDispatcher = Dispatchers.Default,
     /**
-     * Maps to native TryHarder. Wired from `ScannerConfig.zxingTryHarder`
- * in [ScannerContainer]: null is thorough (fast only when a host opts out
- * explicitly). Rotation/inversion retries (TryRotate/TryInvert) stay on in
- * both modes.
+     * Maps to [BarcodeReader.Options.tryHarder]. Wired from
+     * `ScannerConfig.zxingTryHarder` in [ScannerContainer]: null is thorough
+     * (fast only when a host opts out explicitly). Rotation/inversion retries
+     * (tryRotate/tryInvert) stay on in both modes.
      */
     private val thorough: Boolean = true,
+    /**
+     * Injectable reader construction (tests supply fakes and avoid loading the
+     * native lib on the JVM). Production passes the real [BarcodeReader].
+     */
+    private val readerFactory: (BarcodeReader.Options) -> BarcodeReader =
+        { options -> BarcodeReader(options) },
 ) : BarcodeDecoder {
 
     override val name: String = NAME
@@ -52,35 +58,34 @@ class ZXingCppDecoder(
         if (Symbology.DATA_BAR in enabledSymbologies) add(Symbology.DATA_BAR)
         if (Symbology.DATA_BAR_EXPANDED in enabledSymbologies) add(Symbology.DATA_BAR_EXPANDED)
         if (Symbology.DATA_BAR_LIMITED in enabledSymbologies) add(Symbology.DATA_BAR_LIMITED)
-        // UNKNOWN passthrough only: the native filter below emits no names for
-        // it, so the native side falls back to a scan-all pass and anything
+        // UNKNOWN passthrough only: toFormats() emits no names for it, so an
+        // UNKNOWN-only set becomes the wrapper default (scan-all) and anything
         // unmapped surfaces as UNKNOWN (at reduced confidence — see parse).
         if (Symbology.UNKNOWN in enabledSymbologies) add(Symbology.UNKNOWN)
     }
 
     override suspend fun decode(frame: ScanFrame): DecodeOutcome = withContext(dispatcher) {
-        if (!ZXingCppBridge.isAvailable) {
-            return@withContext DecodeOutcome.NotFound("zxing native lib unavailable")
-        }
         if (supportedSymbologies.isEmpty()) {
             return@withContext DecodeOutcome.NotFound("no zxing symbologies enabled")
         }
         try {
-            val bmp = frame.bitmap
-            val w = bmp.width
-            val h = bmp.height
-            val pixels = IntArray(w * h)
-            bmp.getPixels(pixels, 0, w, 0, 0, w, h)
-            val json = ZXingCppBridge.decodeBitmap(
-                pixels = pixels,
-                width = w,
-                height = h,
+            val options = BarcodeReader.Options(
+                formats = toFormats(),
                 tryRotate = true,
                 tryInvert = true,
                 tryHarder = thorough,
-                enabledFormats = enabledFormatsArg(),
             )
-            parse(json, frame)
+            val reader = try {
+                readerFactory(options)
+            } catch (e: UnsatisfiedLinkError) {
+                return@withContext DecodeOutcome.NotFound("zxing native lib unavailable")
+            }
+            val results = try {
+                reader.read(frame.bitmap)
+            } catch (e: UnsatisfiedLinkError) {
+                return@withContext DecodeOutcome.NotFound("zxing native lib unavailable")
+            }
+            parse(results, frame)
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
@@ -89,49 +94,43 @@ class ZXingCppDecoder(
     }
 
     /**
-     * Native format filter using v3.1.1 identifiers. DataBar is split by family
-     * so a host enabling only LIMITED does not pay for (or receive) omni scans:
-     * omni family (Omni/Stk/StkOmni), Expanded (+ExpStk), Limited. Natives are
-     * deliberately never listed — ML Kit owns them.
+     * Native format filter using the wrapper [BarcodeReader.Format] set. DataBar
+     * is split by family so a host enabling only LIMITED does not pay for (or
+     * receive) omni scans. Natives are deliberately never listed — ML Kit owns
+     * them. An empty result (UNKNOWN-only enabled set) falls back to the wrapper
+     * default scan-all pass.
      */
-    internal fun enabledFormatsArg(): String {
-        val names = mutableListOf<String>()
+    internal fun toFormats(): Set<BarcodeReader.Format> {
+        val formats = mutableSetOf<BarcodeReader.Format>()
         if (Symbology.DATA_BAR in supportedSymbologies) {
-            names += listOf("DataBarOmni", "DataBarStk", "DataBarStkOmni")
+            formats += listOf(
+                BarcodeReader.Format.DATA_BAR_OMNI,
+                BarcodeReader.Format.DATA_BAR_STK,
+                BarcodeReader.Format.DATA_BAR_STK_OMNI,
+            )
         }
         if (Symbology.DATA_BAR_EXPANDED in supportedSymbologies) {
-            names += listOf("DataBarExp", "DataBarExpStk")
+            formats += listOf(
+                BarcodeReader.Format.DATA_BAR_EXP,
+                BarcodeReader.Format.DATA_BAR_EXP_STK,
+            )
         }
-        if (Symbology.DATA_BAR_LIMITED in supportedSymbologies) names += "DataBarLtd"
-        if (Symbology.EAN_8 in supportedSymbologies) names += "EAN-8"
-        if (Symbology.EAN_13 in supportedSymbologies) names += "EAN-13"
-        if (Symbology.UPC_A in supportedSymbologies) names += "UPC-A"
-        if (Symbology.UPC_E in supportedSymbologies) names += "UPC-E"
-        if (Symbology.CODE_39 in supportedSymbologies) names += "Code39"
-        if (Symbology.CODE_93 in supportedSymbologies) names += "Code93"
-        if (Symbology.CODE_128 in supportedSymbologies) names += "Code128"
-        if (Symbology.ITF in supportedSymbologies) names += "ITF"
-        if (Symbology.CODABAR in supportedSymbologies) names += "Codabar"
-        if (Symbology.QR_CODE in supportedSymbologies) names += "QRCode"
-        if (Symbology.AZTEC in supportedSymbologies) names += "Aztec"
-        if (Symbology.PDF_417 in supportedSymbologies) names += "PDF417"
-        if (Symbology.DATA_MATRIX in supportedSymbologies) names += "DataMatrix"
-        return names.joinToString(",")
+        if (Symbology.DATA_BAR_LIMITED in supportedSymbologies) {
+            formats += BarcodeReader.Format.DATA_BAR_LTD
+        }
+        return formats
     }
 
-    /** Parses the native JSON array into SDK barcodes (internal for tests). */
-    internal fun parse(json: String, frame: ScanFrame): DecodeOutcome {
-        val arr = runCatching { JSONArray(json) }.getOrNull()
-            ?: return DecodeOutcome.NotFound("invalid native JSON")
-        if (arr.length() == 0) return DecodeOutcome.NotFound("zxing found no barcode")
+    /** Maps prebuilt wrapper results into SDK barcodes (internal for tests). */
+    internal fun parse(results: List<BarcodeReader.Result>, frame: ScanFrame): DecodeOutcome {
+        if (results.isEmpty()) return DecodeOutcome.NotFound("zxing found no barcode")
         val out = mutableListOf<DecodedBarcode>()
         // Dedup native duplicates on (value, symbology), keep first.
         val seen = HashSet<String>()
-        for (i in 0 until arr.length()) {
-            val o = arr.optJSONObject(i) ?: continue
-            val text = o.optString("text").orEmpty()
+        for (r in results) {
+            val text = r.text.orEmpty()
             if (text.isEmpty()) continue
-            val symbology = mapFormat(o.optString("format").orEmpty())
+            val symbology = mapFormat(r.format)
             // UNKNOWN only passes when the host explicitly enabled it, at reduced
             // confidence: Telepen/MaxiCode/MicroQR/add-ons must never outrank a
             // real symbology hit or trip the 0.95 early-exit, and hosts can filter
@@ -154,42 +153,78 @@ class ZXingCppDecoder(
     }
 
     /**
-     * Maps native v3.1.1 `ToString` outputs (HRI with spaces: "DataBar Expanded",
-     * "QR Code", "Data Matrix", "EAN-13", ...) plus identifier spellings.
-     * Normalization (lowercase, letters/digits only) makes both spellings match.
+     * Maps the prebuilt wrapper [BarcodeReader.Format] enum to SDK symbologies.
      * Formats with no SDK counterpart (add-ons, Telepen, MaxiCode, Micro/rMQR,
-     * DXFilmEdge, ISBN) map to UNKNOWN.
+     * DXFilmEdge, ISBN, group pseudo-formats) map to UNKNOWN.
      */
-    internal fun mapFormat(format: String): Symbology {
-        val key = format.lowercase().filter { it.isLetterOrDigit() }
-        return when (key) {
-            "databar",
-            "databaromni",
-            "databarstacked", "databarstk",
-            "databarstackedomni", "databarstkomni",
+    internal fun mapFormat(format: BarcodeReader.Format): Symbology {
+        return when (format) {
+            BarcodeReader.Format.DATA_BAR,
+            BarcodeReader.Format.DATA_BAR_OMNI,
+            BarcodeReader.Format.DATA_BAR_STK,
+            BarcodeReader.Format.DATA_BAR_STK_OMNI,
             -> Symbology.DATA_BAR
-            "databarexpanded", "databarexp",
-            "databarexpandedstacked", "databarexpstk",
+            BarcodeReader.Format.DATA_BAR_EXP,
+            BarcodeReader.Format.DATA_BAR_EXP_STK,
             -> Symbology.DATA_BAR_EXPANDED
-            "databarlimited", "databarltd" -> Symbology.DATA_BAR_LIMITED
-            "ean8" -> Symbology.EAN_8
-            "ean13" -> Symbology.EAN_13
-            "upca" -> Symbology.UPC_A
-            "upce" -> Symbology.UPC_E
-            "code39", "code39standard", "code39extended", "code32", "pzn" -> Symbology.CODE_39
-            "code93" -> Symbology.CODE_93
-            "code128" -> Symbology.CODE_128
-            "itf", "itf14" -> Symbology.ITF
-            "codabar" -> Symbology.CODABAR
-            "qrcode", "qrcodemodel1", "qrcodemodel2" -> Symbology.QR_CODE
-            "aztec", "azteccode", "aztecrune" -> Symbology.AZTEC
-            "pdf417", "compactpdf417", "micropdf417" -> Symbology.PDF_417
-            "datamatrix" -> Symbology.DATA_MATRIX
+            BarcodeReader.Format.DATA_BAR_LTD -> Symbology.DATA_BAR_LIMITED
+            BarcodeReader.Format.EAN_8 -> Symbology.EAN_8
+            BarcodeReader.Format.EAN_13 -> Symbology.EAN_13
+            BarcodeReader.Format.UPC_A -> Symbology.UPC_A
+            BarcodeReader.Format.UPC_E -> Symbology.UPC_E
+            BarcodeReader.Format.CODE_39,
+            BarcodeReader.Format.CODE_39_STD,
+            BarcodeReader.Format.CODE_39_EXT,
+            BarcodeReader.Format.CODE_32,
+            BarcodeReader.Format.PZN,
+            -> Symbology.CODE_39
+            BarcodeReader.Format.CODE_93 -> Symbology.CODE_93
+            BarcodeReader.Format.CODE_128 -> Symbology.CODE_128
+            BarcodeReader.Format.ITF,
+            BarcodeReader.Format.ITF_14,
+            -> Symbology.ITF
+            BarcodeReader.Format.CODABAR -> Symbology.CODABAR
+            BarcodeReader.Format.QR_CODE,
+            BarcodeReader.Format.QR_CODE_MODEL_1,
+            BarcodeReader.Format.QR_CODE_MODEL_2,
+            -> Symbology.QR_CODE
+            BarcodeReader.Format.AZTEC,
+            BarcodeReader.Format.AZTEC_CODE,
+            BarcodeReader.Format.AZTEC_RUNE,
+            -> Symbology.AZTEC
+            BarcodeReader.Format.PDF_417,
+            BarcodeReader.Format.COMPACT_PDF_417,
+            BarcodeReader.Format.MICRO_PDF_417,
+            -> Symbology.PDF_417
+            BarcodeReader.Format.DATA_MATRIX -> Symbology.DATA_MATRIX
             else -> Symbology.UNKNOWN
         }
     }
 
     companion object {
         const val NAME = "ZXingCpp"
+
+        @Volatile
+        private var cachedAvailability: Boolean? = null
+
+        /**
+         * True if the prebuilt zxing-cpp native library loads on this device.
+         * Cached after the first probe. Unit tests on the JVM return false so
+         * fusion can continue to the next engine instead of crashing.
+         */
+        val isAvailable: Boolean
+            get() {
+                if (cachedAvailability == null) {
+                    cachedAvailability = runCatching {
+                        // init loads "zxingcpp_android"; failure means no native lib
+                        // (JVM unit tests, missing ABI) — decode() then yields NotFound.
+                        BarcodeReader(BarcodeReader.Options())
+                        true
+                    }.onFailure {
+                        android.util.Log.w("ZXingCppDecoder", "zxing-cpp native lib unavailable", it)
+                    }.getOrDefault(false)
+                }
+                return cachedAvailability == true
+            }
     }
 }
