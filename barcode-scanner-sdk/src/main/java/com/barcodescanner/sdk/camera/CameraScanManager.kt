@@ -44,6 +44,14 @@ internal class CameraScanManager(
     private val config: ScannerConfig,
     private val scope: CoroutineScope,
     private val onFrame: suspend (ScanFrame) -> Unit,
+    /**
+     * Called (on the main thread) when camera binding fails — e.g. no back
+     * camera, camera in use, or the lifecycle is already destroyed. Without
+     * this, [ProcessCameraProvider.bindToLifecycle] throws asynchronously
+     * inside the provider-future listener (after [start] returned), which is
+     * an uncaught main-thread exception and crashes the app.
+     */
+    private val onError: (Throwable) -> Unit = {},
 ) {
     private var cameraProvider: ProcessCameraProvider? = null
     private var previewUseCase: Preview? = null
@@ -86,7 +94,13 @@ internal class CameraScanManager(
         val future = ProcessCameraProvider.getInstance(context)
         future.addListener({
             if (stopped) return@addListener
-            val provider = runCatching { future.get() }.getOrNull() ?: return@addListener
+            val provider = runCatching { future.get() }.getOrNull()
+            if (provider == null) {
+                val t = IllegalStateException("camera provider unavailable")
+                android.util.Log.w(TAG, "camera provider unavailable", t)
+                onError(t)
+                return@addListener
+            }
             cameraProvider = provider
             bind(provider, lifecycleOwner, surfaceProvider)
         }, ContextCompat.getMainExecutor(context))
@@ -162,12 +176,25 @@ internal class CameraScanManager(
         }
         previewUseCase = preview
         analysisUseCase = analysis
-        provider.bindToLifecycle(
-            lifecycleOwner,
-            CameraSelector.DEFAULT_BACK_CAMERA,
-            preview,
-            analysis,
-        )
+        try {
+            provider.bindToLifecycle(
+                lifecycleOwner,
+                CameraSelector.DEFAULT_BACK_CAMERA,
+                preview,
+                analysis,
+            )
+        } catch (t: Throwable) {
+            // Binding throws for missing/in-use cameras, destroyed lifecycles,
+            // or unbindable use cases — and it throws HERE, asynchronously on
+            // the main executor after start() returned, so the host's
+            // try/catch around startCamera cannot see it. Clean up the
+            // half-bound use cases and report instead of crashing.
+            runCatching { provider.unbind(preview, analysis) }
+            previewUseCase = null
+            analysisUseCase = null
+            android.util.Log.w(TAG, "camera bind failed", t)
+            onError(t)
+        }
     }
 
     private fun ImageProxy.toScanFrame(): ScanFrame? = runCatching {
@@ -340,6 +367,8 @@ internal class CameraScanManager(
     }.getOrNull()
 
     companion object {
+        /** Logcat tag; filter with `adb logcat -s CameraScanManager`. */
+        const val TAG = "CameraScanManager"
         /** Rejects bogus ImageProxy dimensions before the `w*h*3/2` alloc. */
         const val MAX_FRAME_PIXELS = 16_000_000L
 

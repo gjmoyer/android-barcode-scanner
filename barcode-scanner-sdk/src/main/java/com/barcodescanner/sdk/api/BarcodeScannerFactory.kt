@@ -144,6 +144,19 @@ internal class DefaultBarcodeScanner(
                         }
                     }
                 },
+                onError = { t ->
+                    // Async bind failure (no/in-use camera, dead lifecycle):
+                    // the host's try/catch around startCamera cannot see it
+                    // (bind runs after start returns), so surface it on the
+                    // results flow instead of failing silently.
+                    _results.tryEmit(
+                        ScanResult.Failure(
+                            message = "camera unavailable: ${t.message}",
+                            cause = t,
+                            kind = ScanResult.ErrorKind.TRANSIENT,
+                        ),
+                    )
+                },
             )
             cameraManager = manager
             manager.start(lifecycleOwner, surfaceProvider)
