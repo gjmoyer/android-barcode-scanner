@@ -191,7 +191,7 @@ class MsiNativeDecoder(
 
         /**
          * True when the native library loaded. False on ABIs we don't ship
-         * (e.g. x86 32-bit emulators) and on JVM unit tests — [decode] then
+         * (x86/x86_64 — ARM-only packaging, see the SDK/sample build files)
          * yields NotFound instead of crashing. The load is guarded (a bare
          * `System.loadLibrary` in class init throws
          * `ExceptionInInitializerError`, an Error that fusion's
