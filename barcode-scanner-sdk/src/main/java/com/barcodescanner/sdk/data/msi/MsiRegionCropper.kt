@@ -142,6 +142,17 @@ object MsiRegionCropper {
         var img = runCatching {
             Bitmap.createBitmap(src, padded.left, padded.top, padded.width(), padded.height())
         }.getOrNull() ?: return null
+        // Ownership: downstream recycles every bitmap produced here, so `img`
+        // must NEVER alias `src`. When the padded box covers the whole image,
+        // createBitmap may return the source itself — copy then, so recycling
+        // `img` cannot recycle the caller's frame (which fusion still needs
+        // for the remaining engines/orientations; recycling it faulted every
+        // full-frame decode after an ROI hit on device).
+        if (img === src) {
+            img = runCatching {
+                src.copy(src.config ?: Bitmap.Config.ARGB_8888, false)
+            }.getOrNull() ?: return null
+        }
         var applied = 0f
         try {
             val raw = rawAngleFromCorners(corners) ?: 0f

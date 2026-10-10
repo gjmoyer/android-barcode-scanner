@@ -124,6 +124,15 @@ class MsiNativeDecoder(
                 )
             }
             val validated = validation.payloadWithoutChecksum
+            // Degenerate reads (blank/shadow areas decode as all-same-digit
+            // windows that still checksum-validate, e.g. all-zeros) are
+            // withheld: a real payload is never a single repeated digit.
+            // Documented tradeoff — a hypothetical all-same-digit label would
+            // miss — vastly preferable to emitting zeros from empty areas.
+            if (validated.toSet().size < 2) {
+                voteGate.reset()
+                return@withContext DecodeOutcome.NotFound("MSI native: degenerate payload")
+            }
             // stripChecksum=false still validates under the policy (precision
             // gate stays) but emits the full codeword WITH check digits and
             // reports checksumStripped=false; length floors then count codeword
@@ -166,6 +175,9 @@ class MsiNativeDecoder(
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
+            // Rare path (already counted as Error below): log the class so
+            // on-device forensics can tell OOM/recycled-bitmap/JNI apart.
+            android.util.Log.w(NAME, "decode failed: ${t.javaClass.simpleName}: ${t.message}")
             DecodeOutcome.Error(DecoderException("MSI native decode failed", t), recoverable = true)
         }
     }

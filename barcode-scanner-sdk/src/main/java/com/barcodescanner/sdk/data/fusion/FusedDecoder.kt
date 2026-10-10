@@ -277,7 +277,8 @@ class FusedDecoder(
                     TAG,
                     "engine=${decoder.name} rot=${candidate.relativeRotation} " +
                         "ms=${(System.nanoTime() - t) / 1_000_000} " +
-                        "error(recoverable=${outcome.recoverable})",
+                        "error(recoverable=${outcome.recoverable}) " +
+                        "cause=${outcome.cause.javaClass.simpleName}: ${outcome.cause.message}",
                 )
                 if (!outcome.recoverable) throw outcome.cause
             }

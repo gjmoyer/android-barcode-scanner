@@ -512,3 +512,38 @@ Shelf samples (user-supplied 6 PNGs -> `src/test/resources/msi-shelf/`,
 - Device: `DeviceMsiTest` expectations corrected to ground truth for all six
   (starbucks was wrongly MOD_10->payload; now MOD_10_10->0168971) + new
   3x repeat-stability sweep test. Needs `connectedDebugAndroidTest` run.
+
+## Pass 19 follow-up — on-device verification (Pixel 10a emu + Pixel 6a)
+
+`connectedDebugAndroidTest` on both devices: 3/3 green, identical verdicts.
+The device run caught two real bugs the host harness could not:
+
+1. Bitmap-ownership violation (P0): `MsiRegionCropper.cropAndDeskew` recycled
+   the live fusion frame when the padded box covered the whole image
+   (`createBitmap` may return the source itself). Every subsequent full-frame
+   decode faulted (`getPixels() on a recycled bitmap`, caught as
+   recoverable Error) and every rotation faulted (escaping as
+   `Failure("Fusion failed")` — databar was entirely broken on device).
+   Fixed with copy-if-aliased + JVM ownership contract tests. (Robolectric
+   shadows always copy, so the JVM test pins the invariant; the bug itself is
+   framework-behavior-only.)
+2. Full-frame voter blocked one-shot recall: `requireConsecutiveFrames=2` on
+   the full-frame instance could never confirm a single-observation frame,
+   and the full sweep never runs on fresh-live frames anyway — so the voter
+   only ever gated one-shot/stale scans. Now 1 (live keeps the stability
+   gate + dedup; every hit keeps native >=2-vote + policy gates). Plus
+   degenerate-payload rejection (blank areas decode as all-same-digit
+   windows that checksum-validate — observed all-zeros reads).
+3. Engine order swapped to full-frame-first: measured more accurate
+   (intact quiet zones; ROI tight crops birth luck-validating truncations),
+   and easy frames skip localization via early-exit. Fixes silkalm on device
+   (`MsiNative|0826593`); tilt coverage unchanged (ROI backup intact).
+
+Device sweep results (both devices, 3x repeats stable): yakult MOD_10
+`0828147` (MsiNative), dixie MOD_10 `0087573` (MsiRoi), starbucks MOD_10_10
+`0168971` (MsiNative), silkalm MOD_10 `0826593` (MsiNative), all databar
+fixtures via ZXingCpp. Remaining tracked gaps (matrix-logged, not asserted):
+quakotml (full-res modules overshoot; truncated reads honestly gated),
+ondeg (phantoms validate). Also added miss-reason + cause logging to the
+ROI/fusion/zxing/native error paths (the databar escape was undebuggable
+without it). JVM suite 120/120 green.
