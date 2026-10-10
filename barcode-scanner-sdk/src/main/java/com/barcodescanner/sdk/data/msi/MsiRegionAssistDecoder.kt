@@ -1,7 +1,6 @@
 package com.barcodescanner.sdk.data.msi
 
 import com.barcodescanner.sdk.data.mlkit.MlKitRegionLocalizer
-import com.barcodescanner.sdk.data.ocr.OcrSkuDecoder
 import com.barcodescanner.sdk.domain.decoder.BarcodeDecoder
 import com.barcodescanner.sdk.domain.decoder.DecodeOutcome
 import com.barcodescanner.sdk.domain.decoder.DecoderException
@@ -20,7 +19,7 @@ import kotlinx.coroutines.withContext
  * cannot decode MSI — it is not a supported format — but
  * `enableAllPotentialBarcodes()` still returns boxes for barcode-looking
  * strips), [MsiRegionCropper] pads + deskews each strip, and the shared
- * [MsiPlesseyDecoder] decodes the rectified crop. A miss here is cheap and
+ * [MsiNativeDecoder] decodes the rectified crop. A miss here is cheap and
  * explicit ([DecodeOutcome.NotFound]) so fusion falls through to full-frame MSI.
  *
  * Routing notes:
@@ -35,12 +34,6 @@ import kotlinx.coroutines.withContext
  * - regions are largest-first, capped at [MAX_REGIONS]; tiny boxes that cannot
  *   hold modules are skipped. Every skip/hit is logged under [TAG] so a device
  *   run (`adb logcat -s MsiRoi`) reports the localizer hit-rate directly.
- * - when bars miss on every crop, [ocr] (when provided) reads the printed
- *   SKU/GTIN on ONE expanded crop of the largest region — a fast path for the
- *   common "bars unrecoverable, print readable" label. Ordering is safe: OCR
- *   confidence (≤0.7) never trips fusion's 0.95 early-exit, later bar hits still
- *   outrank it, and a miss here falls through to the standard full-frame
- *   engines + full-frame OCR exactly as before.
  *
  * Confidence is 1.0 like plain MSI: the inner decoder only emits checksum-gated
  * (≥2 agreeing observations) hits; this wrapper only retags the engine name so
@@ -48,10 +41,8 @@ import kotlinx.coroutines.withContext
  */
 class MsiRegionAssistDecoder(
     private val localizer: MlKitRegionLocalizer,
-    private val msi: MsiPlesseyDecoder,
+    private val msi: BarcodeDecoder,
     private val dispatcher: CoroutineDispatcher = Dispatchers.Default,
-    /** Null disables the OCR fast path (bar-only assist). */
-    private val ocr: OcrSkuDecoder? = null,
 ) : BarcodeDecoder {
 
     override val name: String = NAME
@@ -122,52 +113,7 @@ class MsiRegionAssistDecoder(
             if (hits.isNotEmpty()) {
                 return@withContext DecodeOutcome.Success(hits)
             }
-            // Bars missed everywhere: one OCR attempt on the expanded largest
-            // region (bars + surrounding print) before falling through.
-            val ocrDecoder = ocr
-            val largest = candidates.firstOrNull()?.boundingBox
-            if (ocrDecoder == null || largest == null) {
-                return@withContext DecodeOutcome.NotFound("MSI-ROI: no region decoded")
-            }
-            val expanded = MsiRegionCropper.expandForOcr(largest, frame.bitmap.width, frame.bitmap.height)
-            if (expanded == null) {
-                return@withContext DecodeOutcome.NotFound("MSI-ROI: no region decoded")
-            }
-            val tOcr = System.nanoTime()
-            val ocrCrop = runCatching {
-                android.graphics.Bitmap.createBitmap(
-                    frame.bitmap, expanded.left, expanded.top, expanded.width(), expanded.height(),
-                )
-            }.getOrNull() ?: return@withContext DecodeOutcome.NotFound("MSI-ROI: no region decoded")
-            try {
-                when (val outcome = ocrDecoder.decode(frame.copy(bitmap = ocrCrop))) {
-                    is DecodeOutcome.Success -> {
-                        val ms = (System.nanoTime() - tOcr) / 1_000_000
-                        val rebased = outcome.barcodes.map { b ->
-                            b.copy(boundingBox = MsiRegionCropper.shiftBox(b.boundingBox, expanded.left, expanded.top))
-                        }
-                        android.util.Log.d(
-                            TAG,
-                            "ocrCrop HIT value=${rebased.firstOrNull()?.rawValue} " +
-                                "ocrMs=${ms} expanded=$expanded",
-                        )
-                        DecodeOutcome.Success(rebased)
-                    }
-                    is DecodeOutcome.NotFound -> {
-                        android.util.Log.d(TAG, "ocrCrop miss expanded=$expanded")
-                        DecodeOutcome.NotFound("MSI-ROI: no region decoded")
-                    }
-                    is DecodeOutcome.Error -> {
-                        android.util.Log.d(
-                            TAG,
-                            "ocrCrop error(recoverable=${outcome.recoverable})",
-                        )
-                        DecodeOutcome.NotFound("MSI-ROI: no region decoded")
-                    }
-                }
-            } finally {
-                runCatching { ocrCrop.recycle() }
-            }
+            return@withContext DecodeOutcome.NotFound("MSI-ROI: no region decoded")
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {

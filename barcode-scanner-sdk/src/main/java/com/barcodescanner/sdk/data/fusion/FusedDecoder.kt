@@ -1,6 +1,6 @@
 package com.barcodescanner.sdk.data.fusion
 
-import com.barcodescanner.sdk.data.msi.MsiPlesseyDecoder
+import com.barcodescanner.sdk.data.msi.MsiNativeDecoder
 import com.barcodescanner.sdk.domain.decoder.BarcodeDecoder
 import com.barcodescanner.sdk.domain.decoder.DecodeOutcome
 import com.barcodescanner.sdk.domain.decoder.DecoderException
@@ -302,7 +302,7 @@ class FusedDecoder(
         if (decoder.supportedSymbologies.intersect(config.enabledSymbologies).isEmpty()) {
             return false
         }
-        if (!frame.allowFallbackSweep && decoder.name == MsiPlesseyDecoder.NAME) {
+        if (!frame.allowFallbackSweep && decoder.name == MsiNativeDecoder.NAME) {
             // Fresh live frame: ML Kit isolation (MLKit decode + MsiRoi crops)
             // and the native second opinion already ran on this candidate. The
             // full-frame MSI sweep costs more than the next camera frame, so it

@@ -25,7 +25,7 @@ import zxingcpp.BarcodeReader
  * Kit already resolves).
  *
  * MSI Plessey is deliberately EXCLUDED (zxing-cpp has no MSI reader) and is
- * handled by [com.barcodescanner.sdk.data.msi.MsiPlesseyDecoder].
+ * handled by [com.barcodescanner.sdk.data.msi.MsiNativeDecoder].
  *
  * Format filtering uses the wrapper's [BarcodeReader.Format] set: an empty set
  * is the wrapper default and means "scan all formats" (same as the old

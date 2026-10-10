@@ -2,7 +2,7 @@ package com.barcodescanner.sdk.data.fusion
 
 import android.graphics.Bitmap
 import com.barcodescanner.sdk.data.mlkit.MLKitDecoder
-import com.barcodescanner.sdk.data.msi.MsiPlesseyDecoder
+import com.barcodescanner.sdk.data.msi.MsiNativeDecoder
 import com.barcodescanner.sdk.data.zxingcpp.ZXingCppDecoder
 import com.barcodescanner.sdk.domain.decoder.BarcodeDecoder
 import com.barcodescanner.sdk.domain.decoder.DecodeOutcome
@@ -250,7 +250,7 @@ class FusedDecoderTest {
         // No degraded mode: MSI is attempted on every orientation candidate
         // (sideways included — the thorough decoder samples vertical scanlines).
         val msi = FakeDecoder(
-            MsiPlesseyDecoder.NAME,
+            MsiNativeDecoder.NAME,
             supportedSymbologies = setOf(Symbology.MSI_PLESSEY),
             results = listOf(DecodeOutcome.NotFound()),
         )
@@ -266,7 +266,7 @@ class FusedDecoderTest {
         // relative rotations are 0,180,90,270 — upright-first ordering is
         // sensor-relative, so the first candidate is already the upright view.
         val msi = FakeDecoder(
-            MsiPlesseyDecoder.NAME,
+            MsiNativeDecoder.NAME,
             supportedSymbologies = setOf(Symbology.MSI_PLESSEY),
             results = listOf(DecodeOutcome.NotFound()),
         )
@@ -285,7 +285,7 @@ class FusedDecoderTest {
         // instead of starving the viewfinder — but ROI-style primary engines
         // still run, on exactly one candidate.
         val msiFull = FakeDecoder(
-            MsiPlesseyDecoder.NAME,
+            MsiNativeDecoder.NAME,
             supportedSymbologies = setOf(Symbology.MSI_PLESSEY),
             results = listOf(DecodeOutcome.NotFound()),
         )
@@ -312,7 +312,7 @@ class FusedDecoderTest {
     fun sweepFrame_runsFullChain() = runBlocking {
         // One-shot and stale live frames sweep everything, all orientations.
         val msiFull = FakeDecoder(
-            MsiPlesseyDecoder.NAME,
+            MsiNativeDecoder.NAME,
             supportedSymbologies = setOf(Symbology.MSI_PLESSEY),
             results = listOf(DecodeOutcome.NotFound()),
         )

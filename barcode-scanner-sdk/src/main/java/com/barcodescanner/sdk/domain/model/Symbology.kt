@@ -37,7 +37,7 @@ enum class Symbology(
 
     /**
      * MSI Plessey (MSI / Plessey / Modified Plessey).
-     * Not supported by ML Kit nor zxing-cpp -> decoded by [com.barcodescanner.sdk.data.msi.MsiPlesseyDecoder].
+     * Not supported by ML Kit nor zxing-cpp -> decoded by [com.barcodescanner.sdk.data.msi.MsiNativeDecoder].
      */
     MSI_PLESSEY("MSI Plessey", requiresFallbackEngine = true),
 
