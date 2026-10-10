@@ -19,11 +19,15 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         consumerProguardFiles("consumer-rules.pro")
 
-        // Native MSI decoder (src/main/cpp): build for the ABIs we ship.
+        // Native MSI decoder (src/main/cpp): ARM only. Physical devices are
+        // ARM (arm64-v8a; armeabi-v7a kept for 32-bit hardware); x86/x86_64
+        // emulator slices are deliberately not shipped — the decoder degrades
+        // to NotFound without its .so (see MsiNativeDecoder.nativeAvailable),
+        // and modern emulators (e.g. the arm64 Pixel 10a AVD) are unaffected.
         externalNativeBuild {
             cmake {
                 cppFlags("-std=c++17")
-                abiFilters("armeabi-v7a", "arm64-v8a", "x86_64")
+                abiFilters("armeabi-v7a", "arm64-v8a")
             }
         }
     }
