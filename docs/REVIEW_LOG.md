@@ -430,3 +430,120 @@ reliable win is user-aimed: the box gets the human to fill the frame.
   mapping incl. sensor-crop offsets) applied in the direct YUV→ARGB conversion,
   so every engine shares the ROI. Sample draws the matching `ViewfinderView`
   box and configures 0.9×0.5. 109/109 unit green (6 ROI + 5 config tests).
+
+## Pass 19 — crash/hang/leak/perf review fixes + shelf-sample sweeps (2026-10-10)
+
+Systematic review of barcode-scanner-sdk for crashes, hangs, leaks,
+inefficiencies (see branch `review-fixes/crash-leak-perf`). Fixed:
+
+Crashes:
+- P0 `System.loadLibrary` in `MsiNativeDecoder` companion init threw
+  `ExceptionInInitializerError` (an Error; fusion's `catch (Exception)` cannot
+  contain it) on ABIs without the .so. Now guarded (`nativeAvailable` flag);
+  decode degrades to NotFound. JVM regression test added.
+- P1 post-close live frame threw `IllegalStateException` out of the shared
+  decode scope (uncaught coroutine exception = app crash). Live body extracted
+  to `handleLiveFrame()` (tested) with closed-guard + drop-and-log; one-shots
+  still throw as documented.
+- P2 JNI length check used `jint` multiplication (overflow) + no null guard;
+  now int64 + null check. `ContrastNormalizationTransform` pixel-count check
+  likewise widened to Long.
+- Latent stack OOB in `decodeByDigitTemplates`: `tmplLen` was recorded from
+  the UNCLAMPED `12*module` length, so wide close-up modules indexed past
+  `seg[96]`/`tmpl[d]`. Clamped before recording (behavior-identical whenever
+  tmplLen <= 96, i.e. on every input that ever decoded).
+
+Correctness (decode-affecting, A/B-verified on 6 shelf photos, zero regressions):
+- `msiChecksumPolicy` was a dead knob (native auto-detects, Kotlin never
+  gated). Restored the retired decoder's contract: native-reported digits are
+  re-validated strictly under the configured policy via
+  `MsiChecksumValidator` (name-matching would mis-route double-check labels:
+  every Mod1010/Mod1110 codeword also validates as Mod10 by construction).
+- ROI and full-frame paths shared one temporal voter, so a miss on one path
+  reset the count the other was building. Extracted synchronized `MsiVoteGate`
+  (unit-tested incl. 20-thread race); ROI gets its own decoder instance with
+  single-frame emit (native >=2-vote + live stability gate already protect
+  it), full-frame keeps 2-frame agreement.
+- MSI never set `DecodedBarcode.isUpsideDown` (ML Kit/zxing-cpp do); now set
+  from the candidate, same convention. Fixed the broken-at-HEAD
+  `upsideDownContent_decodesThroughFusion` by making its fake emulate the
+  native orientation contract (was an always-hit flagless fake tripping the
+  confident early-exit on candidate 0).
+- Native far-field fallback: single NN 2x retry (with +1px shift so the xstep=2
+  sampler sees true boundaries) when every ROI fails on frames < 800px long
+  edge. Failure-path-only: success-path outputs provably unchanged (A/B diff).
+  Rescues yakult (`08281479` exact, was silent miss).
+- xstep=1 ROI sampling was tried for the phase-lock blind spot (crisp
+  axis-aligned captures score 0 under xstep=2) and REVERTED: it flips
+  real-photo outcomes both ways (dixie full-res lost). Blind spot documented
+  in code; real captures carry enough noise to break the lock.
+
+Leaks/hygiene:
+- Timeout-path non-recycling is INTENTIONAL and kept (use-after-recycle from
+  in-flight engines is worse; Bitmaps are GC-finalized so this is delayed
+  free, not a true leak — covered by the keeps-alive unit test).
+- `MsiRegionCropper` deskew `flat` bitmap leaked on draw failure — fixed.
+- `previewView` now `@Volatile` (main-thread write, analyzer-thread read).
+- ML Kit bounding boxes are copied into results (Rect is mutable).
+- Raw barcode values redacted from hot-path logs (lengths kept).
+
+Perf (all bit-identical on hits):
+- Thread-local exact-match digit-template cache in `decodeByDigitTemplates`
+  (rebuilds dominated multi-profile decodes). Bench: 1280x720 synthetic
+  ~2.1ms mean, dixie photo ~0.7-1.0ms on host.
+- Deliberately NOT changed (risk > gain, documented): per-frame zxing-cpp
+  `BarcodeReader` (stateless wrapper, no native peer — verified via javap;
+  sharing one instance would risk wrapper races), merged ML Kit
+  decode+localize pass (would alter ML Kit inputs), column-rescan restructure.
+
+Shelf samples (user-supplied 6 PNGs -> `src/test/resources/msi-shelf/`,
+~2MB committed as fixtures):
+- `tools/msi-harness` (host C++17+zlib, no device needed): spec-rendered
+  vectors (all 4 policies, literature 1234567->4 / 8052->3), scale/blur/
+  contrast/brightness ladders, negatives, per-photo sweeps (scales x
+  photometric x 3 repeats) asserted at SDK-equivalent payload level
+  (native + Kotlin revalidation + strip), plus 500ms-budget bench.
+  39/39 asserts green (baseline: 33/39 — the 6 yakult rescues). 87
+  informational probes track known gaps (ondeg phantoms; crisp-phase-lock;
+  sub-scale partials).
+- JVM: `MsiShelfVectorsTest` (all six codewords through the real validator),
+  `MsiVoteGateTest` (9), `MsiNativeDecoderGuardTest` (2), live-frame guard
+  tests (2). Full suite 117/117 green (incl. the HEAD-broken rotation test).
+- Device: `DeviceMsiTest` expectations corrected to ground truth for all six
+  (starbucks was wrongly MOD_10->payload; now MOD_10_10->0168971) + new
+  3x repeat-stability sweep test. Needs `connectedDebugAndroidTest` run.
+
+## Pass 19 follow-up — on-device verification (Pixel 10a emu + Pixel 6a)
+
+`connectedDebugAndroidTest` on both devices: 3/3 green, identical verdicts.
+The device run caught two real bugs the host harness could not:
+
+1. Bitmap-ownership violation (P0): `MsiRegionCropper.cropAndDeskew` recycled
+   the live fusion frame when the padded box covered the whole image
+   (`createBitmap` may return the source itself). Every subsequent full-frame
+   decode faulted (`getPixels() on a recycled bitmap`, caught as
+   recoverable Error) and every rotation faulted (escaping as
+   `Failure("Fusion failed")` — databar was entirely broken on device).
+   Fixed with copy-if-aliased + JVM ownership contract tests. (Robolectric
+   shadows always copy, so the JVM test pins the invariant; the bug itself is
+   framework-behavior-only.)
+2. Full-frame voter blocked one-shot recall: `requireConsecutiveFrames=2` on
+   the full-frame instance could never confirm a single-observation frame,
+   and the full sweep never runs on fresh-live frames anyway — so the voter
+   only ever gated one-shot/stale scans. Now 1 (live keeps the stability
+   gate + dedup; every hit keeps native >=2-vote + policy gates). Plus
+   degenerate-payload rejection (blank areas decode as all-same-digit
+   windows that checksum-validate — observed all-zeros reads).
+3. Engine order swapped to full-frame-first: measured more accurate
+   (intact quiet zones; ROI tight crops birth luck-validating truncations),
+   and easy frames skip localization via early-exit. Fixes silkalm on device
+   (`MsiNative|0826593`); tilt coverage unchanged (ROI backup intact).
+
+Device sweep results (both devices, 3x repeats stable): yakult MOD_10
+`0828147` (MsiNative), dixie MOD_10 `0087573` (MsiRoi), starbucks MOD_10_10
+`0168971` (MsiNative), silkalm MOD_10 `0826593` (MsiNative), all databar
+fixtures via ZXingCpp. Remaining tracked gaps (matrix-logged, not asserted):
+quakotml (full-res modules overshoot; truncated reads honestly gated),
+ondeg (phantoms validate). Also added miss-reason + cause logging to the
+ROI/fusion/zxing/native error paths (the databar escape was undebuggable
+without it). JVM suite 120/120 green.
