@@ -62,24 +62,31 @@ class RotatedImageFusionTest {
 
     /**
      * Fake MSI decoder for JVM tests (the native C++ decoder can't load on
-     * Robolectric). Returns a canned "1234567" for any input — these tests
-     * verify rotation/fusion plumbing, not MSI decode quality (covered by
-     * the 6/6 native benchmark).
+     * Robolectric). Emulates the native engine's orientation contract: the
+     * scanline reader resolves only the 180°-relative (re-oriented) view and
+     * flags it upside-down, missing every other candidate. An always-hit fake
+     * would trip fusion's confident early-exit on the first candidate and
+     * could never exercise the rotation loop these tests exist for.
      */
     private class FakeMsiDecoder : BarcodeDecoder {
         override val name = "FakeMsi"
         override val supportedSymbologies = setOf(Symbology.MSI_PLESSEY)
         override suspend fun decode(frame: ScanFrame): DecodeOutcome =
-            DecodeOutcome.Success(
-                listOf(
-                    DecodedBarcode(
-                        rawValue = "1234567",
-                        symbology = Symbology.MSI_PLESSEY,
-                        confidence = 1.0f,
-                        engineName = name,
+            if (!frame.isUpsideDownCandidate) {
+                DecodeOutcome.NotFound("fake MSI reads the re-oriented view only")
+            } else {
+                DecodeOutcome.Success(
+                    listOf(
+                        DecodedBarcode(
+                            rawValue = "1234567",
+                            symbology = Symbology.MSI_PLESSEY,
+                            confidence = 1.0f,
+                            engineName = name,
+                            isUpsideDown = true,
+                        ),
                     ),
-                ),
-            )
+                )
+            }
     }
 
     private fun fusedDecoder() = FusedDecoder(

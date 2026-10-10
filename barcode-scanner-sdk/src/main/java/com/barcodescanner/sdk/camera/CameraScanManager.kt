@@ -60,8 +60,11 @@ internal class CameraScanManager(
     /**
      * Preview view for what-you-see-is-what-scans cropping (null for the
      * headless SurfaceProvider entry point, where the legacy sensor-centered
-     * ROI applies). Only width/height are ever read.
+     * ROI applies). Only width/height are ever read. Volatile: written on the
+     * main thread (start/stop), read on the analyzer executor — a stale read
+     * only mis-crops one frame, but there is no reason to allow a torn one.
      */
+    @Volatile
     private var previewView: PreviewView? = null
 
     /** Single-flight gate: true while a decode is in flight. */

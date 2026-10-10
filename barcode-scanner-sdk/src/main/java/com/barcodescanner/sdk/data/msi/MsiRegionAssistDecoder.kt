@@ -86,9 +86,10 @@ class MsiRegionAssistDecoder(
                         is DecodeOutcome.Success -> {
                             val ms = (System.nanoTime() - tCrop) / 1_000_000
                             for (b in outcome.barcodes) {
+                                // NOTE: log length, not value — values are host PII.
                                 android.util.Log.d(
                                     TAG,
-                                    "region#$index HIT value=${b.rawValue} deskew=${crop.angleApplied} " +
+                                    "region#$index HIT len=${b.rawValue.length} deskew=${crop.angleApplied} " +
                                         "cropMs=${ms} box=$box",
                                 )
                                 hits += b.copy(engineName = NAME)
@@ -97,12 +98,14 @@ class MsiRegionAssistDecoder(
                         is DecodeOutcome.NotFound ->
                             android.util.Log.d(
                                 TAG,
-                                "region#$index miss deskew=${crop.angleApplied} box=$box",
+                                "region#$index miss deskew=${crop.angleApplied} box=$box " +
+                                    "reason=${outcome.reason}",
                             )
                         is DecodeOutcome.Error ->
                             android.util.Log.d(
                                 TAG,
-                                "region#$index error(recoverable=${outcome.recoverable})",
+                                "region#$index error(recoverable=${outcome.recoverable}) " +
+                                    "cause=${outcome.cause.javaClass.simpleName}: ${outcome.cause.message}",
                             )
                     }
                 } finally {

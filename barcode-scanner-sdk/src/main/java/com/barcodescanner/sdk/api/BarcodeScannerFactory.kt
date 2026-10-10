@@ -10,6 +10,7 @@ import com.barcodescanner.sdk.di.ScannerContainer
 import com.barcodescanner.sdk.domain.decoder.DecodeOutcome
 import com.barcodescanner.sdk.domain.model.ScanFrame
 import com.barcodescanner.sdk.domain.model.Symbology
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -131,18 +132,7 @@ internal class DefaultBarcodeScanner(
                 config = config,
                 scope = scope,
                 onFrame = { frame ->
-                    val now = SystemClock.elapsedRealtime()
-                    val stale = now - lastSuccessAt.get() > STALE_SWEEP_AFTER_MILLIS
-                    val result = scanFrame(frame.copy(allowFallbackSweep = stale))
-                    if (result is ScanResult.Success) {
-                        lastSuccessAt.set(now)
-                        // Stability gate swallows the first sighting of an MSI
-                        // bar value; the next frame decides (see method).
-                        if (confirmLiveBarHit(result)) {
-                            emitLiveDeduped(result)
-                            maybeDumpOcrFrame(frame, result)
-                        }
-                    }
+                    handleLiveFrame(frame)
                 },
                 onError = { t ->
                     // Async bind failure (no/in-use camera, dead lifecycle):
@@ -165,6 +155,41 @@ internal class DefaultBarcodeScanner(
 
     override fun stopCamera() {
         synchronized(cameraLock) { stopCameraLocked() }
+    }
+
+    /**
+     * Live-camera frame body; internal for tests.
+     *
+     * Never throws for post-close or decode-internal failures: stop()/close()
+     * can win the race against an already-dispatched analyzer callback, and
+     * [scanFrame] then throws IllegalStateException — faulting the shared
+     * decode scope with it would crash the app (uncaught coroutine
+     * exception). A dropped live frame is always safe (the next frame arrives
+     * ~100ms later); one-shot [scanFrame]/[scanBitmap] still throw to the
+     * caller as documented.
+     */
+    internal suspend fun handleLiveFrame(frame: ScanFrame) {
+        if (closed.get()) return
+        try {
+            val now = SystemClock.elapsedRealtime()
+            val stale = now - lastSuccessAt.get() > STALE_SWEEP_AFTER_MILLIS
+            val result = scanFrame(frame.copy(allowFallbackSweep = stale))
+            if (result is ScanResult.Success) {
+                lastSuccessAt.set(now)
+                // Stability gate swallows the first sighting of an MSI
+                // bar value; the next frame decides (see method).
+                if (confirmLiveBarHit(result)) {
+                    emitLiveDeduped(result)
+                    maybeDumpOcrFrame(frame, result)
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (t: Throwable) {
+            // Includes the expected post-close IllegalStateException when a
+            // frame dispatched before stop() runs after close().
+            android.util.Log.d(TAG, "live frame dropped: ${t.javaClass.simpleName}")
+        }
     }
 
     private fun stopCameraLocked() {
@@ -270,6 +295,7 @@ internal class DefaultBarcodeScanner(
     }
 
     private companion object {
+        const val TAG = "BarcodeScanner"
         /** Prune the live dedup map once it holds more than this many keys. */
         const val DEDUP_PRUNE_THRESHOLD = 64
         /**
