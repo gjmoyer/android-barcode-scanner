@@ -47,6 +47,16 @@ constexpr int kMinDigits = 4;
 constexpr int kMaxDigits = 16;
 constexpr int kMinVotesNone = 3;     // NONE policy needs more agreement
 constexpr int kMinVotesCheck = 2;    // checksum'd policies need 2
+// Fraction of the frame height skipped at the top during ROI band search.
+// Close-up labels filling the frame still decode (their band extends below
+// the cut); anything living entirely in the top quarter is missed by design
+// (status overlays / competing print live there on the aim UI). Change with
+// care: widening the search adds ROI candidates that compete in voting.
+constexpr float kScanTopFraction = 0.25f;
+// Long-edge ceiling for the far-field 2x upscale retry (decodeImpl): small
+// frames only, so the 4x-pixel retry stays cheap. 1280px+ frames already
+// carry >=2px modules when a barcode is plausibly framed.
+constexpr int kUpscaleMaxLongEdge = 800;
 
 struct Candidate {
     std::string digits;
@@ -150,6 +160,15 @@ struct Rect { int x0, x1, y0, y1; };
 // Returns multiple candidates; the decoder tries each and the checksum picks.
 int findRoiCandidates(const uint8_t* g, int W, int H, Rect* rois, int cap) {
     std::vector<int> rowScore(H, 0);
+    // NOTE: xstep=2 subsampling is blind to edges landing exactly between
+    // samples — a pixel-crisp, axis-aligned capture (screenshot, NN-upscaled
+    // image) can phase-lock so a perfect barcode scores 0 (verified with a
+    // host harness: 4px-aligned synthetic invisible, 5px+ visible). xstep=1
+    // was tried and REVERTED: it rescues phase-locked inputs but shifts band
+    // fringes enough to flip real-photo outcomes both ways (dixie full-res
+    // lost, yakult/silkalm gained — see tools/msi-harness runs). Real captures
+    // always carry enough noise/blur to break the lock, so keep the validated
+    // operating point; revisit only with the device photo benchmark green.
     const int xstep = 2;
     const int gradThr = 24;
     for (int y = 0; y < H; ++y) {
@@ -163,7 +182,8 @@ int findRoiCandidates(const uint8_t* g, int W, int H, Rect* rois, int cap) {
         rowScore[y] = s;
     }
     int mx = 0;
-    for (int y = H / 4; y < H; ++y) mx = std::max(mx, rowScore[y]);
+    const int yStart = static_cast<int>(H * kScanTopFraction);
+    for (int y = yStart; y < H; ++y) mx = std::max(mx, rowScore[y]);
     if (mx < 6) return 0;
     int thr = mx * 35 / 100;
     if (thr < 2) thr = 2;
@@ -172,7 +192,7 @@ int findRoiCandidates(const uint8_t* g, int W, int H, Rect* rois, int cap) {
     Band bands[16];
     int nbands = 0;
     int cur0 = -1, curScore = 0;
-    for (int y = H / 4; y < H && nbands < 16; ++y) {
+    for (int y = yStart; y < H && nbands < 16; ++y) {
         if (rowScore[y] >= thr) {
             if (cur0 < 0) { cur0 = y; curScore = 0; }
             curScore += rowScore[y];
@@ -498,6 +518,20 @@ void classifyBarsByCorrelation(const float* p, int n, Bar* bars, int nb,
 // Digit-template correlation decode: for each digit position, correlate the
 // 12-module signal window against all 10 digit templates. Uses bar positions
 // only for start alignment and module estimation; no per-bar width labels.
+//
+// Template cache: the blurred templates are a pure function of `module`, and
+// this runs once per scanline profile (up to 10 per ROI) with adjacent
+// profiles usually agreeing bit-exactly on the estimate. An exact float-bit
+// match reuses the previous build bit-identically; anything else rebuilds
+// exactly as before. Thread-local: decode() runs on shared worker threads.
+struct DigitTemplateCache {
+    uint32_t moduleBits = 0;
+    float tmpl[10][96];
+    int tmplLen = 0;
+    bool valid = false;
+};
+thread_local DigitTemplateCache t_digitCache;
+
 bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
                             float module, std::string& outDigits, float& outScore) {
     // Build 10 digit templates (12 modules each), blurred.
@@ -507,14 +541,24 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
         "100110100100", "100110100110", "100110110100", "100110110110",
         "110100100100", "110100100110"
     };
-    float sigma = 0.4f * module;
-    // Precompute templates at this module size.
-    float tmpl[10][96];  // max 12 modules * 8 px
+    uint32_t bits = 0;
+    static_assert(sizeof(bits) == sizeof(module), "float bits");
+    memcpy(&bits, &module, sizeof(bits));
+    float (*tmpl)[96] = t_digitCache.tmpl;
     int tmplLen = 0;
-    for (int d = 0; d < 10; ++d) {
-        int len = (int)(12 * module + 0.5f);
-        if (d == 0) tmplLen = len;
-        if (len > 96) len = 96;
+    if (t_digitCache.valid && t_digitCache.moduleBits == bits) {
+        tmplLen = t_digitCache.tmplLen;
+    } else {
+        float sigma = 0.4f * module;
+        // Precompute templates at this module size.
+        // max 12 modules * 8 px
+        for (int d = 0; d < 10; ++d) {
+            int len = (int)(12 * module + 0.5f);
+            // Clamp BEFORE recording tmplLen: wide close-up modules would
+            // otherwise set tmplLen > 96 and overflow seg[96]/tmpl[d] below
+            // (stack smash on labels filling the frame).
+            if (len > 96) len = 96;
+            if (d == 0) tmplLen = len;
         // Render square wave.
         float sq[96];
         for (int i = 0; i < len; ++i) {
@@ -543,8 +587,12 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
         for (int i = 0; i < len; ++i) { tmpl[d][i] -= m; v += tmpl[d][i]*tmpl[d][i]; }
         v = sqrtf(v);
         if (v > 1e-6f) for (int i = 0; i < len; ++i) tmpl[d][i] /= v;
-        if (d == 0) tmplLen = len;
-    }
+        }  // for (int d...) — one blurred template per digit
+    }  // else — cache miss: rebuilt above
+    // Publish the build for the next profile with an identical estimate.
+    t_digitCache.moduleBits = bits;
+    t_digitCache.tmplLen = tmplLen;
+    t_digitCache.valid = true;
 
     // Try each of the first few bars as the start candidate, and plausible n.
     // The checksum gate identifies the correct alignment.
@@ -757,7 +805,15 @@ void decodeProfile(const float* p, int n,
 
 } // namespace
 
+// Forward: decode() wraps decodeImpl() with the upscale retry enabled.
+DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUpscale);
+
 DecodeResult decode(const uint8_t* gray, int width, int height) {
+    return decodeImpl(gray, width, height, /*allowUpscale=*/true);
+}
+
+// Far-field fallback, factored so the success path is untouched.
+DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUpscale) {
     DecodeResult res;
     Rect rois[8];
     int nrois = findRoiCandidates(gray, width, height, rois, 8);
@@ -881,6 +937,34 @@ DecodeResult decode(const uint8_t* gray, int width, int height) {
             return res;
         }
         if (g_debug) printf("[dbg] ROI %d: no decode\n", ri);
+    }
+    // Every ROI failed. Far-field retry: modules below ~2px (distant shelf
+    // tags at native resolution) fall under the bar detector's working range
+    // while the information is still there — one NN 2x upscale brings them
+    // back. Runs ONLY on the failure path, so passing inputs never pay for
+    // it and can never change outcome; recursion is single-depth by flag.
+    // NN (not bilinear) keeps edges crisp for template correlation.
+    if (allowUpscale && width > 0 && height > 0 &&
+        std::max(width, height) < kUpscaleMaxLongEdge) {
+        if (g_debug) printf("[dbg] all ROIs missed, trying 2x upscale\n");
+        // NN 2x with a +1px source shift: plain 2x duplicates every pixel, so
+        // even-parity adjacent pairs are identical and the xstep=2 row sampler
+        // would see only zeros (perfect phase lock — the retry could never
+        // fire). Reading src[(x+1)/2] puts a true source boundary inside every
+        // even pair instead. Rows keep plain y/2 (duplicated rows only
+        // lengthen band runs; the column pass already samples every pixel).
+        const int W2 = width * 2, H2 = height * 2;
+        std::vector<uint8_t> up((size_t)W2 * (size_t)H2);
+        for (int y = 0; y < H2; ++y) {
+            const uint8_t* srcRow = gray + (size_t)(y / 2) * width;
+            uint8_t* dstRow = &up[(size_t)y * W2];
+            for (int x = 0; x < W2; ++x) {
+                int sx = (x + 1) / 2;
+                if (sx >= width) sx = width - 1;
+                dstRow[x] = srcRow[sx];
+            }
+        }
+        return decodeImpl(up.data(), W2, H2, /*allowUpscale=*/false);
     }
     return res;
 }

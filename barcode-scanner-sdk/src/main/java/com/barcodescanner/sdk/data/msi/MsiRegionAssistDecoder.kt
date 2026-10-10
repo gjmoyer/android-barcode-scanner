@@ -86,9 +86,10 @@ class MsiRegionAssistDecoder(
                         is DecodeOutcome.Success -> {
                             val ms = (System.nanoTime() - tCrop) / 1_000_000
                             for (b in outcome.barcodes) {
+                                // NOTE: log length, not value — values are host PII.
                                 android.util.Log.d(
                                     TAG,
-                                    "region#$index HIT value=${b.rawValue} deskew=${crop.angleApplied} " +
+                                    "region#$index HIT len=${b.rawValue.length} deskew=${crop.angleApplied} " +
                                         "cropMs=${ms} box=$box",
                                 )
                                 hits += b.copy(engineName = NAME)
