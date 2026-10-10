@@ -547,3 +547,28 @@ quakotml (full-res modules overshoot; truncated reads honestly gated),
 ondeg (phantoms validate). Also added miss-reason + cause logging to the
 ROI/fusion/zxing/native error paths (the databar escape was undebuggable
 without it). JVM suite 120/120 green.
+
+## Pass 19 follow-up 2 — fixture privacy + crisp-input scoring ties (2026-10-10)
+
+Real shelf photos stay OUT of the repo (private labels, store policy,
+bulk-collection; the repo's own `msi_samples/.gitignore` already said so —
+the six committed PNGs were removed again). Fixture policy going forward:
+- committed: runtime synthetic suite + bench (host harness), checksum vectors
+  (JVM), DataBar fixtures + expectations (device, CI-runnable);
+- local-only (git-ignored, swept when present, skipped otherwise): real
+  `msi-*.png` captures for the harness sweep + `DeviceMsiTest`;
+- the committed `gen_shelf_synthetics.py` regenerates the six codewords
+  locally from the spec for equivalent local sweeps.
+
+Attempted committed-PNG equivalents and why they were rejected: crisp renders
+of these SKUs (all start with digit 0) cannot gate green — true and shifted
+alignments correlate ~0.96 alike on pixel-perfect input, so the shifted
+window wins or ties regardless of scale (2-8px swept), phase, blur, or noise.
+A tiebreak flip (+sIdx -> prefer-earlier) and a consumption-bonus variant were
+both prototyped and both reverted: each just relocates the error (drops become
+prepends, and a green `12345674` case broke). Real captures separate properly
+via sensor texture, so this is a crisp-input-only characteristic, documented
+in `findRoiCandidates`. No decoder scoring changes shipped; baking
+luck-decided reads (exact or partial) as fixtures would be worse than none.
+The honest-NotFound gates remain the committed guard against phantom
+emission. Harness: file-level SKIP (not FAIL) when photos are absent.

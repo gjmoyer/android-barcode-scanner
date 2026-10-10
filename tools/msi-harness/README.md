@@ -15,7 +15,14 @@ cd tools/msi-harness
 ```
 
 Default shelf dir is
-`../../barcode-scanner-sdk/src/test/resources/msi-shelf` (committed fixtures).
+`../../barcode-scanner-sdk/src/test/resources/msi-shelf` — which in a public
+checkout holds NO photos (real shelf captures stay out of the repo; see
+`docs/REVIEW_LOG.md` Pass 19). With no photos the shelf suite prints per-file
+SKIPs and stays green; the committed coverage is the runtime synthetic suite
++ bench above it. Drop local `msi-<label>-<sku>.png` captures in any dir and
+pass it as argv[1] to sweep those (the six-SKU ground truth + policies live
+in `shelfSuite`, and `gen_shelf_synthetics.py` regenerates equivalent
+spec-rendered vectors locally).
 Exit code = number of asserted failures (0 = green).
 
 ## What it runs

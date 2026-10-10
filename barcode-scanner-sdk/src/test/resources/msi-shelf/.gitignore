@@ -1,0 +1,4 @@
+# Real shelf photos stay OUT of the repo (private labels, store policy).
+# Only committed synthetic equivalents (syn-*.png) live here; drop local
+# real captures (msi-*.png) in this dir for harness sweeps — they are ignored.
+msi-*.png
