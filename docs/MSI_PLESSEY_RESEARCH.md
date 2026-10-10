@@ -12,8 +12,10 @@ and the spec sources behind the implementation. Code: `data/msi/`.
   Ubuntu 2.3.0-era package manifests advertise "QR, DataMatrix, Aztec, PDF417, UPC/EAN, DataBar/RSS,
   Code39/93/128, Codabar, ITF" — no MSI. (ZXing.Net's Java port has MSI/Plessey flags
   but explicitly excludes them from `All_1D`: "too many false-positives".)
-- Conclusion: MSI must be a custom scanline decoder. Ours is pure Kotlin
-  (`MsiPlesseyDecoder`), testable on JVM, with a future NEON/C++ seam at the class boundary.
+- Conclusion: MSI must be a custom scanline decoder. Ours is a clean-room C++
+  engine (`src/main/cpp/msi_decoder.cpp`, STL only, no third-party barcode
+  code) behind a thin JNI wrapper (`MsiNativeDecoder`), host-compiled and
+  testable via `tools/msi-harness` with no device needed.
 
 ## 2. Symbology spec (ground truth)
 
@@ -46,9 +48,10 @@ Scandit checksum enum (Mod10/1010/11/1110 naming), tc-lib-barcode (family contex
   digit 5 → "100110100110" ✓. Module Maps are 12 modules/digit; Start "110"
   (wide bar + narrow space); Stop "1001" (narrow + wide + narrow).
 - Guards: START = wide black + narrow white (2 runs); STOP = narrow black + wide white
-  + narrow black (3 runs). `quantize()` requires both exactly — off-phase slicing is the
-  misread funnel, so there is no lenient fallback (non-robust mode also requires both
-  quiet zones; robust mode allows single-sided quiet zone for edge-cropped labels).
+  + narrow black (3 runs). The native decoder anchors digit windows at detected
+  bar centers against blurred 12-module templates rather than hard
+  run-length thresholding, which is what survives defocus; the checksum gate
+  + multi-scanline voting below are the precision backstop.
 - Checksums: Mod10 = Luhn (vectors: "1234567"→4 per Wikipedia, "8052"→3 per Morovia —
   both pinned as unit tests). Mod11 = IBM weights 2..7 repeating from the right,
   C = (11 − sum%11) % 11 (NCR 2..9 variant explicitly unsupported). Mod1010 = double
@@ -59,54 +62,63 @@ Scandit checksum enum (Mod10/1010/11/1110 naming), tc-lib-barcode (family contex
 **Blur / defocus / low contrast.**
 1. `DownscaleTransform` (stage 0, nearest-neighbor) bounds work to ≤1280px long edge.
 2. `ContrastNormalizationTransform` (2/98-percentile stretch) normalizes exposure.
-3. `MsiBinarizer.binarizeVariants` tries Otsu, Otsu±18, adaptive-mean (integral image)
-   — up to 4 variants in robust mode. Each variant × each scanline votes independently.
-4. Per-scanline k-means (k=2) narrow/wide split absorbs ±module distortion; `deSpeckle`
-   is relative (≤25% of cut, neighbors ≥3×) so far-field 1–2px narrow bars survive;
-   MSI working copy downscales with `filter=false`.
-5. `trySingleBitRepair` flips each of 8 bits once. Table min Hamming distance is 2
-   (computed over all 45 pairs; 15 pairs at distance 2, none at 1), so a 1-bit error
-   never lands exactly on another digit — but ~80/256 random patterns sit within 1 flip
-   of *some* digit (≈31%), and several corruptions are ambiguous (e.g. '5'+bit3 →
-   {'1','5'} → repair returns null). Hence repair + checksum + cross-scanline voting:
-   2+ agreeing scanlines → confidence 1.0 (single votes are withheld; NONE policy
-   requires 2 votes too).
+3. Native signal path per ROI: averaged profile + up to 9 individual scanline
+   rows (voting across rows beats per-row blur); bar centers as prominent
+   luminance minima (no binarization threshold to tune); module from median
+   bar spacing; each digit window correlated against Gaussian-blurred
+   12-module templates, so shape — not absolute widths — decides.
+4. Checksum gate (MOD10 → MOD11 → MOD1010 → MOD1110, first validating scheme
+   wins) + ≥2 agreeing scanline votes → confidence 1.0. Single votes never
+   emit. A single NN 2x upscale retry covers far-field frames whose modules
+   fall below ~2px (failure path only; success paths never pay for it).
+5. Kotlin post-gate: re-validate reported digits strictly under the host's
+   `msiChecksumPolicy`, strip check digits, reject degenerate
+   single-repeated-digit payloads (blank areas decode as all-zeros windows
+   that still checksum-validate).
 
 **Rotation / upside-down.**
-- Fusion `OrientationCandidates` expands 0°→180°→90°→270° (up to 4, lazy).
-  Physical rotation uses nearest-neighbor; ML Kit hint = sensor − attempt (fixed sign).
-- The decoder is forward-only ON PURPOSE: guards are asymmetric and mirrored digits
-  are bit-reversed per digit plus digit-order-reversed, so pixel reversal cannot reuse
-  the table. 180° labels decode via the 180° candidate (half the CPU of dual-direction).
-- Orientation order is sensor-relative: `OrientationCandidates` starts at the
-  rotation that compensates `ScanFrame.rotationDegrees` (portrait camera frames
-  are stored sideways), then upside-down, then sideways. The old fixed
-  0°→180°→90°→270° order made live portrait frames burn the 1500 ms fusion
-  budget on sideways MSI/OCR attempts before the upright 90°/270° candidate,
-  so MSI appeared camera-blind while gallery stills decoded. Sideways views
-  still need vertical sampling: robust mode adds 3 vertical scanlines; default
-  mode skips MSI on the two sideways candidates (relative to upright).
+- Fusion `OrientationCandidates` expands sensor-relative upright-first
+  (compensating `ScanFrame.rotationDegrees`, so portrait camera buffers don't
+  burn the budget on sideways views), then upside-down, then sideways — up to
+  4 views, lazy (rotations materialize only until a confident hit stops the scan).
+- The native engine reads horizontal scanlines per candidate; a 180°-relative
+  candidate is flagged via `DecodedBarcode.isUpsideDown` (same convention as
+  ML Kit/zxing-cpp), which feeds `ScanResult.fromRotatedFrame`.
+- Arbitrary tilt (15°, 30°, …) smears diagonal runs past scanlines: the ROI
+  path (`MlKitRegionLocalizer` isolation → padded crop → affine deskew in
+  `MsiRegionCropper`, no OpenCV) rectifies the strip before the shared native
+  decoder. Full-frame MSI runs first (intact quiet zones win ties); ROI is
+  the tilted-label backup.
 
 **Inversion (white-on-black).**
-- zxing-cpp path sets TryInvert; MSI scanline path assumes dark-bars-on-light (quiet-zone
-  trim seeks white margins). Inverted MSI labels are currently out of scope — listed as
-  future work (polarity-flip retry of the binary image). The fusion layer already covers
-  inversion for all ML Kit/zxing symbologies.
+- zxing-cpp path sets TryInvert; the MSI scanline path assumes dark-bars-on-light.
+  Inverted MSI labels remain out of scope (polarity-flip retry is future work).
+  The fusion layer covers inversion for all ML Kit/zxing symbologies.
 
 **Skew / perspective / noise.**
-- 3–7 horizontal scanlines across the 30–70% band (+3 vertical in robust) tolerate skew;
-  quiet-zone + guard + length + checksum gates reject text/ITF lookalikes; pool dedups on
-  (value, symbology) keeping max confidence.
+- Multiple ROI candidates (strongest edge-density first) × averaged +
+  individual profiles; quiet-zone + length + checksum + vote gates reject
+  text/DataBar lookalikes; fusion pool dedups on (value, symbology) keeping
+  max confidence. One decoder instance per path, each with its own
+  synchronized consecutive-observation gate, so ROI misses can never reset
+  full-frame counts.
 
-## 4. Verification procedure (must pass before lifting EXPERIMENTAL)
+## 4. Verification procedure
 
-1. Render with Zint (`zint -b MSI_PLESSEY` / `MSIPLESSEY`) payloads covering each digit 0–9
-   in every position + Mod10 vectors ("1234567"→4, "8052"→3) + Mod11 IBM vector from §2.
-2. Feed PNGs through `decode()` (all four checksum policies incl. NONE-gating) — require
-   exact payload recovery and correct guard rejection on cropped variants.
-3. Attach the pairwise Hamming-distance matrix (min = 2, list the 15 distance-2 pairs) to the PR.
-4. Blur/rotation ladder: Gaussian σ {0,1,2} × rotations {0,90,180,270} × inversion on/off;
-   record recall @ fixed FP and the Laplacian knee (replaces NORMALIZER lore).
+1. Host harness (`tools/msi-harness`, exit 0 = green): spec-rendered vectors
+   for all four checksum policies (literature Mod10 `1234567`→4, `8052`→3),
+   scale/blur/contrast/brightness ladders, negatives (blank/black/noise must
+   be honest `NotFound`), per-photo sweeps (scales × photometrics × 3
+   repeats) asserted at SDK-equivalent payload level (native + Kotlin
+   revalidation + strip), plus a 500 ms-mean timing bench.
+2. JVM suite: checksum vectors, vote-gate semantics incl. a race test,
+   ownership contracts, native-guard degradation — all green with no device.
+3. On-device sweeps (`DeviceMsiTest`, real photos local-only): full-chain
+   one-shots across all four policies (logged matrix) + hard assertions on
+   proven-exact cases + a 3x repeat-stability sweep.
+4. Shelf photos stay OUT of the repo (private labels): local `msi-*.png`
+   captures are swept when present and skipped otherwise; committed
+   equivalents are the generator script + the suites above.
 
 ## 5. References
 
@@ -118,73 +130,65 @@ Scandit checksum enum (Mod10/1010/11/1110 naming), tc-lib-barcode (family contex
 - Scandit `Checksum` enum (Mod10/1010/11/1110 vocabulary), Seagull MSI guide (warehouse context)
 
 ## 6. Shelf-photo evaluation (6 user-supplied labels, Oct 2026)
-Harness: `MsiPlesseyDecoder` direct (temporary probe tests, since removed) over all
-policies × robust on/off, plus zxing-cpp 3.1.1 (Python wheel) as an independent check.
+
+Full production chain on device (Pixel 10a emulator + Pixel 6a, identical
+verdicts) plus the host harness at SDK-equivalent payload level. Ground truth
+is payload → bars; the native engine reports whichever scheme validates and
+Kotlin re-validates strictly under the configured policy before stripping.
 
 | File (SKU) | Result | Notes |
 |---|---|---|
-| quakotml `0186477` | ✅ EXACT bars (`MOD_10_10` → `0186477`, 1.0) | Barcode encodes SKU + Mod1010 checks (6,8). zxing: nothing (MSI unsupported — confirms custom path needed). |
-| starbucks `0168971` | ✅ EXACT bars (`MOD_10` → `0168971`, 1.0) | Tiny ~1.9px modules; needed the 1440 fallback scale. |
-| ondeg `0243523` | ✅ EXACT via OCR (`MOD_11` → `024352`, 0.7) | Bars unreadable (3 systematically damaged digits); label is IBM-Mod11 (verified), text reads. |
-| dixie `0087573` | ❌ honest NotFound | Heavy blur + glare (B25-class fused runs, 130px glare gaps); printed number validates under NO standard scheme (Mod10 gives 7≠3), so strict OCR also withholds. |
-| silkalm `0826593` | ❌ honest NotFound | Barcode top occluded by overlaid tag + tilted; no digit text in view. |
-| yakult `0828147` | ❌ honest NotFound | Plastic shelf-strip cover: reflections/scratches over bars; no clean digit text. |
+| yakult `0828147` | ✅ EXACT (`MOD_10` → `0828147`, 1.0, MsiNative) | Far-field tiny modules; rescued by the NN 2x upscale retry. Repeat-stable ×3 on device. |
+| dixie `0087573` | ✅ EXACT (`MOD_10` → `0087573`, 1.0, MsiRoi) | Glare-heavy; ROI crop isolates it where full-frame sees phantoms. Repeat-stable ×3. |
+| starbucks `0168971` | ✅ EXACT (`MOD_10_10` → `0168971`, 1.0) | Full 9-digit codeword `016897100`; note it also validates as Mod10 (every double-check codeword does by construction), so policy — not the reported scheme — decides the payload. Repeat-stable ×3. |
+| silkalm `0826593` | ✅ EXACT (`MOD_10` → `0826593`, 1.0, MsiNative) | Bars carry 8/9 digits; full-frame-first ordering fixed this (ROI crops phantomized). Repeat-stable ×3. |
+| quakotml `0186477` | ❌ honest NotFound | Full-res modules overshoot the template range (truncated read, policy-gated). Resolves at 0.75 scale on the host harness; tracked gap. |
+| ondeg `0243523` | ❌ phantoms validate | True bars never resolve; shifted windows checksum-validate by luck. Tracked gap; live stability gate is the remaining defense. |
 
-No confident false positives under correct per-label policies (the rest stay silent
-rather than guess). Techniques added for these samples, kept because they proved out
-without regressing precision:
-- windowed search with LOCAL cuts (global k-means is set by giant price text),
-- subpixel gray runs (zero-crossing edges; recovers the split at ~3px modules),
-- soft per-digit least squares + multi-cut voting, min-projection bands (glare),
-  background-subtracted binarization (pale bars), hi-res gray (native + 960 primary,
-  1440 fallback with a 6-digit minimum), length×votes ranking with ≥2-vote gate,
-  true reverse-direction decode (upside-down).
-- Two real bugs found by the probes and fixed: Otsu returns 0 on clean black/white
-  images (tie-break by maximizing-range mean), and the leading bar was silently
-  dropped (no maximum precedes the first minimum), shifting every window off-phase.
+No wrong-value emission inside the asserted set: truncated reads are gated to
+`NotFound` by policy revalidation, and blank areas (all-zeros windows that
+validate) are rejected by the degenerate-payload rule. Live protection layers
+beyond one-shot: per-path consecutive-observation gates, the 2-sighting live
+stability gate for MSI bar reads, and per-key dedup.
 
-Attempted and REJECTED (manufactured confident false positives — recorded so nobody
-re-tries them): checksum-guided digit repair (deterministic pipeline + 1-digit Luhn
-+ correlated observations = certain collisions), prominence < 6, row-quiet relaxation,
-single-vote acceptance. Rule of thumb from this evaluation: with 1-digit checksums,
-any mechanism that multiplies validation lotteries must be gated by independent
-multi-observation agreement, and correlated observations (overlapping bands, adjacent
-rows, rescaled copies) must not each count as independent votes.
+Attempted and REJECTED (recorded so nobody re-tries them): xstep=1 ROI
+sampling (rescues phase-locked synthetics but flips real-photo outcomes both
+ways); score-tiebreak flips and consumption bonuses in template selection
+(true/shifted alignments correlate ~0.96 alike on pixel-perfect input — any
+fixed bias just relocates the error between dropped and prepended digits;
+real captures separate via sensor texture); checksum-guided digit repair;
+single-vote acceptance. Rule of thumb: with 1-digit checksums, any mechanism
+that multiplies validation lotteries must be gated by independent
+multi-observation agreement, and correlated observations (overlapping bands,
+adjacent rows, rescaled copies) must not each count as independent votes.
 
-## 7. SKU text fallback (OCR) + label checksum census
+## 7. Printed-payload census + retired OCR fallback
 
-Scandit's damaged-label path falls back to reading the printed digits; ours now
-does the same (`data/ocr/OcrSkuDecoder`, ML Kit text-recognition 16.0.1 bundled,
-offline). Design: runs LAST after all bar engines miss; requires content bands
-(blank walls never invoke the model); digit runs split on non-digits; prefers
-dash-free runs (case codes print dashed: `000-42000-15121`); emits `MSI_PLESSEY`
-with `engineName="MsiOcr"` and the OCR box. The emitted value is the digit run
-AS PRINTED — never checksum-stripped, because shelf labels print the SKU
-WITHOUT its check digit(s) (those live in the barcode): Starbucks payload
-`0168971` is itself a valid Mod10 codeword and the old strip reported `016897`;
-Yakult `0828147` and Dixie `0087573` match no standard scheme at all. Trusting
-the print is therefore the default (`msiOcrRequireChecksum = false`), emitted at
-0.5; strict validation remains available (0.7) when printed numbers do carry
-their check. One misread digit cannot be detected without the check digit
-(ML Kit reads Silkalm `0826593` as `0828593`), so hosts should treat `MsiOcr`
-hits as lower-trust and can filter them via `minConfidence`/engine inspection.
-Because OCR is last in the chain, `decodeTimeoutMillis` must cover the bar
-engines first (~4 s for shelf labels; the 1.5 s default truncated it).
+Checksum census from the filename SKUs (machine-verified, not assumed).
+Remember the printed payload is NOT the codeword — the check digit(s) live
+only in the bars:
+- yakult `0828147`: Mod10 (check 9) — full codeword `08281479`, bars decode.
+- quakotml `0186477`: Mod1010 (checks 6, 8) — full codeword `018647768`.
+- ondeg `0243523`: Mod10 (check 8) — full codeword `02435238`.
+- dixie `0087573`: Mod10 (check 2) — full codeword `00875732`, bars decode.
+  (The old census note "validates under NO scheme" was about the bare
+  7-digit payload treated as a codeword — my arithmetic at the time, and a
+  good lesson: never hand-assert a check digit; verify the full codeword.)
+- starbucks `0168971`: Mod1010 (checks 0, 0) — full codeword `016897100`,
+  bars decode.
+- silkalm `0826593`: Mod1010 (checks 6, 8) — full codeword `082659368`.
 
-Checksum census from the filename SKUs (machine-verified, not assumed):
-- quakotml `0186477`: Mod1010 (checks 6, 8) — bars decode.
-- starbucks `0168971`: single Mod10 — bars decode.
-- ondeg `0243523`: IBM Mod11 (check 3) — bars unreadable, OCR accepts under MOD_11.
-- dixie `0087573`: validates under NO standard scheme (Mod10 gives 7 ≠ 3; IBM
-  Mod11 gives 2; NCR Mod11 gives 2) — strict OCR correctly rejects it; only NONE
-  (debug) returns the printed text. Lesson recorded: never hand-assert a check
-  digit; the earlier probe confusion ("0087573 must be Mod10") was my arithmetic,
-  the code was right.
-- silkalm/yakult: no digit text in view (occlusion/cover) — silent everywhere.
+Scoreboard with correct per-label policies: bars 4/6 exact (yakult, dixie,
+starbucks, silkalm), 2 honest gaps (quakotml, ondeg), zero wrong-value
+emissions in the asserted set.
 
-Scoreboard with correct per-label policies: bars 2/6 exact (quakotml, starbucks),
-OCR 1/6 exact (ondeg via MOD_11), 3 honest silences, zero confident false positives
-(dixie MOD_11 short-collision "1512" is withheld by the 6-digit floor).
+The OCR SKU-text fallback (`OcrSkuDecoder`, retired) used to read printed
+digits as a last resort when bars failed. It was removed: the native bar
+engine covers the rough captures that previously needed text backup, and
+un-checksummed text reads trade recall for misread risk (one wrong digit is
+undetectable without the check digit). Its config knobs
+(`msiOcrRequireChecksum`, `debugOcrFrameDump`) and result fields (`gtin`,
+`engineName="MsiOcr"`) remain as inert API surface for now.
 
 - https://en.wikipedia.org/wiki/MSI_Barcode (encoding tables, Luhn/Mod11, 1234567→4 example)
 - https://www.morovia.com/kb/MSIPlessey-Specification-10637.html (Mod10 steps, 8052→3)

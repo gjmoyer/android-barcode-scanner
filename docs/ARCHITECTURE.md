@@ -14,12 +14,12 @@ Clean-architecture, enterprise-style layering. Dependency rule: **outer layers d
 │ domain/pipeline   PreprocessingPipeline,               │  Pure, testable transforms
 │                   Contrast/Downscale/Orientation       │
 ├────────────────────────────────────────────────────────┤
-│ data/mlkit        MLKitDecoder (+mapper)               │  Primary engine
+│ data/mlkit        MLKitDecoder (+mapper, region localizer) │  Primary engine + ROI isolation
 │ data/zxingcpp     ZXingCppDecoder (prebuilt AAR)       │  DataBar engine (native)
-│ data/msi          MsiPlesseyDecoder + table/checksum/  │  Custom MSI engine
-│                   binarizer                            │
-│ data/ocr          OcrSkuDecoder + OcrEngine (ML Kit    │  MSI SKU text fallback
-│                   text recognition, last resort)        │  (0.5 trust / 0.7 strict, engine MsiOcr)
+│ data/msi          MsiNativeDecoder (JNI clean-room     │  Custom MSI engine
+│                   C++ engine) + MsiVoteGate,           │
+│                   MsiRegionAssistDecoder,              │
+│                   MsiRegionCropper, table/checksum     │
 │ data/fusion       FusedDecoder                         │  Orchestrates all engines
 ├────────────────────────────────────────────────────────┤
 │ camera/           CameraScanManager (CameraX)          │  Frame producer only
@@ -36,10 +36,13 @@ CameraX / Bitmap
   → ContrastNormalizationTransform
   → OrientationCandidates.expand (upright-first, sensor-compensated, up to 4 views;
   lazy: rotations materialize only until a confident hit stops the scan)
-  → per orientation in REGISTRY order (MLKit → MsiRoi → MSI → ZXingCpp):
-  engines with internal rotation (ML Kit hint, zxing TryRotate) get the primary
-  view only; MSI receives every candidate. LastResort engines (MsiOcr) run once,
-  only after all bar engines miss
+  → per orientation in REGISTRY order (MLKit → MSI full-frame → MsiRoi →
+  ZXingCpp): engines with internal rotation (ML Kit hint, zxing TryRotate, MSI
+  ROI deskew) get the primary view only; the scanline MSI decoder receives
+  every candidate. No last-resort engines are registered in the default
+  container (the OCR text fallback was retired), but the `LastResortDecoder`
+  seam remains: any registered ones run once per frame, only after all bar
+  engines miss, inside a reserved slice of the frame budget
   → confident hit (≥0.95) stops scan; else pool/dedup and best-confidence wins
   → per-engine timings + final result go to logcat under `FusedDecoder`
   (always emitted at DEBUG; filter with `adb logcat -s FusedDecoder`)
@@ -58,11 +61,45 @@ No pipeline change.
 2. `registry.register(MyDecoder())` in `ScannerContainer` (or at runtime from the host).
 3. Done — fusion iterates `registry.snapshot()` order; no fusion edit needed.
 
+**Add a new engine** (e.g. Cognex-style 2D):
+1. Implement `BarcodeDecoder` (thread-safe, `NotFound` not exception on miss).
+2. `registry.register(MyDecoder())` in `ScannerContainer` (or at runtime from the host).
+3. Done — fusion iterates `registry.snapshot()` order; no fusion edit needed.
+
 **Tune speed vs recall**:
 - `ScannerConfig(maxOrientationsTried=N)` caps orientation views (default 4, lazy —
   unneeded rotations never materialize thanks to confident early-exit).
-- `zxingTryHarder(false)` opts the native sweep out of thorough mode; MSI effort
-  is always thorough (extra binarizations + vertical scanlines + wider voting).
+- `zxingTryHarder(false)` opts the native sweep out of thorough mode. The MSI
+  engine is always thorough: multi-ROI scanline voting, digit-template
+  correlation, and a far-field 2x retry on small frames.
+
+## MSI decode path (detail)
+
+```
+Grayscale frame (row-major bytes via JNI)
+  → ROI band search: rows with dense thin vertical gradients form bands
+    (top quarter skipped by design); columns with sustained edges set extents.
+    Up to 8 ROIs, strongest edge-density first
+  → per ROI: averaged profile + up to 9 individual scanline rows
+    → bar centers as prominent luminance minima; module = median spacing / 3
+    → digit windows correlated against blurred 12-module templates
+    → checksum gate (MOD10/MOD11/MOD1010/MOD1110, in order) + ≥2-vote agreement
+  → winner = most votes, ties by average score
+  → single 2x NN upscale retry if every ROI failed on a small frame (<800px edge)
+  → Kotlin: re-validate reported digits strictly under `msiChecksumPolicy`,
+    strip check digits, reject degenerate (single-digit) payloads
+```
+
+- **Full-frame MSI runs before ROI MSI** (measured more accurate: intact quiet
+  zones beat tight-crop edge artifacts; easy frames early-exit before
+  localization costs). `MsiRegionAssistDecoder` (ML Kit isolation → pad +
+  deskew crop → shared native decoder) stays the tilted-label backup.
+- **One decoder instance per path**, each owning a synchronized `MsiVoteGate`,
+  so ROI misses can never reset the full-frame consecutive count.
+- **Native library is optional at runtime**: `MsiNativeDecoder.nativeAvailable`
+  degrades to `NotFound` when the `.so` is absent (unsupported ABI, JVM
+  tests). Packaging is ARM-only (`armeabi-v7a`, `arm64-v8a`) in both the SDK
+  and the sample app.
 
 ## Decisions (ADRs, condensed)
 
@@ -76,13 +113,16 @@ No pipeline change.
   C++ core via the `io.github.zxing-cpp:android` artifact's public
   `BarcodeReader` API; graceful `NotFound` fallback when the native lib is
   absent (tests). Native format filter/mapping use the wrapper `Format` enum.
-- **Pure-Kotlin MSI first, native optional later**: tables + scanline logic stay in Kotlin for
-  testability; the `MsiPlesseyDecoder` boundary is the seam for a future NEON/C++ fast path.
-  The code table/guards/checksums are verified end-to-end (Zint-rendered fixtures →
-  `MsiPristineTest`, all policies).
+- **Native C++ MSI engine** (`src/main/cpp/msi_decoder.cpp`, no third-party
+  barcode code): signal-template correlation survives the blur that defeats
+  width thresholding. `MsiCodeTable`/`MsiChecksumValidator` stay in Kotlin —
+  the validator enforces the host's `msiChecksumPolicy` on native-reported
+  digits (the engine auto-detects; Kotlin decides). Verified by the host
+  harness (`tools/msi-harness`, host-compiled, no device needed), JVM
+  contract tests, and on-device sweeps (`DeviceMsiTest`).
 - **Fusion owns orientation**, engines own inversion/binarization: avoids N×M retry explosion.
-  MSI reads upside-down via a true reverse run-direction path (STOP-first, space-first
-  digits un-mirrored through the shared table), not pixel reversal.
+  Upside-down MSI resolves via the 180°-relative candidate and is flagged
+  through `DecodedBarcode.isUpsideDown` (same convention as ML Kit/zxing-cpp).
 - **Domain references Android graphics types** (Bitmap/Rect) as an accepted v1 tradeoff: an Android
   library module pays less for Robolectric than for a FrameImage abstraction layer; revisit if a
   pure-JVM artifact is ever needed.

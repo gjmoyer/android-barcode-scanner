@@ -142,7 +142,7 @@ barcode-scanner-sdk/          # the reusable library (only depend on this)
     di/                       # manual DI (internal)
   src/test/                   # unit tests incl. Zint-rendered MSI fixtures
 sample-app/                   # demo host app
-docs/                         # ARCHITECTURE.md, MSI_PLESSEY_RESEARCH.md, REVIEW_LOG.md
+docs/                         # ARCHITECTURE.md, MSI_PLESSEY_RESEARCH.md
 ```
 
 ## Robustness recipe (blur / rotation / upside-down)
@@ -163,8 +163,8 @@ docs/                         # ARCHITECTURE.md, MSI_PLESSEY_RESEARCH.md, REVIEW
 
 Design rule: pristine labels — the overwhelmingly common case — take the fast path;
 difficult labels may take the thorough path. JVM numbers below are desktop
-(Robolectric); on-device full-chain measurements (Pixel 6a / emulator-5554,
-see `docs/REVIEW_LOG.md` Pass 10) dominate in practice:
+(Robolectric); on-device full-chain measurements (Pixel 6a / emulator,
+see `docs/MSI_PLESSEY_RESEARCH.md` §6) dominate in practice:
 
 | Stage | Desktop JVM (Zint fixtures) | On-device (arm64) |
 |---|---|---|
