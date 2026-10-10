@@ -19,7 +19,7 @@ import kotlinx.coroutines.withContext
  * cannot decode MSI — it is not a supported format — but
  * `enableAllPotentialBarcodes()` still returns boxes for barcode-looking
  * strips), [MsiRegionCropper] pads + deskews each strip, and the shared
- * [MsiPlesseyDecoder] decodes the rectified crop. A miss here is cheap and
+ * [MsiNativeDecoder] decodes the rectified crop. A miss here is cheap and
  * explicit ([DecodeOutcome.NotFound]) so fusion falls through to full-frame MSI.
  *
  * Routing notes:

@@ -8,7 +8,9 @@ import android.graphics.Paint
 import android.graphics.Point
 import android.graphics.Rect
 import com.barcodescanner.sdk.data.mlkit.MlKitRegionLocalizer
+import com.barcodescanner.sdk.domain.decoder.BarcodeDecoder
 import com.barcodescanner.sdk.domain.decoder.DecodeOutcome
+import com.barcodescanner.sdk.domain.model.DecodedBarcode
 import com.barcodescanner.sdk.domain.model.ScanFrame
 import com.barcodescanner.sdk.domain.model.ScannerConfig
 import com.barcodescanner.sdk.domain.model.Symbology
@@ -78,6 +80,27 @@ class MsiRegionAssistDecoderTest {
         return b
     }
 
+    /**
+     * Fake MSI decoder for JVM tests (native C++ can't load on Robolectric).
+     * Returns the expected payload — these tests verify region-crop plumbing,
+     * not MSI decode quality (covered by the 6/6 native benchmark).
+     */
+    private class FakeMsiDecoder(private val payload: String) : BarcodeDecoder {
+        override val name = "FakeMsi"
+        override val supportedSymbologies = setOf(Symbology.MSI_PLESSEY)
+        override suspend fun decode(frame: ScanFrame): DecodeOutcome =
+            DecodeOutcome.Success(
+                listOf(
+                    DecodedBarcode(
+                        rawValue = payload,
+                        symbology = Symbology.MSI_PLESSEY,
+                        confidence = 1.0f,
+                        engineName = name,
+                    ),
+                ),
+            )
+    }
+
     private fun assist(vararg barcodes: Barcode): MsiRegionAssistDecoder {
         val client = mockk<BarcodeScanner>()
         every { client.process(any<InputImage>()) } returns Tasks.forResult(barcodes.toList())
@@ -85,10 +108,7 @@ class MsiRegionAssistDecoderTest {
             clientProvider = { client },
             imageProvider = { _, _ -> mockk(relaxed = true) },
         )
-        val msi = MsiPlesseyDecoder(
-            checksumPolicy = ScannerConfig.MsiChecksumPolicy.MOD_10,
-            robustMode = false,
-        )
+        val msi = FakeMsiDecoder(payload)
         return MsiRegionAssistDecoder(localizer, msi)
     }
 

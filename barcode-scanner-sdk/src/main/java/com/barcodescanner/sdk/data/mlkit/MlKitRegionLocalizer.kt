@@ -26,7 +26,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * looks enough like a 1D barcode (MSI often resembles ITF/Code 39 to the model).
  *
  * Intended follow-up (see `MsiRegionCropper`): pad the region for quiet zone,
- * deskew via the corner quad, then run [com.barcodescanner.sdk.data.msi.MsiPlesseyDecoder]
+ * deskew via the corner quad, then run [com.barcodescanner.sdk.data.msi.MsiNativeDecoder]
  * on the rectified strip and confirm with a checksum + multi-frame stability gate.
  *
  * Best-effort contract (do NOT rely on this alone):
