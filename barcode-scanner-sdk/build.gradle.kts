@@ -18,6 +18,21 @@ android {
         minSdk = 28
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         consumerProguardFiles("consumer-rules.pro")
+
+        // Native MSI decoder (src/main/cpp): build for the ABIs we ship.
+        externalNativeBuild {
+            cmake {
+                cppFlags("-std=c++17")
+                abiFilters("armeabi-v7a", "arm64-v8a", "x86_64")
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 
     // NOTE: testOptions lives directly under android{} in AGP 8.x+

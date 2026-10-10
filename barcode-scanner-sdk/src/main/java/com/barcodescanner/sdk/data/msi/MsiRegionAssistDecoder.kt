@@ -48,7 +48,7 @@ import kotlinx.coroutines.withContext
  */
 class MsiRegionAssistDecoder(
     private val localizer: MlKitRegionLocalizer,
-    private val msi: MsiPlesseyDecoder,
+    private val msi: BarcodeDecoder,
     private val dispatcher: CoroutineDispatcher = Dispatchers.Default,
     /** Null disables the OCR fast path (bar-only assist). */
     private val ocr: OcrSkuDecoder? = null,
