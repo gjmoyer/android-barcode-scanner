@@ -18,6 +18,21 @@ android {
         minSdk = 28
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         consumerProguardFiles("consumer-rules.pro")
+
+        // Native MSI decoder (src/main/cpp): build for the ABIs we ship.
+        externalNativeBuild {
+            cmake {
+                cppFlags("-std=c++17")
+                abiFilters("armeabi-v7a", "arm64-v8a", "x86_64")
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 
     // NOTE: testOptions lives directly under android{} in AGP 8.x+
@@ -63,9 +78,6 @@ dependencies {
     implementation(libs.camera.camera2)
     implementation(libs.camera.lifecycle)
     implementation(libs.mlkit.barcode.scanning)
-    // Bundled Latin OCR model (offline, no Play dependency) for the MSI SKU
-    // text fallback (see data/ocr). Runs last, only on MSI bar-miss.
-    implementation(libs.mlkit.text.recognition)
     implementation(libs.coroutines.core)
     implementation(libs.coroutines.android)
     // Task<T>.await() for ML Kit's GMS Task API.

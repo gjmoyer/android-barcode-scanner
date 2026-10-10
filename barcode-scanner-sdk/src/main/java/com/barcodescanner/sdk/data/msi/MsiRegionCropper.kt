@@ -13,7 +13,7 @@ import kotlin.math.atan2
 /**
  * POC: ROI crop + deskew helper for the "ML Kit localizes, MSI decodes" split.
  *
- * Why this exists: [MsiPlesseyDecoder] reads horizontal (default) or
+ * Why this exists: [MsiNativeDecoder] reads horizontal (default) or
  * horizontal+vertical (robust) scanlines. That covers 0°/180° natively and 90°/270°
  * in robust mode, but any *arbitrary* tilt (15°, 30°, …) smears runs diagonally and
  * any small-in-frame symbol drowns in competing print. An ML Kit candidate region

@@ -4,9 +4,8 @@ import android.content.Context
 import com.barcodescanner.sdk.data.fusion.FusedDecoder
 import com.barcodescanner.sdk.data.mlkit.MLKitDecoder
 import com.barcodescanner.sdk.data.mlkit.MlKitRegionLocalizer
-import com.barcodescanner.sdk.data.msi.MsiPlesseyDecoder
+import com.barcodescanner.sdk.data.msi.MsiNativeDecoder
 import com.barcodescanner.sdk.data.msi.MsiRegionAssistDecoder
-import com.barcodescanner.sdk.data.ocr.OcrSkuDecoder
 import com.barcodescanner.sdk.data.zxingcpp.ZXingCppDecoder
 import com.barcodescanner.sdk.domain.decoder.DecoderRegistry
 import com.barcodescanner.sdk.domain.decoder.BarcodeDecoder
@@ -57,26 +56,19 @@ internal class ScannerContainer(
         )
     }
 
-    val msiDecoder: MsiPlesseyDecoder by lazy {
-        MsiPlesseyDecoder(
-            checksumPolicy = config.msiChecksumPolicy,
-            robustMode = true,
-            dispatcher = dispatcher,
-            minPayloadDigits = config.msiMinPayloadDigits,
-            stripChecksum = config.msiStripChecksum,
-        )
-    }
-
     /**
-     * SKU text fallback, deliberately LAST: runs only after every bar engine
-     * missed, and only when MSI is enabled at all.
+     * Native C++ MSI decoder (src/main/cpp). Replaces the pure-Kotlin
+     * MsiPlesseyDecoder: signal-template correlation survives the blur that
+     * defeats run-length thresholding. 6/6 on the shelf-tag benchmark.
+     *
+     * The OCR SKU fallback (OcrSkuDecoder) is retired: the native decoder
+     * handles the rough captures that previously needed text backup.
      */
-    val ocrDecoder: OcrSkuDecoder by lazy {
-        OcrSkuDecoder(
-            enabledSymbologies = config.enabledSymbologies,
-            checksumPolicy = config.msiChecksumPolicy,
+    val msiDecoder: MsiNativeDecoder by lazy {
+        MsiNativeDecoder(
+            stripChecksum = config.msiStripChecksum,
+            minPayloadDigits = config.msiMinPayloadDigits,
             dispatcher = dispatcher,
-            requireChecksum = config.msiOcrRequireChecksum,
         )
     }
 
@@ -88,11 +80,10 @@ internal class ScannerContainer(
         // (MSI is not a supported format), so the full-frame fallback stays.
         val engines = mutableListOf<BarcodeDecoder>(mlKitDecoder)
         if (Symbology.MSI_PLESSEY in config.enabledSymbologies) {
-            engines += MsiRegionAssistDecoder(MlKitRegionLocalizer(), msiDecoder, ocr = ocrDecoder)
+            engines += MsiRegionAssistDecoder(MlKitRegionLocalizer(), msiDecoder)
         }
         engines += msiDecoder
         engines += zxingDecoder
-        engines += ocrDecoder
         DecoderRegistry(engines)
     }
 
