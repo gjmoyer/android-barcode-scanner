@@ -197,3 +197,124 @@ undetectable without the check digit). Its config knobs
 - ZXing.Net `BarcodeFormat.cs` (MSI/PLESSEY exist in .NET port; excluded from All_1D as FP-prone)
 - Scandit `Checksum` enum (Mod10/1010/11/1110 vocabulary), Seagull MSI guide (warehouse context)
 
+
+## 8. Logic approaches: what was tried, what won, and why
+
+Read this before touching the decoder. Three classification generations live
+in the history; only the third runs. The others left dead code in
+`msi_decoder.cpp` (inventoried in §8.5) — do not revive it without re-reading
+this section.
+
+### 8.1 Width-threshold classification (retired with the Kotlin decoder)
+
+Binarize (Otsu variants, adaptive mean) → measure run widths → k-means
+narrow/wide split → table lookup → checksum under the configured policy.
+Elegant on crisp input and fully JVM-testable, but structurally blur-fragile:
+defocus moves edges, corrupted widths misclassify, and no amount of variant
+binarization recovers information thresholding destroyed. Scoreboard on the
+same shelf photos: 2/6 bars exact (+1 via the since-retired OCR crutch).
+What survives: `MsiCodeTable` (spec table, still authoritative),
+`MsiChecksumValidator` (now the Kotlin-side policy enforcer on
+native-reported digits).
+
+### 8.2 Bar-shape correlation (dead on arrival)
+
+`classifyBarsByCorrelation` (still in the file, never called — compiler
+warns): correlate the signal around each bar center against blurred
+narrow/wide templates instead of thresholding widths. Correct instinct
+(shape, not size), wrong granularity: per-bar hard decisions compound —
+one flipped bar kills its digit, and there is no whole-digit evidence to
+outvote it. Superseded by §8.3 before ever shipping. Leave it dead.
+
+### 8.3 Digit-template correlation (current hot path)
+
+`decode()` → `decodeImpl()` (`src/main/cpp/msi_decoder.cpp`):
+1. `findRoiCandidates`: rows with dense thin vertical gradients form bands
+   (top quarter skipped, `kScanTopFraction`); columns with sustained edges
+   set extents. Up to 8 ROIs, strongest first. xstep=2 subsampling is a known
+   blind spot for pixel-perfect axis-aligned input (see §8.6); real captures
+   always carry enough noise to break the lock — xstep=1 was tried and
+   reverted for shifting real-photo band fringes.
+2. Per ROI: one averaged profile + up to `kMaxScanlines`=9 individual rows.
+3. `findBars` (prominent luminance minima) → `filterBars` (drop
+   sub-1.8-module splits) → module = median bar spacing / 3.
+4. `decodeByDigitTemplates`: for each of the first 5 bars as start and each
+   plausible digit count, anchor 12-module windows at bar centers and
+   correlate against Gaussian-blurred digit templates (two width hypotheses
+   × ±0.5-module search). Blurred templates are rebuilt per distinct module
+   estimate and cached thread-locally on exact float match (bit-identical).
+5. `validateChecksum` tries MOD10 → MOD11 → MOD1010 → MOD1110, first hit wins;
+   ≥`kMinVotesCheck`=2 agreeing scanline profiles required (NONE is disabled:
+   too many false positives).
+6. Failure path only: one NN 2x upscale retry (`kUpscaleMaxLongEdge`=800,
+   +1px source shift so the xstep=2 sampler sees true boundaries), single depth.
+7. Kotlin (`MsiNativeDecoder`): re-validate strictly under
+   `msiChecksumPolicy`, strip check digits, reject degenerate
+   single-repeated-digit payloads (blank areas decode as validating zeros).
+
+### 8.4 Direct profile search (faint-image fallback)
+
+`decodeByDirectSearch`: when the template path yields a suspiciously short
+(<7 digit) read, sweep module 4.0–5.2 × offsets with greedy per-position
+template picks (weak matches <0.25 rejected), checksum-gated. Longer reads
+win. Votes reported as 1. Rare path; do not tune it without a faint-image
+corpus that exercises it.
+
+### 8.5 Dead-code inventory (`msi_decoder.cpp`, verified via -Wall)
+
+`clusterWidths`, `tryDecodeBars`, `classifyBarsByCorrelation`, `findRoi`
+(legacy single-ROI wrapper), `g_relaxedBars` (read, never set),
+`kMinVotesNone` (NONE disabled). Zero runtime cost, non-zero confusion cost.
+Removal is safe (A/B the harness) but has never been worth a commit on its
+own — bundle it with the next functional touch.
+
+### 8.6 The crisp-input tie (investigated, deliberately unfixed)
+
+On pixel-perfect renders, the true alignment and a shifted-by-one-bar
+alignment correlate ~0.96 alike — the score carries no information, so any
+fixed tiebreak just relocates the error: `+sIdx` amputates leading digits
+(`08281479`→`8281479`), prefer-earlier prepends phantom zeros
+(`12345674`→`012345674`, verified), and a consumption bonus breaks a green
+case. All three variants were prototyped against the host harness and
+reverted. Real captures separate properly via sensor texture (all six shelf
+photos read correctly), so this is a synthetic-only characteristic — but it
+rules the committed-fixture policy: fixtures must read green as committed,
+so the repo pins runtime synthetics + honest-NotFound gates, never
+luck-decided reads. Revisit ONLY on a real-world misparse with this
+signature (leading/trailing digit drop on a crisp gallery import): the
+principled fix would be structural guard verification around the winning
+window, never another score tiebreak.
+
+## 9. Photo-trip handoff: ground-truth + fixture protocol
+
+Context for a fresh session after a store visit. Aim: ~40 distinct MSI labels
+× 5 shots (normal / far / close / ~30° tilt / glare-or-shadow), portrait and
+landscape mixed — distinct labels matter, repeats are free in-test.
+
+1. **Filename convention** (do this IN THE STORE, from the printed digits):
+   `msi-<label>-<payload>.png`, where payload is the human-readable digits
+   EXACTLY as printed. Never rename later from memory.
+2. **Payload ≠ codeword.** The bars carry payload + check digit(s); the
+   printed number is the payload. Verify each with the checksum math before
+   it enters any expectation (Python one-liners; Luhn vectors `1234567`→4,
+   `8052`→3 as sanity anchors):
+   Mod10 = Luhn; Mod11 = IBM weights 2..7 from the right, `(11-sum%11)%11`;
+   Mod1010 = Mod10 then Mod10 over payload+first check; Mod1110 = Mod11
+   then Mod10. Reference pairs: `0828147`→`08281479`,
+   `0186477`→`018647768`, `0243523`→`02435238`, `0087573`→`00875732`,
+   `0168971`→`016897100`, `0826593`→`082659368`. A SKU validating under NO
+   scheme is data, not an error — record it as such (do not hand-invent a
+   check digit; that exact mistake is documented in §7).
+3. **Where files go (all git-ignored, all auto-consumed):** harness sweep dir
+   (passed as argv[1]) and `src/androidTest/assets/msi_samples/`. Both
+   suites skip absent files and sweep present ones; `DeviceMsiTest` logs a
+   per-policy matrix plus hard assertions + a 3x repeat sweep for entries in
+   its expectation maps.
+4. **What "done" looks like per photo:** either EXACT at SDK payload level
+   under its true policy (assert it), or honest-`NotFound` where truncated
+   reads are policy-rejected (assert the silence — it fails loud on future
+   phantom emission). Never bake a misparse as expected. Current gaps to
+   beat: quakotml (modules overshoot), ondeg (phantoms validate).
+5. **Privacy rule (non-negotiable):** real photos never enter the repo. Only
+   derived artifacts may be committed: spec-rendered vectors reproducing a
+   failure, aggregate pass/fail tables, and the generator script.

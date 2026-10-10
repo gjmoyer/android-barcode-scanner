@@ -1,27 +1,32 @@
 # BarcodeScanner — reusable Android barcode scanning module
 
 Drop-in Android library that scans **all common symbologies plus GS1 DataBar and
-MSI Plessey**, robust to **blur, rotation, upside-down and inverted** labels, with a
-point-and-scan live mode.
+MSI Plessey**, robust to **blur, rotation, and upside-down** labels, with a
+point-and-scan live mode. (Inversion is covered for ML Kit/zxing symbologies;
+inverted MSI remains out of scope.)
 
 | Symbology | Engine |
 |---|---|
 | EAN-8/13, UPC-A/E, Code 39/93/128, ITF, Codabar, QR, Aztec, PDF-417, Data Matrix | ML Kit (primary, fast) |
 | GS1 DataBar (Omni / Stacked / Limited / Expanded / Expanded Stacked) | zxing-cpp v3.1.1 prebuilt AAR (`io.github.zxing-cpp:android`) |
-| MSI Plessey (Mod10 / Mod11 / Mod1010 / Mod1110) | ML Kit isolation (candidate boxes + deskew → `MsiRoi`), custom pure-Kotlin scanline decoder (`data/msi/`, full-frame fallback `MsiPlessey`) |
-| Rotated / upside-down / blurred | Preprocessing + orientation fusion + multi-binarization |
+| MSI Plessey (Mod10 / Mod11 / Mod1010 / Mod1110) | Custom native C++ scanline decoder (`src/main/cpp/`, via `MsiNativeDecoder`); full-frame `MsiNative` first, ML Kit isolation + deskew (`MsiRoi`) as the tilted-label backup |
+| Rotated / upside-down / blurred | Preprocessing + orientation fusion + signal-template correlation |
 
 Why this exists: neither ML Kit nor zxing-cpp ships an MSI Plessey reader, so MSI is
-decoded by a custom engine (spec-verified tables, subpixel edge localization, true
-reverse-direction reading for upside-down labels). See
+decoded by a custom engine (clean-room C++ signal-template correlation — no
+binarization threshold to tune, survives the blur that defeats width
+measurement). See
 [`docs/MSI_PLESSEY_RESEARCH.md`](docs/MSI_PLESSEY_RESEARCH.md) for the full write-up.
 
 ## Requirements
 
 - Android Studio with **SDK 36+** (compileSdk 37, targetSdk 36)
 - AGP 9.4.1, Kotlin 2.4.20 (built-in — no kotlin-android plugin), Gradle 9.6.0, JDK 17+
-- minSdk 28 (Android 9). zxing-cpp v3.1.1 arrives as a prebuilt Maven Central AAR
-  — no NDK/CMake source build, network fetch happens once via Gradle.
+- Android NDK + CMake 3.22.1 (the SDK compiles its own MSI decoder from
+  `src/main/cpp/`; zxing-cpp v3.1.1 arrives as a prebuilt Maven Central AAR —
+  network fetch happens once via Gradle)
+- minSdk 28 (Android 9). Native libraries ship ARM-only (`armeabi-v7a`,
+  `arm64-v8a`); other ABIs gracefully degrade to `NotFound` on native paths.
 
 ## Open in Android Studio
 
@@ -98,29 +103,23 @@ val config = ScannerConfigBuilder()
     .only(Symbology.QR_CODE, Symbology.DATA_BAR_EXPANDED, Symbology.MSI_PLESSEY)
     .msiChecksumPolicy(MsiChecksumPolicy.MOD_10)
     .msiMinPayloadDigits(6)                  // reject short lucky MSI parses (shelf SKUs)
-    .msiOcrRequireChecksum(false)            // trust printed SKU (print omits check digit)
-    .decodeTimeoutMillis(4000)               // leave room for the last-in-line OCR fallback
+    .decodeTimeoutMillis(1500)               // whole frame budget (preprocessing + orientations + engines)
     .duplicateSuppressionMillis(1500)        // live-mode repeat suppression
     .minConfidence(0.5f)
     .build()
 ```
 
 - There is no fast/degraded mode: the pipeline is always thorough (4 lazy
-  orientations, extra MSI binarizations, vertical MSI scanlines, zxing
-  `TryHarder`) with cheap-first ordering + confident early-exit, so easy frames
-  stay fast. `maxOrientationsTried` (default 4) only bounds the view count for
+  orientations, multi-ROI MSI scanline voting with template correlation,
+  zxing `TryHarder`) with cheap-first ordering + confident early-exit, so easy
+  frames stay fast. `maxOrientationsTried` (default 4) only bounds the view count for
   fixed-geometry hosts; `zxingTryHarder(false)` opts the native sweep out of
-  thorough mode (MSI effort stays thorough).
-- MSI checksum must match the label spec; a wrong policy yields `NotFound`
-  (never a misread presented as valid — see policy matrix below).
+  thorough mode.
+- MSI results are re-validated strictly under `msiChecksumPolicy` and short or
+  degenerate reads are withheld — a wrong policy yields `NotFound`, never a
+  misread presented as valid.
 - `msiMinPayloadDigits` (default 3, spec floor): raise to ~6 for shelf SKUs;
-  short MSI parses validate by luck and can win blurry live frames with only
-  two correlated observations.
-- Printed shelf SKUs usually omit the check digit (it lives in the barcode), so
-  the OCR fallback trusts the printed digits by default (`msiOcrRequireChecksum
-  = false`) and emits them as `MsiOcr` at confidence 0.5. Set true to require
-  validation (confidence 0.7) only if printed numbers carry their check digit.
-  Because OCR runs last, budget `decodeTimeoutMillis` accordingly (~4 s).
+  short MSI parses validate by luck and can win blurry live frames.
 - Duplicate suppression only affects the live `results` flow; one-shot
   `scanBitmap`/`scanFrame` always return the decode result.
 
@@ -135,12 +134,11 @@ barcode-scanner-sdk/          # the reusable library (only depend on this)
     domain/pipeline/          # downscale/contrast/orientation preprocessing
     data/mlkit/               # primary engine
     data/zxingcpp/            # DataBar engine (prebuilt zxing-cpp AAR)
-    data/msi/                 # custom MSI Plessey engine
-    data/ocr/                 # MSI SKU text fallback (ML Kit text recognition)
+    data/msi/                 # custom MSI engine (native decoder + ROI assist + gates)
     data/fusion/              # multi-engine, multi-orientation voter
     camera/                   # CameraX frame producer (single-flight, conflated)
     di/                       # manual DI (internal)
-  src/test/                   # unit tests incl. Zint-rendered MSI fixtures
+  src/test/                   # unit tests (Robolectric + JUnit)
 sample-app/                   # demo host app
 docs/                         # ARCHITECTURE.md, MSI_PLESSEY_RESEARCH.md
 ```
@@ -153,32 +151,38 @@ docs/                         # ARCHITECTURE.md, MSI_PLESSEY_RESEARCH.md
    upside-down, then sideways, materialized lazily so an early hit never
    allocates unneeded rotations.
 3. **Per-engine retries** — zxing `TryRotate`/`TryInvert`/`TryHarder`; MSI
-   multi-binarization (Otsu, background-subtraction, adaptive) × scanlines ×
-   subpixel gray runs × min-projection bands, forward + true reverse-direction
-   decode, soft least-squares digits.
-4. **Fusion voting** — score = payload length × agreeing observations (≥2 required);
-   checksum-verified hits win at confidence 1.0.
+    multi-ROI scanline voting with blurred digit-template correlation
+    (shape matching, no binarization threshold), checksum gating, and a
+    far-field 2x retry on small frames.
+4. **Fusion voting** — hits pool across orientations (deduped on
+    value+symbology, max confidence kept); a hit at confidence ≥0.95 stops
+    the scan immediately. MSI hits additionally require ≥2 agreeing
+    scanlines, the configured checksum policy, and a non-degenerate payload,
+    and emit at confidence 1.0.
 
 ## Performance (point-and-scan latency)
 
 Design rule: pristine labels — the overwhelmingly common case — take the fast path;
-difficult labels may take the thorough path. JVM numbers below are desktop
-(Robolectric); on-device full-chain measurements (Pixel 6a / emulator,
-see `docs/MSI_PLESSEY_RESEARCH.md` §6) dominate in practice:
+difficult labels may take the thorough path. Measured numbers (host bench +
+on-device full chain, Pixel 6a / emulator):
 
-| Stage | Desktop JVM (Zint fixtures) | On-device (arm64) |
+| Stage | Host (macOS, `tools/msi-harness` bench) | On-device, full chain (arm64) |
 |---|---|---|
-| Preprocessing (downscale + contrast) | ~8 ms | ~15–30 ms |
-| MSI decode (pristine, incl. 2px modules) | 10–100 ms (always thorough) | 180–760 ms |
-| DataBar via zxing-cpp (native TryRotate/TryHarder) | n/a (native absent on JVM) | 550–1150 ms (Expanded pays TryHarder) |
-| Full-chain worst case (capped by `decodeTimeoutMillis`) | — | ~1.5 s at default 1500 ms |
+| Native MSI decode | ~2.1 ms mean (1280×720 synthetic), ~0.7–1 ms (shelf photo) | single-digit ms inside the scan below |
+| One-shot MSI `scanBitmap` | n/a (native absent on JVM) | ~15–60 ms typical |
+| DataBar via zxing-cpp (native TryRotate/TryHarder) | n/a (native absent on JVM) | ~35–55 ms |
+| Full-chain worst case | — | capped by `decodeTimeoutMillis` (default 1500 ms) |
 
 Live-mode recipe (already wired, no host code needed):
 - Fusion tries engines in registration order with first-confident-wins: a pointed
   QR/EAN/Code128 resolves on ML Kit alone (~1 frame, no fallback cost).
-- MSI frames go through ML Kit isolation first (candidate boxes + deskewed
-  crops via `MsiRoi`); an empty frame costs ~200ms and the next camera frame
-  arrives — the full-frame sweep waits for one-shot scans and stale aim.
+- One-shot and stale live frames run the full sweep: full-frame MSI first
+  (intact quiet zones win ties, and a confident hit skips localization work),
+  then ROI crops for tilted labels the scanlines cannot read, then the native
+  second opinions. Fresh live frames while results are recent skip the
+  expensive sweep (ML Kit isolation + native second opinion only, ~200ms for
+  an empty frame) and the next camera frame arrives — labels ML Kit cannot
+  isolate still resolve once aiming persists and the sweep re-enables.
 - Orientation work is routed per engine: ML Kit (rotation hint), zxing-cpp
   (native `TryRotate`) and `MsiRoi` (deskew) resolve orientation themselves and
   get the primary view once — physically rotated copies are never duplicate
@@ -193,51 +197,47 @@ Live-mode recipe (already wired, no host code needed):
 - Per-frame worst case is capped by `ScannerConfig.decodeTimeoutMillis` (default
   1500 ms; preprocessing + orientations + engines all run under it). Lower it
   (~500 ms) if your live UI must never wait on a pathological frame.
-- When a last-resort engine is registered (MSI OCR), the primary bar phase gets
-  the first 60% of `decodeTimeoutMillis` and the rest is **reserved** for the
-  fallback, which runs at most once per frame and only after every bar engine
-  missed. Without the reservation, the thorough passes (orientations,
-  binarizations, `TryHarder`) could consume the whole budget and OCR would
-  never run on a bar miss. Budget ~4 s when relying on the OCR fallback.
+  `LastResortDecoder` is an extension seam (no last-resort engines ship by
+  default): any registered ones run at most once per frame, only after every
+  bar engine missed, inside a reserved slice of the frame budget.
 - Why a budget at all: the camera gate is single-flight, so a pathological frame
   that takes 8 s freezes live scanning for 8 s. "Exhaust every option" is the
   intent — the sweep engines do all run on one-shot and stale frames — but
   cheap-first ordering plus a deadline keeps point-and-scan usable.
-- `MsiPristineTest` pins the contract: Zint-rendered fixtures (all checksums, tiny
-  modules, upside-down, sideways) must decode exactly, each under a 30 s
-  absurd-blowup guard.
+- `tools/msi-harness` pins the native contract on any dev machine (no device
+  needed): spec-rendered vectors for all four checksum policies, degradation
+  ladders, honest-`NotFound` negatives, per-photo sweeps at SDK-equivalent
+  payload level, and a timing bench — exit 0 is green. Real shelf photos stay
+  out of the repo; the harness sweeps local captures when present.
 
 ## MSI Plessey notes
 
 Checksum policies: `MOD_10` (default), `MOD_11` (IBM weights 2..7; a computed
 check of 10 is unrepresentable and rejected — no 0-mapping guess), `MOD_10_10`
 (Mod1010 double-Mod10), `MOD_10_11` (Mod1110: Mod11 then Mod10), `NONE` (debug
-only; all policies require ≥2 agreeing observations regardless).
+only — accepted by the Kotlin validator but never emitted by the native
+engine, which tries only the four real schemes).
 Encoding table + guards verified against Wikipedia "MSI Barcode" + Morovia KB10637
 (see [`docs/MSI_PLESSEY_RESEARCH.md`](docs/MSI_PLESSEY_RESEARCH.md)); NCR Mod11
-(weights 2..9) and white-on-black MSI are documented limitations. Vertical
-scanlines cover 90° labels (always on); upside-down labels decode via the
-reverse run-direction path. Off-cardinal tilts (15°/30°/…) decode through the
-ML Kit ROI path (`MsiRoi`: isolate + deskew, then the same decoder).
+(weights 2..9) and white-on-black MSI are documented limitations. Sideways views
+resolve through physical orientation candidates; upside-down reads are flagged
+via `DecodedBarcode.isUpsideDown`. Off-cardinal tilts (15°/30°/…) decode through
+the ML Kit ROI path (`MsiRoi`: isolate + deskew, then the same native decoder).
 
-**SKU text fallback** (`MsiOcr`, bundled ML Kit text recognition, offline): when MSI
-is enabled and every bar engine misses, the decoder reads the printed SKU next to
-the barcode — digit runs anchored to content bands, preferring dash-free runs
-(shelf case codes print dashed: `000-42000-15121`). Shelf labels where the bars
-are unreadable but the text survives (e.g. scratched/occluded barcodes) still
-scan. Shelf labels print the SKU WITHOUT the check digit(s), so by default
-(`msiOcrRequireChecksum = false`) any plain 7+ digit run is emitted as printed at
-**confidence 0.5**; set true to require validation (confidence 0.7) when printed
-numbers do carry their check digit. Hits report `engineName="MsiOcr"` with the OCR
-line's bounding box, so hosts can tell bar reads from text reads and gate
-accordingly (raising `minConfidence` above 0.5 is the simplest filter for
-unvalidated text reads).
+**Retired: SKU text fallback.** An OCR fallback (`MsiOcr`, bundled ML Kit text
+recognition) used to read the printed SKU when bars failed. It was removed —
+the native bar engine covers the rough captures that needed text backup, and
+un-checksummed text reads trade recall for misread risk. A few inert API
+remnants (`msiOcrRequireChecksum`, `debugOcrFrameDump`, `gtin` fields) remain
+for source compatibility and do nothing.
 
 ## Testing
 
 ```bash
 ./gradlew :barcode-scanner-sdk:testDebugUnitTest   # unit tests (Robolectric + JUnit)
 ./gradlew :sample-app:assembleDebug                # sample APK
+(cd tools/msi-harness && ./build.sh && ./msi_harness)  # native accuracy + speed (no device)
+./gradlew :barcode-scanner-sdk:connectedDebugAndroidTest  # on-device full chain (needs device)
 ```
 
 ## License
