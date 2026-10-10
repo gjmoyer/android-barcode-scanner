@@ -29,12 +29,24 @@ class MsiNativeDecoder(
     private val stripChecksum: Boolean = true,
     private val minPayloadDigits: Int = MsiCodeTable.MIN_DIGITS,
     private val dispatcher: CoroutineDispatcher = Dispatchers.Default,
+    /**
+     * Consecutive-frame agreement required before emitting. Live camera
+     * produces transient false positives (motion blur phantoms that pass
+     * checksum by luck); requiring the same value twice kills them.
+     * Set to 1 to disable (single-frame emit, as in static-image tests).
+     */
+    private val requireConsecutiveFrames: Int = 2,
 ) : BarcodeDecoder {
 
     override val name: String = NAME
     override val supportedSymbologies: Set<Symbology> = setOf(Symbology.MSI_PLESSEY)
 
     private external fun nativeDecode(gray: ByteArray, width: Int, height: Int): String?
+
+    // Temporal voting state (guarded by the decoder's single-threaded use;
+    // FusedDecoder calls decoders sequentially per frame).
+    private var lastPayload: String? = null
+    private var consecutiveCount: Int = 0
 
     override suspend fun decode(frame: ScanFrame): DecodeOutcome = withContext(dispatcher) {
         try {
@@ -65,7 +77,12 @@ class MsiNativeDecoder(
                     DecoderException("MSI native library not loaded", e),
                     recoverable = false,
                 )
-            } ?: return@withContext DecodeOutcome.NotFound("MSI native: no decode")
+            } ?: run {
+                // Native miss: reset temporal voting.
+                lastPayload = null
+                consecutiveCount = 0
+                return@withContext DecodeOutcome.NotFound("MSI native: no decode")
+            }
             // Format: "digits|policy|votes"
             val parts = raw.split("|")
             if (parts.size != 3) {
@@ -83,6 +100,28 @@ class MsiNativeDecoder(
             }
             if (payload.length < minPayloadDigits) {
                 return@withContext DecodeOutcome.NotFound("MSI native: stripped payload too short")
+            }
+            // Temporal voting: require the same payload across consecutive
+            // frames before emitting. Transient false positives (motion-blur
+            // phantoms) rarely repeat; true barcodes do.
+            if (requireConsecutiveFrames > 1) {
+                if (payload == lastPayload) {
+                    consecutiveCount++
+                } else {
+                    lastPayload = payload
+                    consecutiveCount = 1
+                }
+                if (consecutiveCount < requireConsecutiveFrames) {
+                    return@withContext DecodeOutcome.NotFound(
+                        "MSI native: awaiting confirmation " +
+                            "($consecutiveCount/$requireConsecutiveFrames)"
+                    )
+                }
+                // Confirmed: reset so a *different* barcode can be picked up
+                // without waiting again (but the same value won't re-emit
+                // until it changes and returns).
+                lastPayload = null
+                consecutiveCount = 0
             }
             DecodeOutcome.Success(
                 listOf(

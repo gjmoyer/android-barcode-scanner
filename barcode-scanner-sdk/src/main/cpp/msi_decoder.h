@@ -2,9 +2,6 @@
 // Written from the public MSI specification (Wikipedia "MSI Barcode").
 // No third-party barcode libraries used.
 //
-// Developed by Muse (Meta) in collaboration with Greg Moyer, October 2026.
-// Validated 6/6 on real-world blurry shelf-tag captures.
-//
 // API: feed a grayscale image buffer (0=black, 255=white, row-major),
 // get back the decoded digit string and the checksum policy that validated,
 // or a failure indication.
