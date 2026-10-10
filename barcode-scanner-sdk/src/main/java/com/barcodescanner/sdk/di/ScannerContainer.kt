@@ -70,24 +70,35 @@ internal class ScannerContainer(
             minPayloadDigits = config.msiMinPayloadDigits,
             dispatcher = dispatcher,
             checksumPolicy = config.msiChecksumPolicy,
+            // Single-observation emit: the full-frame sweep NEVER runs on
+            // fresh live frames (FusedDecoder gates it out), so a 2-count
+            // here only ever gated one-shot/stale scans — withholding the
+            // only observation a hard barcode yields. Stale-live frames keep
+            // the live stability gate (2 sightings) + dedup on top; every hit
+            // still carries the native >=2-vote checksum gate + policy gate.
+            requireConsecutiveFrames = 1,
         )
     }
 
     val registry: DecoderRegistry by lazy {
-        // MSI-ROI runs BEFORE full-frame MSI: a tilted label that only decodes
-        // from a deskewed crop resolves here without paying for the full-frame
-        // scanline sweep first. A miss is a cheap NotFound and fusion falls
-        // through to the standard engines. ML Kit isolation is best-effort
-        // (MSI is not a supported format), so the full-frame fallback stays.
+        // Engine order: full-frame MSI BEFORE ROI MSI. Measured on the six
+        // shelf photos (host harness + on-device sweeps): the full-frame
+        // scanline read carries intact quiet zones and wins ties against ROI
+        // crops, whose tight edges birth truncated/shifted windows that still
+        // checksum-validate by luck (quakotml "186477", silkalm 9-digit
+        // phantoms, ondeg "0486247"). A confident full-frame hit early-exits,
+        // so easy frames never pay for localization+crops; tilted labels the
+        // scanlines cannot read fall through to the deskewed ROI backup.
+        // ML Kit isolation stays best-effort (MSI is not a supported format).
         val engines = mutableListOf<BarcodeDecoder>(mlKitDecoder)
+        engines += msiDecoder
         if (Symbology.MSI_PLESSEY in config.enabledSymbologies) {
-            // The ROI path gets its OWN native decoder instance with
-            // single-frame emit: each instance owns its MsiVoteGate, so ROI
-            // misses can never reset the full-frame path's consecutive count
-            // (and vice versa). ROI hits already carry the native ≥2-vote
-            // checksum gate plus the live stability gate, so the extra
-            // consecutive-frame layer only added latency on jittery crops.
-            // The full-frame instance below keeps requireConsecutiveFrames=2.
+            // The ROI path gets its OWN native decoder instance: each instance
+            // owns its MsiVoteGate, so ROI misses can never reset the
+            // full-frame path's consecutive count (and vice versa). Both
+            // instances emit on a single validated observation; live
+            // protection stays in the stability gate + dedup, and every hit
+            // still carries the native >=2-vote checksum gate + policy gate.
             val roiMsi = MsiNativeDecoder(
                 stripChecksum = config.msiStripChecksum,
                 minPayloadDigits = config.msiMinPayloadDigits,
@@ -97,7 +108,6 @@ internal class ScannerContainer(
             )
             engines += MsiRegionAssistDecoder(MlKitRegionLocalizer(), roiMsi)
         }
-        engines += msiDecoder
         engines += zxingDecoder
         DecoderRegistry(engines)
     }

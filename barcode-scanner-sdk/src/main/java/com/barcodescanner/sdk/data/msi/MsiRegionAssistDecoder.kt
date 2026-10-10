@@ -98,12 +98,14 @@ class MsiRegionAssistDecoder(
                         is DecodeOutcome.NotFound ->
                             android.util.Log.d(
                                 TAG,
-                                "region#$index miss deskew=${crop.angleApplied} box=$box",
+                                "region#$index miss deskew=${crop.angleApplied} box=$box " +
+                                    "reason=${outcome.reason}",
                             )
                         is DecodeOutcome.Error ->
                             android.util.Log.d(
                                 TAG,
-                                "region#$index error(recoverable=${outcome.recoverable})",
+                                "region#$index error(recoverable=${outcome.recoverable}) " +
+                                    "cause=${outcome.cause.javaClass.simpleName}: ${outcome.cause.message}",
                             )
                     }
                 } finally {

@@ -89,6 +89,9 @@ class ZXingCppDecoder(
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
+            // Rare path: log the class so on-device forensics can tell a
+            // missing/broken native lib (ULE family) from wrapper misuse.
+            android.util.Log.w(NAME, "decode failed: ${t.javaClass.simpleName}: ${t.message}")
             DecodeOutcome.Error(DecoderException("zxing-cpp decode failed", t), recoverable = true)
         }
     }
