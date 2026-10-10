@@ -8,14 +8,15 @@ import org.junit.runner.RunWith
 import org.junit.runners.JUnit4
 
 /**
- * Ground-truth checksum vectors for the six committed shelf-label fixtures
- * (dir `src/test/resources/msi-shelf`, also exercised end-to-end by the
- * host harness `tools/msi-harness` and on-device by `DeviceMsiTest`).
+ * Ground-truth checksum vectors for the six shelf-label SKUs.
  *
- * Each entry is payload -> full codeword as printed in the bars. The native
- * engine detects the codeword; [MsiChecksumValidator] enforces the policy and
- * strips the check digits — these tests pin that Kotlin-side contract on the
- * JVM (the .so cannot load under unit tests).
+ * The real shelf photos stay OUT of the repo (private labels); the same
+ * codewords can be regenerated locally with
+ * `tools/msi-harness/gen_shelf_synthetics.py` and swept through the real
+ * native decoder via the host harness. These JVM tests pin the Kotlin-side
+ * contract (policy enforcement + check-digit stripping) without needing
+ * pixels: the native engine detects the codeword; [MsiChecksumValidator]
+ * enforces the policy and strips the check digits.
  */
 @RunWith(JUnit4::class)
 class MsiShelfVectorsTest {

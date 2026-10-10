@@ -64,6 +64,7 @@ class DeviceMsiTest {
         // template range (truncated read, honestly gated to NotFound); it
         // resolves at 0.75 scale on the host harness but the on-device ROI
         // crops keep native resolution. ondeg is a phantom gap (see class KDoc).
+        // The three databar fixtures ARE committed, so they assert in CI too.
         val expected = mapOf(
             "msi-yakult-0828147.png" to
                 Expectation(MsiChecksumPolicy.MOD_10, "0828147"),
@@ -73,6 +74,12 @@ class DeviceMsiTest {
                 Expectation(MsiChecksumPolicy.MOD_10_10, "0168971"),
             "msi-silkalm-0826593.png" to
                 Expectation(MsiChecksumPolicy.MOD_10, "0826593"),
+            "databar-omni.png" to
+                Expectation(MsiChecksumPolicy.MOD_10, "(01)01234567890128"),
+            "databar-ltd.png" to
+                Expectation(MsiChecksumPolicy.MOD_10, "(01)01234567890128"),
+            "databar-exp.png" to
+                Expectation(MsiChecksumPolicy.MOD_10, "(01)12345678901231"),
         )
         val policies = listOf(
             MsiChecksumPolicy.MOD_10,
