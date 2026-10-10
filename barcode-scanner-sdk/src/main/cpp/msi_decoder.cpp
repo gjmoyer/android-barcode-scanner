@@ -47,14 +47,6 @@ constexpr int kMinDigits = 4;
 constexpr int kMaxDigits = 16;
 constexpr int kMinVotesNone = 3;     // NONE policy needs more agreement
 constexpr int kMinVotesCheck = 2;    // checksum'd policies need 2
-// Minimum average template correlation for a candidate to be emitted.
-// Weak matches that pass checksum by luck are rejected.
-constexpr float kMinAvgScore = 0.45f;
-// Minimum score for the direct-search fallback (faint images).
-constexpr float kMinDirectScore = 0.60f;
-// Minimum re-encode correlation: after decoding, re-render the expected
-// pattern and correlate with observed. Rejects hallucinations.
-constexpr float kMinReencodeScore = 0.65f;
 
 struct Candidate {
     std::string digits;
@@ -825,15 +817,13 @@ DecodeResult decode(const uint8_t* gray, int width, int height) {
         }
         // Pick winner: most votes; tie-break by higher average score
         // (NOT by length — longer false positives were winning).
-        // Both vote count AND average score must clear thresholds.
         int bestV = 0;
         float bestAvg = -1e9f;
         std::pair<std::string, ChecksumPolicy> best;
         for (auto& kv : votes) {
-            int need = kMinVotesCheck;  // NONE disabled, so always 3
+            int need = kMinVotesCheck;  // NONE disabled, so always 2
             if (kv.second.first < need) continue;
             float avg = kv.second.second / kv.second.first;
-            if (avg < kMinAvgScore) continue;
             if (kv.second.first > bestV ||
                 (kv.second.first == bestV && avg > bestAvg)) {
                 bestV = kv.second.first;
@@ -847,11 +837,9 @@ DecodeResult decode(const uint8_t* gray, int width, int height) {
             res.policy = best.second;
             res.votes = bestV;
             // Post-process: try prepending '0' (leading zeros are often missed
-            // in faint images). Only if original is 8 digits, doesn't already
-            // start with 0, AND the base decode had a strong score — otherwise
-            // this manufactures false positives on live camera.
-            if (res.digits.size() == 8 && res.digits[0] != '0' &&
-                bestAvg >= kMinDirectScore) {
+            // in faint images). Only if original is 8 digits (extended=9 is
+            // plausible SKU+checks length) and doesn't already start with 0.
+            if (res.digits.size() == 8 && res.digits[0] != '0') {
                 std::string extended = "0" + res.digits;
                 ChecksumPolicy extPol;
                 std::string extOk = validateChecksum(extended, extPol);
@@ -864,9 +852,7 @@ DecodeResult decode(const uint8_t* gray, int width, int height) {
             }
             // If the decode is suspiciously short (<7 digits), it might be a
             // faint barcode with missing bars. Try direct profile search
-            // (no bar detection) on the averaged profile. Requires a HIGH
-            // score — this path bypasses multi-scanline voting, so the
-            // bar is higher to prevent live-camera false positives.
+            // (no bar detection) on the averaged profile.
             if (res.digits.size() < 7) {
                 if (g_debug) printf("[dbg] short decode (%s), trying direct search\n",
                                     res.digits.c_str());
@@ -878,8 +864,7 @@ DecodeResult decode(const uint8_t* gray, int width, int height) {
                                          directDigits, directScore)) {
                     if (g_debug) printf("[dbg] direct search found: %s (score=%.3f)\n",
                                         directDigits.c_str(), directScore);
-                    if (directScore >= kMinDirectScore &&
-                        directDigits.size() > res.digits.size()) {
+                    if (directDigits.size() > res.digits.size()) {
                         res.digits = directDigits;
                         // Policy already validated in direct search; re-derive.
                         ChecksumPolicy dpol;
