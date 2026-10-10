@@ -167,8 +167,14 @@ object MsiRegionCropper {
                 postRotate(-residual, img.width / 2f, img.height / 2f)
             }
             val flat = Bitmap.createBitmap(img.width, img.height, Bitmap.Config.ARGB_8888)
-            flat.eraseColor(Color.WHITE)
-            Canvas(flat).drawBitmap(img, m, Paint(Paint.FILTER_BITMAP_FLAG))
+            try {
+                flat.eraseColor(Color.WHITE)
+                Canvas(flat).drawBitmap(img, m, Paint(Paint.FILTER_BITMAP_FLAG))
+            } catch (t: Throwable) {
+                // The outer catch recycles `img`; `flat` is ours alone here.
+                runCatching { flat.recycle() }
+                throw t
+            }
             runCatching { img.recycle() }
             return CropResult(flat, applied - residual)
         } catch (t: Throwable) {

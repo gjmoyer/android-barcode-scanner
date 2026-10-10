@@ -27,7 +27,8 @@ class ContrastNormalizationTransform(
         val src = frame.bitmap
         // DownscaleTransform (stage 0) bounds the long edge to 1280, so a tall
         // portrait can still be 1280x1920 = 2.4MP — size the skip for that.
-        if (src.width * src.height > MAX_PIXELS) return frame // caller must downscale first
+        // 64-bit math: width*height as Int overflows past ~46Kpx per side.
+        if (src.width.toLong() * src.height.toLong() > MAX_PIXELS) return frame // caller must downscale first
         val gray = toGrayscaleFast(src) ?: return frame
         val (lo, hi) = percentileBounds(gray, lowPercentile, highPercentile)
         // Flat frame (hi-lo small): already uniform, return untouched — no alloc.

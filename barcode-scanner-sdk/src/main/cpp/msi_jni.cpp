@@ -1,6 +1,7 @@
 // JNI bridge for the clean-room MSI Plessey decoder.
 // Called from com.barcodescanner.sdk.data.msi.MsiNativeDecoder.
 #include <jni.h>
+#include <cstdint>
 #include <string>
 #include "msi_decoder.h"
 
@@ -13,8 +14,17 @@ Java_com_barcodescanner_sdk_data_msi_MsiNativeDecoder_nativeDecode(
     JNIEnv* env, jobject /*thiz*/,
     jbyteArray grayBytes, jint width, jint height) {
 
+    // Defensive validation in 64-bit math: width*height as jint can
+    // overflow for bogus dimensions and pass the length check, causing an
+    // OOB read in msi::decode. Null arrays (GetArrayLength(NULL) crashes
+    // the VM) are rejected too. Kotlin never sends these; this is the last
+    // line of defense at the native boundary.
+    if (grayBytes == nullptr || width <= 0 || height <= 0) {
+        return nullptr;
+    }
     jsize len = env->GetArrayLength(grayBytes);
-    if (len < width * height || width <= 0 || height <= 0) {
+    const int64_t need = static_cast<int64_t>(width) * static_cast<int64_t>(height);
+    if (static_cast<int64_t>(len) < need) {
         return nullptr;
     }
     jbyte* bytes = env->GetByteArrayElements(grayBytes, nullptr);

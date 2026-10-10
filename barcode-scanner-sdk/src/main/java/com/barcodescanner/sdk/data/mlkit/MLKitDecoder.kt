@@ -108,13 +108,18 @@ class MLKitDecoder(
                     // Rotated candidates: box coords are in pre-rotated space -> null them
                     // rather than reporting misleading overlays.
                     val rotated = frame.attemptRotation != 0
+                    // Copy the box: ML Kit reuses the Rect object and Rect is
+                    // mutable, so storing the reference would alias engine
+                    // state into an immutable result (also lets hosts mutate
+                    // our cached box through the result).
+                    val box = if (rotated) null else b.boundingBox?.let { android.graphics.Rect(it) }
                     DecodedBarcode(
                         rawValue = raw,
                         symbology = symbology,
                         // ML Kit gives no per-barcode confidence; fixed 0.95 documents
                         // the fusion coupling (minConfidence > 0.95 disables ML Kit).
                         confidence = 0.95f,
-                        boundingBox = if (rotated) null else b.boundingBox,
+                        boundingBox = box,
                         cornerPoints = if (rotated) null else b.cornerPoints?.toList(),
                         engineName = NAME,
                         isUpsideDown = frame.isUpsideDownCandidate,

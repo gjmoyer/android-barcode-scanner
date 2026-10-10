@@ -227,10 +227,12 @@ class FusedDecoder(
             }
             val ranked = pool.sortedByDescending { it.confidence }
             val best = ranked.first()
+            // NOTE: log the value length, not the value — barcodes are host PII
+            // and this fires on every decoded live frame.
             android.util.Log.d(
                 TAG,
                 "frame totalMs=${(System.nanoTime() - startNanos) / 1_000_000} " +
-                    "result=${best.engineName}:${best.rawValue}@${best.confidence} " +
+                    "result=${best.engineName}:${best.symbology}len${best.rawValue.length}@${best.confidence} " +
                     "cands=${consumed.size} pool=${ranked.size}",
             )
             return DecodeOutcome.Success(ranked)
@@ -267,7 +269,7 @@ class FusedDecoder(
                     TAG,
                     "engine=${decoder.name} rot=${candidate.relativeRotation} " +
                         "ms=${(System.nanoTime() - t) / 1_000_000} " +
-                        "hit=${best?.rawValue}~${best?.symbology}@${best?.confidence}",
+                        "hit=${best?.symbology}len${best?.rawValue?.length}@${best?.confidence}",
                 )
             }
             is DecodeOutcome.Error -> {

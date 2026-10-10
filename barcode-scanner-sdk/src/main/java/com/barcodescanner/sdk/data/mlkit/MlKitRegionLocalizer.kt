@@ -127,10 +127,12 @@ class MlKitRegionLocalizer(
                     // format outside the supported map — that is why MLKitDecoder
                     // misses the same frames). Decoded-ness never gates ROI:
                     // a misclassified MSI strip is still our best crop.
+                    // NOTE: never log rawValue here — this fires per region per
+                    // frame on the live path and values are host PII.
                     android.util.Log.d(
                         TAG,
                         "region box=$box decoded=${region.decoded} " +
-                            "format=${region.format} value=${b.rawValue}",
+                            "format=${region.format}",
                     )
                     region
                 }

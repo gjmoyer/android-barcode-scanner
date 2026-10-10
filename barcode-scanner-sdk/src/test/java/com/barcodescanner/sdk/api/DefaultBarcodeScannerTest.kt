@@ -1,7 +1,9 @@
 package com.barcodescanner.sdk.api
 
+import android.graphics.Bitmap
 import com.barcodescanner.sdk.di.ScannerContainer
 import com.barcodescanner.sdk.domain.model.DecodedBarcode
+import com.barcodescanner.sdk.domain.model.ScanFrame
 import com.barcodescanner.sdk.domain.model.ScannerConfig
 import com.barcodescanner.sdk.domain.model.Symbology
 import kotlinx.coroutines.Dispatchers
@@ -117,8 +119,7 @@ class DefaultBarcodeScannerTest {
     }
 
     @Test
-    fun stability_passesThroughOcrAndOtherSymbologies() {
-        val scanner = scanner(suppressionMillis = 0)
+    fun stability_passesThroughOcrAndOtherSymbologies() {        val scanner = scanner(suppressionMillis = 0)
         try {
             // OCR text (0.5) and non-MSI symbologies emit on first sighting.
             assertEquals(true, scanner.confirmLiveBarHit(msiOcr("0168971")))
@@ -127,6 +128,42 @@ class DefaultBarcodeScannerTest {
             assertEquals(false, scanner.confirmLiveBarHit(msiBar("X", engine = "MsiRoi")))
             assertEquals(true, scanner.confirmLiveBarHit(msiBar("X", engine = "MsiRoi")))
         } finally {
+            scanner.close()
+        }
+    }
+
+    @Test
+    fun liveFrame_afterClose_doesNotThrow() = runBlocking {
+        // Regression: an analyzer callback dispatched before stop()/close()
+        // used to throw IllegalStateException out of the shared decode scope
+        // (uncaught coroutine exception = app crash). Live frames are
+        // droppable; only one-shots throw.
+        val scanner = scanner(suppressionMillis = 0)
+        val bmp = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
+        scanner.close()
+        try {
+            scanner.handleLiveFrame(ScanFrame(bitmap = bmp))
+        } finally {
+            bmp.recycle()
+        }
+    }
+
+    @Test
+    fun liveFrame_emptyFrame_completesWithoutEmission() = runBlocking {
+        // Full live path on the JVM (ML Kit/zxing/native all miss without
+        // device libraries): must complete and emit nothing, not throw.
+        val scanner = scanner(suppressionMillis = 0)
+        val received = mutableListOf<ScanResult>()
+        val job = launch(Dispatchers.Unconfined) { scanner.results.collect { received += it } }
+        val bmp = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
+        bmp.eraseColor(android.graphics.Color.WHITE)
+        try {
+            scanner.handleLiveFrame(ScanFrame(bitmap = bmp))
+            yield()
+            assertEquals(emptyList<ScanResult>(), received)
+            job.cancel()
+        } finally {
+            bmp.recycle()
             scanner.close()
         }
     }

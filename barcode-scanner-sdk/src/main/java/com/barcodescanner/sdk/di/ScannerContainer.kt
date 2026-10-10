@@ -69,6 +69,7 @@ internal class ScannerContainer(
             stripChecksum = config.msiStripChecksum,
             minPayloadDigits = config.msiMinPayloadDigits,
             dispatcher = dispatcher,
+            checksumPolicy = config.msiChecksumPolicy,
         )
     }
 
@@ -80,7 +81,21 @@ internal class ScannerContainer(
         // (MSI is not a supported format), so the full-frame fallback stays.
         val engines = mutableListOf<BarcodeDecoder>(mlKitDecoder)
         if (Symbology.MSI_PLESSEY in config.enabledSymbologies) {
-            engines += MsiRegionAssistDecoder(MlKitRegionLocalizer(), msiDecoder)
+            // The ROI path gets its OWN native decoder instance with
+            // single-frame emit: each instance owns its MsiVoteGate, so ROI
+            // misses can never reset the full-frame path's consecutive count
+            // (and vice versa). ROI hits already carry the native ≥2-vote
+            // checksum gate plus the live stability gate, so the extra
+            // consecutive-frame layer only added latency on jittery crops.
+            // The full-frame instance below keeps requireConsecutiveFrames=2.
+            val roiMsi = MsiNativeDecoder(
+                stripChecksum = config.msiStripChecksum,
+                minPayloadDigits = config.msiMinPayloadDigits,
+                dispatcher = dispatcher,
+                checksumPolicy = config.msiChecksumPolicy,
+                requireConsecutiveFrames = 1,
+            )
+            engines += MsiRegionAssistDecoder(MlKitRegionLocalizer(), roiMsi)
         }
         engines += msiDecoder
         engines += zxingDecoder
