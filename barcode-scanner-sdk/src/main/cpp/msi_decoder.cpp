@@ -43,7 +43,10 @@ namespace {
 // ---------------------------------------------------------------- tunables
 constexpr int kMaxBars = 128;        // max bar centers per scanline
 constexpr int kMaxScanlines = 9;     // profiles tried per image
-constexpr int kMinDigits = 4;
+constexpr int kMinDigits = 7;   // shelf SKUs are 7-digit + 1-2 checks; shorter
+                              // candidates are texture false positives that pass
+                              // Mod10 by 1-in-10 chance (verified vs commercial
+                              // truth 2026-10-11: 75 short FPs, zero real <7).
 constexpr int kMaxDigits = 16;
 constexpr int kMinVotesNone = 3;     // NONE policy needs more agreement
 constexpr int kMinVotesCheck = 2;    // checksum'd policies need 2
@@ -104,9 +107,43 @@ int mod11Check(const std::string& payload) {
     return c == 10 ? -1 : c;  // 10 unrepresentable as single digit
 }
 
+// Strength of the STRONGEST checksum the string validates under (a string
+// can satisfy several policies at once — e.g. every mod1010 code trivially
+// satisfies the single mod10 leg over its full length — so the reported
+// first-match policy understates it). Double-check strength (2) beats
+// single (1): passing two independent checks by chance is ~1-in-100.
+int checksumStrength(const std::string& full) {
+    if (full.size() < 2) return 0;
+    bool single = false;
+    if ((full.back() - '0') == mod10Check(full.substr(0, full.size() - 1))) single = true;
+    int c11 = mod11Check(full.substr(0, full.size() - 1));
+    if (c11 >= 0 && (full.back() - '0') == c11) single = true;
+    if (full.size() >= 3) {
+        std::string pay = full.substr(0, full.size() - 2);
+        if ((full[full.size() - 2] - '0') == mod10Check(pay) &&
+            (full.back() - '0') == mod10Check(pay + full[full.size() - 2]))
+            return 2;
+        int c1 = mod11Check(pay);
+        if (c1 >= 0 && (full[full.size() - 2] - '0') == c1 &&
+            (full.back() - '0') == mod10Check(pay + full[full.size() - 2]))
+            return 2;
+    }
+    return single ? 1 : 0;
+}
+
 // Returns payload-without-check on success, empty on failure.
 std::string validateChecksum(const std::string& full, ChecksumPolicy& outPolicy) {
     for (char c : full) if (c < '0' || c > '9') return {};
+    // Reject uniform strings ("00000000", "8888"): blank/periodic texture
+    // decodes to repeats that pass Mod10 by chance (verified FPs on rails).
+    // A real code always differs in its check digit(s) — except the
+    // degenerate all-zero payload, which is not a shippable SKU.
+    if (full.size() >= 4) {
+        bool uniform = true;
+        for (size_t i = 1; i < full.size(); ++i)
+            if (full[i] != full[0]) { uniform = false; break; }
+        if (uniform) return {};
+    }
     const ChecksumPolicy order[] = {
         ChecksumPolicy::MOD10, ChecksumPolicy::MOD11,
         ChecksumPolicy::MOD1010, ChecksumPolicy::MOD1110
@@ -532,6 +569,35 @@ struct DigitTemplateCache {
 };
 thread_local DigitTemplateCache t_digitCache;
 
+// Guard-pattern check: MSI Start is "110" modules (dark,dark,bright)
+// immediately before the first digit; Stop is "1001" (dark,bright,
+// bright,dark) right after the last digit. Returns margin (brightMean -
+// darkMean over guard modules); unreadable zones are skipped, and a fully
+// out-of-bounds guard scores 0 so cut-guard tags degrade to previous
+// behavior instead of failing outright.
+float guardMargin(const float* p, int n, float firstStart, int nd, float module) {
+    if (module < 1.0f) return 0;
+    float dark = 0, bright = 0;
+    int ndn = 0, nbn = 0;
+    auto acc = [&](float x0, float x1, bool wantDark) {
+        int a = (int)(x0 + 0.5f), b = (int)(x1 + 0.5f);
+        if (a < 0 || b > n || b <= a) return;
+        float m = 0;
+        for (int i = a; i < b; ++i) m += p[i];
+        m /= (b - a);
+        if (wantDark) { dark += m; ++ndn; } else { bright += m; ++nbn; }
+    };
+    float s = firstStart;
+    acc(s - 3 * module, s - 1 * module, true);  // Start bars
+    acc(s - 1 * module, s, false);             // Start trailing space
+    float e = firstStart + nd * 12 * module;
+    acc(e, e + 1 * module, true);                // Stop first bar
+    acc(e + 1 * module, e + 3 * module, false);  // Stop wide space
+    acc(e + 3 * module, e + 4 * module, true);   // Stop last bar
+    if (!ndn || !nbn) return 0;
+    return bright / nbn - dark / ndn;
+}
+
 bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
                             float module, std::string& outDigits, float& outScore) {
     // Build 10 digit templates (12 modules each), blurred.
@@ -598,9 +664,31 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
     // The checksum gate identifies the correct alignment.
     // For each digit, anchor the 12-module window at the first bar's center:
     // try both narrow-bar (0.5 mod) and wide-bar (1.0 mod) offsets.
-    float bestScore = -1e9f;
-    std::string best;
+    // Start-guard prefilter: bars[sIdx] must be a WIDE bar (MSI Start is a
+    // double-width bar). Shifted hypotheses that begin inside the digit
+    // field usually start on a narrow bar — commercial truth shows the
+    // winners then drop a real leading 0 and append a phantom digit
+    // (02990356 -> 29903564). Threshold is soft (1.2 modules) to survive
+    // blur, which shrinks measured width ratios.
+    // Selection prefers the LONGEST checksum-valid candidate: a shorter valid
+    // string that is a strict prefix of a longer valid one is almost always a
+    // truncated read (commercial truth: 02739407 vs true 027394071/mod1010).
+    // Ties break by score.
+    struct Valid {
+        std::string digits;
+        float score;
+        ChecksumPolicy policy;
+        int strength;
+        int need;  // expected bar count: 1 + 4*nd + 2
+        int sIdx;  // start-bar hypothesis index
+        float guard;  // Start/Stop guard margin (larger = better fit)
+    };
+    Valid all[5 * (kMaxDigits - kMinDigits + 1)];
+    int nall = 0;
     for (int sIdx = 0; sIdx < 5 && sIdx < nb; ++sIdx) {
+        // Start-guard prefilter (see above). Skip only when clearly narrow;
+        // keep borderline cases for the checksum/score machinery.
+        if (module > 0.5f && bars[sIdx].width < 1.2f * module) continue;
         // Try all plausible nd. Filter by bar count with moderate tolerance.
         // The template score + checksum will filter bad hypotheses.
         // If g_relaxedBars, allow more missing bars (faint images).
@@ -649,15 +737,68 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
             ChecksumPolicy pol;
             if (validateChecksum(digits, pol).empty()) continue;
             float score = (totalScore / nd) + sIdx * 0.001f;
-            if (score > bestScore) {
-                bestScore = score;
-                best = digits;
+            // Strength = strongest checksum satisfied (see checksumStrength):
+            // first-match policy understates double-check codes, which
+            // validate single-check legs trivially.
+            int strength = checksumStrength(digits);
+            if (nall < (int)(sizeof(all) / sizeof(all[0]))) {
+                float firstStart = bars[sIdx + 1].center - 0.75f * module;
+                float gm = guardMargin(p, n, firstStart, nd, module);
+                all[nall++] = {digits, score, pol, strength, 1 + 4 * nd + 2, sIdx, gm};
             }
         }
     }
-    if (best.empty()) return false;
-    outDigits = best;
-    outScore = bestScore;
+    if (nall == 0) return false;
+    // Drop truncated duplicates (commercial truth 2026-10-11): shorter is
+    // a strict PREFIX of longer. Drop the shorter only when the longer
+    // BOTH verifies more checks AND fits the observed bar count at least
+    // as well — a phantom extension (truth + mod10(truth), which validates
+    // double-check legs whenever its lucky digit matches, e.g. true
+    // 08281479 /mod10 vs 082814799) otherwise outranks truth on strength
+    // alone despite exceeding the real bar count.
+    // Phantom LEADING digits (quiet zone as "0") are NOT hard-dropped:
+    // real shelf SKUs often start with 0 — bar-fit ranking below tells
+    // them apart (phantoms exceed the observed bar count).
+    bool drop[5 * (kMaxDigits - kMinDigits + 1)] = {};
+    for (int i = 0; i < nall; ++i)
+        for (int j = 0; j < nall; ++j) {
+            if (i == j || all[j].digits.size() <= all[i].digits.size()) continue;
+            const std::string& sup = all[j].digits;
+            const std::string& sub = all[i].digits;
+            bool isPref = sup.compare(0, sub.size(), sub) == 0;
+            if (!isPref) continue;
+            if (all[j].strength > all[i].strength)
+                drop[i] = true;  // true extension
+            else
+                drop[j] = true;  // phantom trailing digit(s)
+        }
+    // Rank survivors: closest bar-count fit first (a true hypothesis
+    // accounts for the observed bars; phantoms over/under-run them),
+    // then stronger checks, then correlation score. (Strength-first was
+    // tried 2026-10-11: phantoms validating double-checks by chance then
+    // outrank true single-check reads, e.g. 01157833 lost to 804556044.)
+    // NOTE: Start/Stop guard-margin ranking was tried 2026-10-11 and
+    // REVERTED — the firstStart estimate (bars[sIdx+1] - 0.75*module)
+    // systematically favored shifted hypotheses, regressing synthetic
+    // 12345674 -> phantom and 2 shelf truths. guardMargin() is kept for
+    // future use with calibrated geometry; it is computed but not ranked.
+    int bi = -1;
+    int bfit = 0;
+    for (int i = 0; i < nall; ++i) {
+        if (drop[i]) continue;
+        int fit = all[i].sIdx + all[i].need - nb;
+        if (fit < 0) fit = -fit;
+        if (bi < 0 || fit < bfit ||
+            (fit == bfit &&
+             (all[i].strength > all[bi].strength ||
+              (all[i].strength == all[bi].strength && all[i].score > all[bi].score)))) {
+            bi = i;
+            bfit = fit;
+        }
+    }
+    if (bi < 0) return false;  // all dropped (should not happen)
+    outDigits = all[bi].digits;
+    outScore = all[bi].score;
     return true;
 }
 
@@ -764,7 +905,30 @@ bool decodeByDirectSearch(const float* p, int n, std::string& outDigits, float& 
                 std::string valid = validateChecksum(digits, pol);
                 if (valid.empty()) continue;
                 float score = totalScore / nd;
-                if (score > bestScore) {
+                // Prefix/suffix-drop (same truncation/phantom rationale as
+                // above): strict extension at the END wins; strict extension
+                // at the START loses; otherwise higher score wins.
+                if (best.empty()) {
+                    bestScore = score;
+                    best = valid;
+                } else if (valid.size() > best.size() &&
+                           valid.compare(0, best.size(), best) == 0) {
+                    bestScore = score;
+                    best = valid;
+                } else if (valid.size() < best.size() &&
+                           best.compare(0, valid.size(), valid) == 0) {
+                    // keep best
+                } else if (valid.size() > best.size() &&
+                           valid.compare(valid.size() - best.size(),
+                                         best.size(), best) == 0) {
+                    // best is a strict suffix of valid (phantom leading
+                    // digits): keep best
+                } else if (valid.size() < best.size() &&
+                           best.compare(best.size() - valid.size(),
+                                        valid.size(), valid) == 0) {
+                    bestScore = score;
+                    best = valid;
+                } else if (score > bestScore) {
                     bestScore = score;
                     best = valid;
                 }
@@ -895,11 +1059,18 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
             // Post-process: try prepending '0' (leading zeros are often missed
             // in faint images). Only if original is 8 digits (extended=9 is
             // plausible SKU+checks length) and doesn't already start with 0.
-            if (res.digits.size() == 8 && res.digits[0] != '0') {
+            // Gated on LOW votes (a confident multi-scanline read must not be
+            // second-guessed) AND on double-checksum validation: the extended
+            // string must pass mod1010/mod1110, not just single mod10/11.
+            // A phantom leading 0 passes single Mod10 by 1-in-10 chance
+            // (verified: confident 81400244 became phantom 081400244);
+            // passing two independent checks by chance is ~1-in-100.
+            if (res.digits.size() == 8 && res.digits[0] != '0' && bestV <= 3) {
                 std::string extended = "0" + res.digits;
                 ChecksumPolicy extPol;
                 std::string extOk = validateChecksum(extended, extPol);
-                if (!extOk.empty()) {
+                if (!extOk.empty() && (extPol == ChecksumPolicy::MOD1010 ||
+                                       extPol == ChecksumPolicy::MOD1110)) {
                     res.digits = extOk;
                     res.policy = extPol;
                     if (g_debug) printf("[dbg] extended with leading zero: %s\n",
