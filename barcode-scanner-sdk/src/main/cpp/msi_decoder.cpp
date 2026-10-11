@@ -767,9 +767,16 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
             const std::string& sub = all[i].digits;
             bool isPref = sup.compare(0, sub.size(), sub) == 0;
             if (!isPref) continue;
-            if (all[j].strength > all[i].strength)
+            // Bar fits: does the longer hypothesis account for the observed
+            // bars at least as well? True extensions consume more real
+            // bars; phantoms (truth + lucky digit) exceed them.
+            int fitL = all[j].sIdx + all[j].need - nb;
+            if (fitL < 0) fitL = -fitL;
+            int fitS = all[i].sIdx + all[i].need - nb;
+            if (fitS < 0) fitS = -fitS;
+            if (all[j].strength > all[i].strength && fitL <= fitS)
                 drop[i] = true;  // true extension
-            else
+            else if (all[j].strength <= all[i].strength || fitL > fitS)
                 drop[j] = true;  // phantom trailing digit(s)
         }
     // Rank survivors: closest bar-count fit first (a true hypothesis
