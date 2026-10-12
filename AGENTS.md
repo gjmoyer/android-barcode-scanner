@@ -81,6 +81,10 @@ emulator image and local fixture photos.
   Start ≥0.6, strict Stop ≥0.25 and a 6-module trailing quiet zone ≥0.3.
   Each value is the best over the key's agreeing scanlines; requiring all
   three on one line lost true reads.
+- There is no floor on the bars left after a symbol: shelf tags carry print
+  or neighbouring tags to the right. Only overruns (more than 6 missed bars)
+  are pruned. Per-bar digit matches are memoized across hypotheses
+  (bit-identical); keep the memo when changing the template search.
 - Digits 0–7 begin with the Stop pattern `1001`, so a truncated read sits on
   a perfect fake Stop; only the quiet zone after it exposes the cut.
   Scanlines carry a verification tail past the ROI (`appendVerifyTail`;
@@ -100,7 +104,8 @@ Every change to `msi_decoder.cpp` needs, before commit:
    §10): score against the 9-digit truth as ok / 8-digit truncation /
    wrong / none, for both no required policy and `MOD1010`. Refactors and
    perf changes must change zero rows. Also time 1280×720 text-clutter
-   negatives (must stay 0 false positives).
+   negatives (must stay 0 false positives). Count wrong reads on unreadable
+   (scored=no) tags too: they must never misread.
 3. `assembleDebug` for the NDK build.
 
 Shelf photos, OCR output and derived crops are private data: never commit

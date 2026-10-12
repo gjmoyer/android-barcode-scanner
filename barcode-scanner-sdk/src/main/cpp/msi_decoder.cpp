@@ -929,9 +929,8 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
         // sweep 568 -> 139/1440). Noise in a genuine quiet zone fails safe:
         // NotFound, never a wrong value.
         if (sIdx > 0 && bars[sIdx].center - bars[sIdx - 1].center < 7.0f * module) continue;
-        // Try all plausible nd. Filter by bar count with moderate tolerance.
-        // The template score + checksum will filter bad hypotheses.
-        // If g_relaxedBars, allow more missing bars (faint images).
+        // Try all plausible nd. The template score, checksum, grid and guard
+        // gates filter bad hypotheses.
         for (int nd = kMinDigits; nd <= kMaxDigits; ++nd) {
             // Host length bounds (DecodeOptions::minDigits/maxDigits) drop a
             // foreign length before template matching (the dominant decode
@@ -942,9 +941,14 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
             // miss-frame cost (clutter mean 2.8 -> 1.4ms).
             if (!lengthAllowed(nd)) continue;
             int need = 1 + 4 * nd + 2;
-            int loTol = g_relaxedBars ? 12 : 6;
+            // Up to 6 missed bars. There is deliberately no floor on the bars
+            // left after the symbol. Shelf tags often carry print or a
+            // neighbouring tag right of the symbol, and the former floor (at
+            // most 6 trailing bars) never tried the true hypothesis there
+            // (shelf set, MOD1010 9 digits near/far/still 141/135/138 ->
+            // 147/139/143; full photos 64 -> 85 ok; 0 wrong). Overruns and
+            // truncations are left to the Stop/quiet-zone gate.
             if (sIdx + need > nb + 6) continue;
-            if (sIdx + need < nb - loTol) continue;
             std::string digits;
             float totalScore = 0;
             float winPos[kMaxDigits];
@@ -1176,10 +1180,12 @@ RoiVote voteScanlines(const RoiScanlines& scan) {
         // element is taken from its best agreeing scanline, not required on
         // one line: blur and clutter weaken single lines. Shelf set, MOD10 at
         // open lengths (the SDK default): a Start/Stop-only gate still let 7
-        // crop and 5 full-photo wrong reads through (mostly 8-digit prefixes
-        // cut at the aim-box or photo edge); this gate leaves 0. True reads
-        // at 9-digit bounds unchanged; open lengths lose the 2 frame-cut crops
-        // in guardFailure().
+        // crop wrong reads on readable tags and 5 full-photo wrong reads
+        // through (mostly 8-digit prefixes cut at the aim-box or photo edge);
+        // this gate leaves 0. Unreadable tags cut by the photo edge still
+        // give 6 crop false reads (open item; none under MOD1010 or 9-digit
+        // bounds). True reads at 9-digit bounds unchanged; open lengths lose
+        // the 2 frame-cut crops in guardFailure().
         if (const char* why = guardFailure(kv.second.guard, (int)kv.first.first.size())) {
             if (g_debug)
                 printf("[dbg] guard reject %s (%s; start=%.2f stop=%.2f quiet=%.2f)\n",

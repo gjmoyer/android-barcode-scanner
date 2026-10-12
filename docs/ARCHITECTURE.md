@@ -82,6 +82,8 @@ Grayscale frame (row-major bytes via JNI)
     Up to 8 ROIs, strongest edge-density first
   → per ROI: averaged profile + up to 9 individual scanline rows
     → bar centers as prominent luminance minima; module = median spacing / 3
+    → every bar a Start candidate, every digit count that fits the bars
+      (no floor on trailing bars, since tags carry print to the right)
     → digit windows correlated against blurred 12-module templates
     → digit-grid gate: window starts must lie within 1.5 modules of a line
       (uniform pitch); off-grid checksum-valid hypotheses are dropped

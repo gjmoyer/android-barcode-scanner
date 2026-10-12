@@ -262,7 +262,18 @@ outvote it. Superseded by §8.3 before ever shipping. Leave it dead.
    open-length clutter cost (mean 6.2 → 3.4 ms, max 54 → 22 ms). Start hypotheses
    must sit on a wide bar and have a ≥7-module quiet zone before them (a
    bar closer than that means the hypothesis starts inside the digit field
-   and drops leading digits). A shorter read only drops a longer one that
+   and drops leading digits). Every digit count is tried while the symbol
+   fits the bars found (up to 6 missed bars). There is no floor on the bars
+   left after the symbol: shelf tags often carry print or a neighbouring
+   tag to its right, and a former floor (at most 6 trailing bars) never
+   tried the true hypothesis there. Removing it took shelf-set MOD1010
+   9-digit reads from 141/135/138 to 147/139/143 (near/far/still) and
+   full-photo open-length reads from 64 to 85 ok, with 0 wrong. The guard
+   gate (step 6) handles overruns and truncations. Open item: ranking still
+   puts global bar fit first, so with trailing print a longer hypothesis
+   that absorbs it can outrank the true read and then fail the guard. Only
+   the ranked winner reaches voting, so the true read is lost (a recall
+   gap, not a wrong-read risk). A shorter read only drops a longer one that
    extends it when strictly stronger AND better bar-fitting — on ties the
    longer read stays (every prefix of a Mod1010 codeword is Mod10-valid).
    Each digit window anchors to its own bar, so a dropped or extra bar can
@@ -300,15 +311,19 @@ outvote it. Superseded by §8.3 before ever shipping. Leave it dead.
      edge (`appendVerifyTail`). Decoding sees only `[0, n)`; the 1D retry
      upsamples the two parts separately. If the tail is clamped before the
      quiet zone, the read is rejected unless the length bounds forbid a
-     longer symbol. With open lengths (the SDK default), a tag cut by the
-     photo or aim-box edge stays silent rather than emitting its
-     MOD10-valid prefix.
+     longer symbol. With open lengths (the SDK default), this is meant to
+     keep a tag cut by the photo or aim-box edge silent rather than
+     emitting its MOD10-valid prefix. Some cut-off tags still get through
+     (below).
 
    Shelf set, open lengths, compared with a Start/Stop-only gate: full-photo
    MOD10/NONE wrong reads 5 → 0 (the 5-bar-cap build read none of those
-   photos) and live/still crop MOD10 wrong reads 7 → 0. At
-   9-digit bounds no true read is lost. Open lengths lose 2 tight still crops
-   whose quiet zone is cut, as intended.
+   photos) and live/still crop MOD10 wrong reads on readable tags 7 → 0.
+   Unreadable (scored=no) tags still give 6 near/far MOD10 false reads at
+   open lengths (13 before): 8-digit MOD10-valid prefixes of tags whose bars
+   run off the photo edge. This is an open item; MOD1010 and 9-digit bounds
+   have none. At 9-digit bounds no true read is lost. Open lengths lose 2
+   tight still crops whose quiet zone is cut, as intended.
 7. Failure path only, two retries in order. (a) 1D: every failed ROI with
    module <4.5px (`kProfileRetryMaxModule`) re-votes its own scanlines
    upsampled 2x at quarter-sample phase; no new ROI search, same vote and
@@ -446,12 +461,27 @@ Ok / wrong per mode (near / far / still):
 | Build | MOD10 | MOD1010 | NONE |
 |---|---|---|---|
 | grid-residual gate (f02fffc) | 124/125/123, wrong 2/1/3 | 126/126/124, wrong 0/0/1 | 123/119/122, wrong 2/2/5 |
-| + uncapped Start, guard gate | **141/135/138, wrong 0** | **141/135/138, wrong 0** | 140/132/137, wrong 0/2/0 |
+| + uncapped Start, guard gate | 141/135/138, wrong 0 | 141/135/138, wrong 0 | 140/132/137, wrong 0/2/0 |
+| + no trailing-bar floor | **147/139/143, wrong 0** | **147/139/143, wrong 0** | 146/136/142, wrong 0/2/0 |
 
 The two NONE far wrong reads are checksum-less digit errors with strong
-guards, inherent to `NONE`. Full photos with open lengths: MOD10 52 → 62
-ok and MOD1010 52 → 64, both with 0 wrong. There are 0 false reads on
-3430 clutter frames, and clutter latency stays within 0.1 ms.
+guards, inherent to `NONE`. At open lengths NONE adds a third
+(`0504-3` far, a MOD11-valid blur misread on the 2x-upscaled frame). Full
+photos with open lengths: MOD10 52 → 62 → 82 ok, MOD1010 52 → 64 → 85
+and NONE 62 → 78, all with 0 wrong. Unreadable tags give 0 false reads at
+9-digit bounds; at open lengths see §8.3 step 6 (cut-off tags, MOD10/NONE).
+There are 0 false reads on 3430 clutter frames. Removing the trailing-bar
+floor raised 9-digit MOD10 clutter latency from 2.5/8.0/18.3 to
+3.9/12.7/29.6 ms (mean/p95/max).
+
+Scoring caveat: count wrong reads over every row, not just scored ones.
+Unreadable tags must never misread.
+
+Most remaining scored misses are tilt. `0540-1` (about 7° clockwise, a
+310×50 px symbol) drifts a horizontal scanline about 38 px, off the bars,
+and smears the averaged profile. Rotated 2–10° counter-clockwise, it reads.
+A rotation sweep (±3/6/9°) recovers 5 of the 6 remaining misses with 0
+wrong reads, which motivates skew-aware scanlines.
 
 Known limitation: full 12 MP stills through the SDK path read 0–4 of 110
 for every variant — `DownscaleTransform` caps the long edge at 1280 before
