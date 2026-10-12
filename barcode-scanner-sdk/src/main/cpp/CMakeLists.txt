@@ -5,6 +5,7 @@ project(msi_decoder)
 
 add_library(msi_decoder SHARED
     msi_decoder.cpp
+    msi_frame.cpp
     msi_jni.cpp
 )
 

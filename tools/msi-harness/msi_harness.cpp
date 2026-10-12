@@ -10,7 +10,9 @@
 //   3. real shelf-photo sweeps (barcode-scanner-sdk/src/test/resources/
 //      msi-shelf/*.png): each photo decoded across scales x photometric
 //      variants x repeats; mild variants are ASSERTED, harsh combos reported;
-//   4. timing bench with a pass/fail budget.
+//   4. native frame path (msi_frame): one-pass crop/stretch/rotate parity,
+//      stride + offset handling, orientation attempts, scan-top override;
+//   5. timing bench with a pass/fail budget.
 //
 // Exit code = number of asserted failures (0 = all green).
 // Usage: ./build.sh [path/to/cpp/dir]
@@ -26,6 +28,7 @@
 #include <zlib.h>
 
 #include "msi_decoder.h"
+#include "msi_frame.h"
 
 // ------------------------------------------------------------ test context
 static int g_assertFails = 0;
@@ -402,6 +405,134 @@ static void checkStable(const std::string& name, const Gray& g, const char* want
     }
 }
 
+// ------------------------------------------------------------ frame path
+static void assertTrue(const char* name, bool ok) {
+    printf("%s %s\n", ok ? "PASS" : "FAIL", name);
+    if (ok)
+        ++g_assertPass;
+    else
+        ++g_assertFails;
+}
+
+// Upright image -> camera-like plane: the sensor buffer that
+// ImageInfo.rotationDegrees=`deg` (clockwise) turns upright, padded to
+// `stride` bytes per row with 0xEE junk the crop must never read.
+static Gray toSensor(const Gray& up, int deg, int pad, int& stride) {
+    Gray s;
+    const bool swap = deg == 90 || deg == 270;
+    s.w = swap ? up.h : up.w;
+    s.h = swap ? up.w : up.h;
+    stride = s.w + pad;
+    s.px.assign((size_t)stride * s.h, 0xEE);
+    for (int y = 0; y < up.h; ++y)
+        for (int x = 0; x < up.w; ++x) {
+            int sx = x, sy = y;  // sensor pixel that lands on upright (x, y)
+            if (deg == 90) { sx = y; sy = up.w - 1 - x; }
+            else if (deg == 180) { sx = up.w - 1 - x; sy = up.h - 1 - y; }
+            else if (deg == 270) { sx = up.h - 1 - y; sy = x; }
+            s.px[(size_t)sy * stride + sx] = up.px[(size_t)y * up.w + x];
+        }
+    return s;
+}
+
+// `g` rotated `deg` clockwise (toSensor(g, d) is g rotated 360-d clockwise).
+static Gray rotateCw(const Gray& g, int deg) {
+    int stride = 0;
+    return toSensor(g, (360 - deg) % 360, 0, stride);
+}
+
+static void frameSuite() {
+    printf("--- native frame path (msi_frame) ---\n");
+    // 1. Stretch parity with the Kotlin transform (mirrored by
+    //    contrastStretch above) on an offset region of a strided plane.
+    Gray up = renderMsi("12345674", 5, 800, 400, 200, 120);
+    photometric(up, 0.35f, 20);
+    boxBlur(up, 1);
+    const int pad = 64;
+    Gray plane;
+    plane.w = up.w + 40;
+    plane.h = up.h + 30;
+    int stride = plane.w + pad;
+    plane.px.assign((size_t)stride * plane.h, 0xEE);
+    for (int y = 0; y < up.h; ++y)
+        memcpy(&plane.px[(size_t)(y + 30) * stride + 40], &up.px[(size_t)y * up.w], up.w);
+    msi::LumaView view{plane.px.data(), plane.w, plane.h, stride};
+    msi::Region reg{40, 30, 40 + up.w, 30 + up.h};
+    assertTrue("frame clampRegion keeps in-bounds region", msi::clampRegion(view, reg) &&
+               reg.left == 40 && reg.top == 30 && reg.width() == up.w && reg.height() == up.h);
+    std::vector<uint8_t> out((size_t)up.w * up.h);
+    Gray want = up;
+    contrastStretch(want);
+    assertTrue("frame prepare stretch == Kotlin transform (strided, offset)",
+               msi::prepareRegion(view, reg, 0, true, out.data()) && out == want.px);
+    assertTrue("frame prepare no-stretch == raw crop",
+               msi::prepareRegion(view, reg, 0, false, out.data()) && out == up.px);
+
+    // 2. Rotation fused into the same pass == explicit rotation.
+    for (int deg : {90, 180, 270}) {
+        Gray rot = rotateCw(want, deg);
+        std::vector<uint8_t> o((size_t)up.w * up.h);
+        char name[96];
+        snprintf(name, sizeof name, "frame prepare rotate %d == explicit rotate", deg);
+        assertTrue(name, msi::prepareRegion(view, reg, deg, true, o.data()) && o == rot.px);
+    }
+
+    // 3. Invalid input is rejected, never read out of bounds.
+    msi::Region outside{plane.w + 5, 0, plane.w + 50, 10};
+    assertTrue("frame clampRegion rejects off-plane region", !msi::clampRegion(view, outside));
+    msi::Region over{0, 0, plane.w + 10, plane.h};
+    assertTrue("frame prepare rejects unclamped region",
+               !msi::prepareRegion(view, over, 0, true, out.data()));
+    assertTrue("frame prepare rejects non-right-angle rotation",
+               !msi::prepareRegion(view, reg, 45, true, out.data()));
+
+    // 4. Camera flow: portrait sensor plane (rotationDegrees=90) -> one
+    //    prepare upright -> one forward decode, read in place.
+    Gray tag = renderMsi("12345674", 5, 800, 300, 90, 120);
+    Gray sensor = toSensor(tag, 90, pad, stride);
+    msi::LumaView sv{sensor.px.data(), sensor.w, sensor.h, stride};
+    msi::Region full{0, 0, sensor.w, sensor.h};
+    std::vector<uint8_t> upright((size_t)tag.w * tag.h);
+    bool prepared = msi::prepareRegion(sv, full, 90, true, upright.data());
+    msi::FrameOptions fo;
+    fo.maxOrientations = 1;
+    msi::FrameResult fr = msi::decodeFrame(upright.data(), tag.w, tag.h, fo);
+    assertTrue("frame camera 90 -> prepare upright -> forward decode",
+               prepared && fr.decode.ok && fr.decode.digits == "12345674" && fr.relativeRotation == 0);
+    // Same plane, rotation left to decodeFrame: identical read.
+    std::vector<uint8_t> raw((size_t)tag.w * tag.h);
+    msi::prepareRegion(sv, full, 0, true, raw.data());
+    fo.rotationDegrees = 90;
+    msi::FrameResult late = msi::decodeFrame(raw.data(), sensor.w, sensor.h, fo);
+    assertTrue("frame decodeFrame(rotationDegrees=90) == prepare-rotated read",
+               late.decode.ok && late.decode.digits == fr.decode.digits && late.relativeRotation == 0);
+
+    // 5. Orientation attempts follow 0, 180, 90, 270 and honour the cap.
+    fo.rotationDegrees = 0;
+    Gray flipped = rotateCw(tag, 180);
+    fo.maxOrientations = 1;
+    assertTrue("frame upside-down tag: 1 orientation -> none",
+               !msi::decodeFrame(flipped.px.data(), flipped.w, flipped.h, fo).decode.ok);
+    fo.maxOrientations = 2;
+    msi::FrameResult f180 = msi::decodeFrame(flipped.px.data(), flipped.w, flipped.h, fo);
+    assertTrue("frame upside-down tag: 2 orientations -> relativeRotation 180",
+               f180.decode.ok && f180.decode.digits == "12345674" && f180.relativeRotation == 180);
+    Gray side = rotateCw(tag, 90);
+    fo.maxOrientations = 4;
+    msi::FrameResult f270 = msi::decodeFrame(side.px.data(), side.w, side.h, fo);
+    assertTrue("frame sideways tag: 4 orientations -> relativeRotation 270",
+               f270.decode.ok && f270.decode.digits == "12345674" && f270.relativeRotation == 270);
+
+    // 6. Aim-box crops put the tag anywhere, including the top quarter the
+    //    full-frame band search skips (kScanTopFraction).
+    Gray high = renderMsi("12345674", 5, 800, 300, 8, 60);
+    fo.maxOrientations = 1;
+    msi::DecodeOptions legacy;
+    assertTrue("frame scanTop 0 reads a tag in the top quarter",
+               msi::decodeFrame(high.px.data(), high.w, high.h, fo).decode.ok &&
+               !msi::decode(high.px.data(), high.w, high.h, legacy).ok);
+}
+
 // ------------------------------------------------------------ suites
 static void syntheticSuite() {
     printf("--- synthetic (spec-rendered) ---\n");
@@ -761,6 +892,7 @@ int main(int argc, char** argv) {
     syntheticSuite();
     shelfFormatSuite();
     shelfSuite(shelfDir);
+    frameSuite();
     benchSuite(shelfDir);
     printf("ASSERTS pass=%d fail=%d (info-only misses=%d)\n", g_assertPass, g_assertFails,
            g_infoFails);

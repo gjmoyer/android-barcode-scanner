@@ -44,4 +44,18 @@ void setDebug(int v);
 DecodeResult decode(const uint8_t* gray, int width, int height,
                     ChecksumPolicy required = ChecksumPolicy::NONE);
 
+// Full option set for decode().
+struct DecodeOptions {
+    // See decode(gray, width, height, required).
+    ChecksumPolicy required = ChecksumPolicy::NONE;
+    // Share of the image height skipped at the top during barcode band
+    // search (clamped to 0..0.9). 0.25 suits full camera frames (overlays and
+    // competing print live up there); aim-box crops pass 0 because the box
+    // itself is the target area.
+    float scanTopFraction = 0.25f;
+};
+
+DecodeResult decode(const uint8_t* gray, int width, int height,
+                    const DecodeOptions& options);
+
 } // namespace msi

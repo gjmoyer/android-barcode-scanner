@@ -1,7 +1,8 @@
 # MSI decoder host harness
 
 Accuracy + speed tests for the clean-room C++ MSI Plessey decoder
-(`barcode-scanner-sdk/src/main/cpp/msi_decoder.cpp`), runnable on any dev
+(`barcode-scanner-sdk/src/main/cpp/msi_decoder.cpp`) and the native frame
+path that feeds it (`msi_frame.cpp`), runnable on any dev
 machine — no device, no emulator, no Android SDK.
 
 The decoder is pure C++17 (STL only), so it compiles for the host as-is.
@@ -46,7 +47,17 @@ Exit code = number of asserted failures (0 = green).
    across scales {1.0, 0.75, 0.5} × photometric variants × 3 repeats.
    Pristine + mild variants are ASSERTED; harsh scale+photometric combos are
    reported as recall signal (not gates).
-4. **Bench**: 20 timed iterations on a 1280×720 synthetic + the largest
+4. **Native frame path** (`frameSuite`, ASSERTED): `msi_frame`'s one-pass
+   crop + contrast stretch + rotate-upright is byte-identical to the Kotlin
+   `ContrastNormalizationTransform` semantics (mirrored by `contrastStretch`)
+   and to an explicit 90/180/270 rotation, on an offset region of a strided
+   (padded-row) plane; off-plane/unclamped regions and non-right-angle
+   rotations are rejected; a portrait sensor plane (`rotationDegrees=90`)
+   decodes after one prepare; `decodeFrame` tries orientations in the order
+   0, 180, 90, 270 up to its cap and reports the winning relative rotation;
+   aim-box crops (`scanTopFraction=0`) read a tag in the top quarter the
+   full-frame band search skips.
+5. **Bench**: 20 timed iterations on a 1280×720 synthetic + the largest
    photo; fails over a 500 ms mean (devices do this in single-digit ms).
 
 ## A/B behavior checks
@@ -56,7 +67,7 @@ verify: copy pristine sources to /tmp, build both, diff:
 
 ```sh
 git show HEAD:barcode-scanner-sdk/src/main/cpp/msi_decoder.cpp > /tmp/msi-base/msi_decoder.cpp
-cp barcode-scanner-sdk/src/main/cpp/msi_decoder.h /tmp/msi-base/
+cp barcode-scanner-sdk/src/main/cpp/msi_decoder.h barcode-scanner-sdk/src/main/cpp/msi_frame.* /tmp/msi-base/
 OUT=msi_harness_base ./build.sh /tmp/msi-base
 ./msi_harness_base > /tmp/base.txt; ./msi_harness > /tmp/fixed.txt
 diff <(grep -E '^(PASS|FAIL)' /tmp/base.txt) <(grep -E '^(PASS|FAIL)' /tmp/fixed.txt)

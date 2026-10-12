@@ -54,11 +54,13 @@ constexpr int kMaxDigits = 10;   // real MSI payloads + checks top out here
                                // with 11-15 digits on rails).
 constexpr int kMinVotesNone = 3;     // NONE policy needs more agreement
 constexpr int kMinVotesCheck = 2;    // checksum'd policies need 2
-// Fraction of the frame height skipped at the top during ROI band search.
-// Close-up labels filling the frame still decode (their band extends below
-// the cut); anything living entirely in the top quarter is missed by design
-// (status overlays / competing print live there on the aim UI). Change with
-// care: widening the search adds ROI candidates that compete in voting.
+// Default fraction of the frame height skipped at the top during ROI band
+// search (DecodeOptions::scanTopFraction). Full frames only: close-up labels
+// filling the frame still decode (their band extends below the cut); anything
+// living entirely in the top quarter is missed by design (status overlays /
+// competing print live there on a full-frame aim UI). Aim-box crops pass 0 —
+// the box IS the target area. Change with care: widening the search adds ROI
+// candidates that compete in voting.
 constexpr float kScanTopFraction = 0.25f;
 // Long-edge ceiling for the far-field 2x upscale retry (decodeImpl): small
 // frames only, so the 4x-pixel retry stays cheap. 1280px+ frames already
@@ -217,7 +219,8 @@ struct Rect { int x0, x1, y0, y1; };
 
 // Find candidate barcode bands: rows with dense vertical gradients.
 // Returns multiple candidates; the decoder tries each and the checksum picks.
-int findRoiCandidates(const uint8_t* g, int W, int H, Rect* rois, int cap) {
+int findRoiCandidates(const uint8_t* g, int W, int H, Rect* rois, int cap,
+                      float scanTopFraction) {
     std::vector<int> rowScore(H, 0);
     // NOTE: xstep=2 subsampling is blind to edges landing exactly between
     // samples — a pixel-crisp, axis-aligned capture (screenshot, NN-upscaled
@@ -241,7 +244,7 @@ int findRoiCandidates(const uint8_t* g, int W, int H, Rect* rois, int cap) {
         rowScore[y] = s;
     }
     int mx = 0;
-    const int yStart = static_cast<int>(H * kScanTopFraction);
+    const int yStart = static_cast<int>(H * scanTopFraction);
     for (int y = yStart; y < H; ++y) mx = std::max(mx, rowScore[y]);
     if (mx < 6) return 0;
     int thr = mx * 35 / 100;
@@ -297,7 +300,7 @@ int findRoiCandidates(const uint8_t* g, int W, int H, Rect* rois, int cap) {
 // Legacy single-ROI wrapper (kept for compatibility).
 bool findRoi(const uint8_t* g, int W, int H, Rect& roi) {
     Rect rois[8];
-    int n = findRoiCandidates(g, W, H, rois, 8);
+    int n = findRoiCandidates(g, W, H, rois, 8, kScanTopFraction);
     if (n == 0) return false;
     roi = rois[0];
     return true;
@@ -896,23 +899,32 @@ void decodeProfile(const float* p, int n,
 } // namespace
 
 // Forward: decode() wraps decodeImpl() with the upscale retry enabled.
-DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUpscale);
+DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUpscale,
+                        float scanTopFraction);
 
 DecodeResult decode(const uint8_t* gray, int width, int height, ChecksumPolicy required) {
+    DecodeOptions options;
+    options.required = required;
+    return decode(gray, width, height, options);
+}
+
+DecodeResult decode(const uint8_t* gray, int width, int height, const DecodeOptions& options) {
     // Scope the requirement to this call, restoring on every exit path.
     struct RequiredScope {
         ChecksumPolicy prev;
         ~RequiredScope() { t_required = prev; }
     } scope{t_required};
-    t_required = required;
-    return decodeImpl(gray, width, height, /*allowUpscale=*/true);
+    t_required = options.required;
+    const float top = std::min(std::max(options.scanTopFraction, 0.0f), 0.9f);
+    return decodeImpl(gray, width, height, /*allowUpscale=*/true, top);
 }
 
 // Far-field fallback, factored so the success path is untouched.
-DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUpscale) {
+DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUpscale,
+                        float scanTopFraction) {
     DecodeResult res;
     Rect rois[8];
-    int nrois = findRoiCandidates(gray, width, height, rois, 8);
+    int nrois = findRoiCandidates(gray, width, height, rois, 8, scanTopFraction);
     if (nrois == 0) {
         if (g_debug) printf("[dbg] no ROI\n");
         return res;
@@ -1058,7 +1070,7 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
                 dstRow[x] = srcRow[sx];
             }
         }
-        return decodeImpl(up.data(), W2, H2, /*allowUpscale=*/false);
+        return decodeImpl(up.data(), W2, H2, /*allowUpscale=*/false, scanTopFraction);
     }
     return res;
 }
