@@ -563,6 +563,7 @@ void classifyBarsByCorrelation(const float* p, int n, Bar* bars, int nb,
 // exactly as before. Thread-local: decode() runs on shared worker threads.
 struct DigitTemplateCache {
     uint32_t moduleBits = 0;
+    uint32_t sigmaBits = 0;
     float tmpl[10][96];
     int tmplLen = 0;
     bool valid = false;
@@ -607,15 +608,40 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
         "100110100100", "100110100110", "100110110100", "100110110110",
         "110100100100", "110100100110"
     };
+    // Multi-sigma templates: real shelf blur varies per shot/row, and a
+    // fixed 0.4*module assumption misranks digits under heavier blur
+    // (commercial truth: correct string found once at 0.916, outvoted by
+    // phantoms at 0.924). Each sigma rebuilds templates and contributes
+    // hypotheses; selection below picks across the pooled set. Template
+    // build is ~0.5% of correlation cost, so rebuilds are cheap; the
+    // (module, sigma) cache still hits across adjacent agreeing profiles.
+    static const float kSigmaMul[3] = {0.35f, 0.6f, 0.95f};
+    struct Valid {
+        std::string digits;
+        float score;
+        ChecksumPolicy policy;
+        int strength;
+        int need;  // expected bar count: 1 + 4*nd + 2
+        int sIdx;  // start-bar hypothesis index
+        float guard;  // Start/Stop guard margin (larger = better fit)
+    };
+    Valid all[3 * 5 * (kMaxDigits - kMinDigits + 1)];
+    int nall = 0;
+    for (int sgi = 0; sgi < 3; ++sgi) {
     uint32_t bits = 0;
     static_assert(sizeof(bits) == sizeof(module), "float bits");
     memcpy(&bits, &module, sizeof(bits));
+    uint32_t sbits = 0;
+    float sigmaMul = kSigmaMul[sgi];
+    static_assert(sizeof(sbits) == sizeof(sigmaMul), "float bits");
+    memcpy(&sbits, &sigmaMul, sizeof(sbits));
     float (*tmpl)[96] = t_digitCache.tmpl;
     int tmplLen = 0;
-    if (t_digitCache.valid && t_digitCache.moduleBits == bits) {
+    if (t_digitCache.valid && t_digitCache.moduleBits == bits &&
+        t_digitCache.sigmaBits == sbits) {
         tmplLen = t_digitCache.tmplLen;
     } else {
-        float sigma = 0.4f * module;
+        float sigma = sigmaMul * module;
         // Precompute templates at this module size.
         // max 12 modules * 8 px
         for (int d = 0; d < 10; ++d) {
@@ -657,6 +683,7 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
     }  // else — cache miss: rebuilt above
     // Publish the build for the next profile with an identical estimate.
     t_digitCache.moduleBits = bits;
+    t_digitCache.sigmaBits = sbits;
     t_digitCache.tmplLen = tmplLen;
     t_digitCache.valid = true;
 
@@ -674,17 +701,6 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
     // string that is a strict prefix of a longer valid one is almost always a
     // truncated read (commercial truth: 02739407 vs true 027394071/mod1010).
     // Ties break by score.
-    struct Valid {
-        std::string digits;
-        float score;
-        ChecksumPolicy policy;
-        int strength;
-        int need;  // expected bar count: 1 + 4*nd + 2
-        int sIdx;  // start-bar hypothesis index
-        float guard;  // Start/Stop guard margin (larger = better fit)
-    };
-    Valid all[5 * (kMaxDigits - kMinDigits + 1)];
-    int nall = 0;
     for (int sIdx = 0; sIdx < 5 && sIdx < nb; ++sIdx) {
         // Start-guard prefilter (see above). Skip only when clearly narrow;
         // keep borderline cases for the checksum/score machinery.
@@ -736,7 +752,11 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
             if (!ok) continue;
             ChecksumPolicy pol;
             if (validateChecksum(digits, pol).empty()) continue;
-            float score = (totalScore / nd) + sIdx * 0.001f;
+            // Sigma parsimony: heavier-blur templates match noise more
+            // easily, so they must win decisively (>0.03/0.06) to outrank
+            // the native 0.35 hypothesis. Without this, 0.95-sigma
+            // phantoms outscored true reads on sharp tags (0442, 0465).
+            float score = (totalScore / nd) + sIdx * 0.001f - 0.03f * sgi;
             // Strength = strongest checksum satisfied (see checksumStrength):
             // first-match policy understates double-check codes, which
             // validate single-check legs trivially.
@@ -747,7 +767,8 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
                 all[nall++] = {digits, score, pol, strength, 1 + 4 * nd + 2, sIdx, gm};
             }
         }
-    }
+    }  // for sIdx — end start-candidate hypotheses for this sigma
+    }  // for sgi — end sigma hypotheses; selection pools across sigmas
     if (nall == 0) return false;
     // Drop truncated duplicates (commercial truth 2026-10-11): shorter is
     // a strict PREFIX of longer. Drop the shorter only when the longer
@@ -759,7 +780,7 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
     // Phantom LEADING digits (quiet zone as "0") are NOT hard-dropped:
     // real shelf SKUs often start with 0 — bar-fit ranking below tells
     // them apart (phantoms exceed the observed bar count).
-    bool drop[5 * (kMaxDigits - kMinDigits + 1)] = {};
+    bool drop[3 * 5 * (kMaxDigits - kMinDigits + 1)] = {};
     for (int i = 0; i < nall; ++i)
         for (int j = 0; j < nall; ++j) {
             if (i == j || all[j].digits.size() <= all[i].digits.size()) continue;
