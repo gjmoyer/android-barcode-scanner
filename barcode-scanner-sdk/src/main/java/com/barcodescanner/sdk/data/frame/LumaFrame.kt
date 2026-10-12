@@ -10,7 +10,10 @@ import java.nio.ByteBuffer
  * Buffer layout is NV21 so ML Kit can wrap it without a copy:
  * `width * height` luma bytes (stride = [width], 0 = black), then
  * `width * height / 2` neutral VU bytes (128) written once at allocation
- * ([NativeFrame.allocate]) and never touched again. Hence even dimensions.
+ * ([NativeFrame.allocate]) and never touched again. Hence even dimensions,
+ * and an EXACT-size buffer: a larger (pooled) buffer would put the chroma
+ * ML Kit reads at `width * height` over stale luma instead of the neutral
+ * block written at allocation, and break ML Kit's NV21 size expectation.
  *
  * Lifetime: the producer owns [buffer]. It must not be rewritten while any
  * engine may still read it — an ML Kit task outliving a timed-out decode
@@ -35,8 +38,8 @@ internal class LumaFrame(
         require(width % 2 == 0 && height % 2 == 0) {
             "LumaFrame dimensions must be even (NV21 chroma): ${width}x$height"
         }
-        require(buffer.capacity() >= nv21Size(width, height)) {
-            "LumaFrame buffer ${buffer.capacity()} < NV21 size ${nv21Size(width, height)}"
+        require(buffer.capacity() == nv21Size(width, height)) {
+            "LumaFrame buffer ${buffer.capacity()} != NV21 size ${nv21Size(width, height)}"
         }
         require(maxOrientations in 1..4) { "maxOrientations must be 1..4, was $maxOrientations" }
         require(scanTopFraction in 0f..0.9f) { "scanTopFraction must be 0..0.9, was $scanTopFraction" }

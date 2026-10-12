@@ -52,6 +52,11 @@ class LumaFrameTest {
         assertThrows(IllegalArgumentException::class.java) {
             LumaFrame(ByteBuffer.allocateDirect(47), 8, 4) // no room for chroma
         }
+        assertThrows(IllegalArgumentException::class.java) {
+            // Oversized (e.g. a pooled buffer for a larger crop): chroma at
+            // width*height would be stale luma, not the neutral block.
+            LumaFrame(NativeFrame.allocate(8, 6), 8, 4)
+        }
         assertThrows(IllegalArgumentException::class.java) { LumaFrame(ok, 7, 4) }
         assertThrows(IllegalArgumentException::class.java) { LumaFrame(ok, 8, 4, maxOrientations = 5) }
         assertThrows(IllegalArgumentException::class.java) { LumaFrame(ok, 8, 4, scanTopFraction = 0.95f) }

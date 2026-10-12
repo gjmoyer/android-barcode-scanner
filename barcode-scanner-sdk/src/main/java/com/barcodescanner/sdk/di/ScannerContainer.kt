@@ -2,6 +2,8 @@ package com.barcodescanner.sdk.di
 
 import android.content.Context
 import com.barcodescanner.sdk.data.fusion.FusedDecoder
+import com.barcodescanner.sdk.data.fusion.LiveEngine
+import com.barcodescanner.sdk.data.fusion.LiveFusion
 import com.barcodescanner.sdk.data.mlkit.MLKitDecoder
 import com.barcodescanner.sdk.data.mlkit.MlKitRegionLocalizer
 import com.barcodescanner.sdk.data.msi.MsiNativeDecoder
@@ -114,6 +116,24 @@ internal class ScannerContainer(
 
     val fusedDecoder: FusedDecoder by lazy {
         FusedDecoder(registry, pipeline, config)
+    }
+
+    /**
+     * Live aim-box fusion: the same engine instances as [registry] (closed by
+     * [close]), each reading the one native-prepared [com.barcodescanner.sdk.data.frame.LumaFrame]
+     * in place. Cheap-first ML Kit -> MSI -> zxing; MSI runs on every frame
+     * (~ms on the small upright crop). No region assist: the aim box replaces
+     * ML Kit localization. Engines without an enabled symbology are dropped.
+     */
+    val liveFusion: LiveFusion by lazy {
+        LiveFusion(
+            listOf(
+                LiveEngine(mlKitDecoder) { mlKitDecoder.decodeLuma(it) },
+                LiveEngine(msiDecoder) { msiDecoder.decodeLuma(it) },
+                LiveEngine(zxingDecoder) { zxingDecoder.decodeLuma(it) },
+            ),
+            config,
+        )
     }
 
     fun close() = registry.closeAll()

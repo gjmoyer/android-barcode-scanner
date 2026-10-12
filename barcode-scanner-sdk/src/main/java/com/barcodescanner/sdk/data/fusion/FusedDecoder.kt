@@ -292,15 +292,6 @@ class FusedDecoder(
         }
     }
 
-    /** Dedups pool on (value, symbology), keeping max confidence. */
-    private fun mergeIntoPool(pool: MutableList<DecodedBarcode>, accepted: List<DecodedBarcode>) {
-        for (b in accepted) {
-            val idx = pool.indexOfFirst { it.rawValue == b.rawValue && it.symbology == b.symbology }
-            if (idx < 0) pool += b
-            else if (b.confidence > pool[idx].confidence) pool[idx] = b
-        }
-    }
-
     private fun wantsFrame(decoder: BarcodeDecoder, frame: ScanFrame): Boolean {
         if (decoder.supportedSymbologies.intersect(config.enabledSymbologies).isEmpty()) {
             return false
@@ -336,5 +327,14 @@ class FusedDecoder(
         const val BAR_PHASE_PERCENT = 60
 
         private const val NANOS_PER_MILLI = 1_000_000L
+
+        /** Dedups pool on (value, symbology), keeping max confidence. Shared with [LiveFusion]. */
+        internal fun mergeIntoPool(pool: MutableList<DecodedBarcode>, accepted: List<DecodedBarcode>) {
+            for (b in accepted) {
+                val idx = pool.indexOfFirst { it.rawValue == b.rawValue && it.symbology == b.symbology }
+                if (idx < 0) pool += b
+                else if (b.confidence > pool[idx].confidence) pool[idx] = b
+            }
+        }
     }
 }

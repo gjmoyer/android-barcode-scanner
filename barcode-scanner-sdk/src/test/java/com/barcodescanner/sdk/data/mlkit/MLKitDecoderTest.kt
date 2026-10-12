@@ -1,6 +1,9 @@
 package com.barcodescanner.sdk.data.mlkit
 
 import android.graphics.Bitmap
+import android.graphics.Rect
+import com.barcodescanner.sdk.data.frame.LumaFrame
+import com.barcodescanner.sdk.data.frame.NativeFrame
 import com.barcodescanner.sdk.domain.decoder.DecodeOutcome
 import com.barcodescanner.sdk.domain.model.ScanFrame
 import com.barcodescanner.sdk.domain.model.Symbology
@@ -13,6 +16,7 @@ import io.mockk.mockk
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -130,5 +134,37 @@ class MLKitDecoderTest {
         decoder.close()
         val out = decoder.decode(frame())
         assertTrue("expected Error, got ${describe(out)}", out is DecodeOutcome.Error)
+    }
+
+    @Test
+    fun decodeLuma_wrapsSharedFrame_keepsUprightGeometry() = runBlocking {
+        val barcode = mlKitBarcode()
+        every { barcode.boundingBox } returns Rect(1, 2, 30, 20)
+        val decoder = decoderWith(clientReturning(barcode), setOf(Symbology.QR_CODE))
+        val frame = LumaFrame(NativeFrame.allocate(64, 32), 64, 32)
+        var wrapped: LumaFrame? = null
+        decoder.lumaImageProvider = { wrapped = it; mockk(relaxed = true) }
+        try {
+            val out = decoder.decodeLuma(frame)
+            assertTrue("expected Success, got ${describe(out)}", out is DecodeOutcome.Success)
+            val b = (out as DecodeOutcome.Success).barcodes.single()
+            assertSame("ML Kit must wrap the prepared frame, not a copy", frame, wrapped)
+            // Upright crop coordinates: unlike rotated bitmap candidates, kept.
+            assertEquals(Rect(1, 2, 30, 20), b.boundingBox)
+            assertFalse(b.isUpsideDown)
+            assertEquals(MLKitDecoder.NAME, b.engineName)
+        } finally {
+            decoder.close()
+        }
+    }
+
+    @Test
+    fun decodeLuma_afterClose_returnsError() = runBlocking {
+        val decoder = decoderWith(clientReturning(mlKitBarcode()), setOf(Symbology.QR_CODE))
+        decoder.lumaImageProvider = { throw AssertionError("closed decoder must not wrap frames") }
+        decoder.close()
+        val out = decoder.decodeLuma(LumaFrame(NativeFrame.allocate(8, 4), 8, 4))
+        assertTrue(out is DecodeOutcome.Error)
+        assertFalse((out as DecodeOutcome.Error).recoverable)
     }
 }

@@ -1,5 +1,6 @@
 package com.barcodescanner.sdk.data.zxingcpp
 
+import com.barcodescanner.sdk.data.frame.LumaFrame
 import com.barcodescanner.sdk.domain.decoder.BarcodeDecoder
 import com.barcodescanner.sdk.domain.decoder.DecodeOutcome
 import com.barcodescanner.sdk.domain.decoder.DecoderException
@@ -64,7 +65,21 @@ class ZXingCppDecoder(
         if (Symbology.UNKNOWN in enabledSymbologies) add(Symbology.UNKNOWN)
     }
 
-    override suspend fun decode(frame: ScanFrame): DecodeOutcome = withContext(dispatcher) {
+    override suspend fun decode(frame: ScanFrame): DecodeOutcome =
+        read(frame.isUpsideDownCandidate) { it.read(frame.bitmap) }
+
+    /**
+     * Live aim-box entry: reads the shared upright [LumaFrame] buffer in place
+     * through [LumaImageProxy] (zxing-cpp's zero-copy luma path), instead of
+     * the bitmap entry that converts to ARGB first.
+     */
+    internal suspend fun decodeLuma(frame: LumaFrame): DecodeOutcome =
+        read(upsideDown = false) { it.read(LumaImageProxy(frame)) }
+
+    private suspend fun read(
+        upsideDown: Boolean,
+        readWith: (BarcodeReader) -> List<BarcodeReader.Result>,
+    ): DecodeOutcome = withContext(dispatcher) {
         if (supportedSymbologies.isEmpty()) {
             return@withContext DecodeOutcome.NotFound("no zxing symbologies enabled")
         }
@@ -81,11 +96,11 @@ class ZXingCppDecoder(
                 return@withContext DecodeOutcome.NotFound("zxing native lib unavailable")
             }
             val results = try {
-                reader.read(frame.bitmap)
+                readWith(reader)
             } catch (e: UnsatisfiedLinkError) {
                 return@withContext DecodeOutcome.NotFound("zxing native lib unavailable")
             }
-            parse(results, frame)
+            parse(results, upsideDown)
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
@@ -125,7 +140,10 @@ class ZXingCppDecoder(
     }
 
     /** Maps prebuilt wrapper results into SDK barcodes (internal for tests). */
-    internal fun parse(results: List<BarcodeReader.Result>, frame: ScanFrame): DecodeOutcome {
+    internal fun parse(results: List<BarcodeReader.Result>, frame: ScanFrame): DecodeOutcome =
+        parse(results, frame.isUpsideDownCandidate)
+
+    internal fun parse(results: List<BarcodeReader.Result>, upsideDown: Boolean): DecodeOutcome {
         if (results.isEmpty()) return DecodeOutcome.NotFound("zxing found no barcode")
         val out = mutableListOf<DecodedBarcode>()
         // Dedup native duplicates on (value, symbology), keep first.
@@ -148,7 +166,7 @@ class ZXingCppDecoder(
                 // Fixed 0.9 documents the fusion coupling (minConfidence > 0.9 disables ZXing).
                 confidence = confidence,
                 engineName = NAME,
-                isUpsideDown = frame.isUpsideDownCandidate,
+                isUpsideDown = upsideDown,
             )
         }
         return if (out.isEmpty()) DecodeOutcome.NotFound("zxing results filtered out")

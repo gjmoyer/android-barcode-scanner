@@ -1,6 +1,8 @@
 package com.barcodescanner.sdk.data.mlkit
 
 import android.graphics.Bitmap
+import androidx.annotation.VisibleForTesting
+import com.barcodescanner.sdk.data.frame.LumaFrame
 import com.barcodescanner.sdk.domain.decoder.BarcodeDecoder
 import com.barcodescanner.sdk.domain.decoder.DecodeOutcome
 import com.barcodescanner.sdk.domain.decoder.DecoderException
@@ -75,7 +77,41 @@ class MLKitDecoder(
         }
     }
 
-    override suspend fun decode(frame: ScanFrame): DecodeOutcome = withContext(Dispatchers.Default) {
+    override suspend fun decode(frame: ScanFrame): DecodeOutcome = process(
+        // Rotated candidates: box coords are in pre-rotated space -> null them
+        // rather than reporting misleading overlays.
+        keepGeometry = frame.attemptRotation == 0,
+        upsideDown = frame.isUpsideDownCandidate,
+    ) { imageProvider(frame.bitmap, frame.effectiveRotation) }
+
+    /**
+     * Live aim-box entry: wraps the shared upright [LumaFrame] buffer as NV21
+     * (rotation 0 — the native prepare pass already turned it upright), no
+     * copy and no conversion. Boxes/corners are in that upright crop's
+     * coordinates. The ML Kit task may outlive a cancelled call and keep
+     * reading the buffer; the frame owner handles that (see [LumaFrame]).
+     */
+    internal suspend fun decodeLuma(frame: LumaFrame): DecodeOutcome =
+        process(keepGeometry = true, upsideDown = false) { lumaImageProvider(frame) }
+
+    /** Seam for unit tests (see [imageProvider]); production wraps the buffer as NV21. */
+    @VisibleForTesting
+    internal var lumaImageProvider: (LumaFrame) -> InputImage = { frame ->
+        InputImage.fromByteBuffer(
+            // Own position/limit: ML Kit may move them, and the frame is shared.
+            frame.buffer.duplicate().apply { clear() },
+            frame.width,
+            frame.height,
+            0,
+            InputImage.IMAGE_FORMAT_NV21,
+        )
+    }
+
+    private suspend fun process(
+        keepGeometry: Boolean,
+        upsideDown: Boolean,
+        image: () -> InputImage,
+    ): DecodeOutcome = withContext(Dispatchers.Default) {
         if (closed.get()) {
             return@withContext DecodeOutcome.Error(DecoderException("MLKitDecoder is closed"), false)
         }
@@ -83,14 +119,14 @@ class MLKitDecoder(
             return@withContext DecodeOutcome.NotFound("no ML Kit symbologies enabled")
         }
         try {
-            val image = imageProvider(frame.bitmap, frame.effectiveRotation)
+            val input = image()
             // CancellationTokenSource rides coroutine cancellation into the ML Kit
             // Task (plain await() leaves the Task running after timeout). Cancelling
             // the token in `finally` guarantees a timed-out frame never leaks
             // inference that keeps reading the bitmap fusion is trying to recycle.
             val cts = CancellationTokenSource()
             val barcodes: List<com.google.mlkit.vision.barcode.common.Barcode> = try {
-                client().process(image).await(cts)
+                client().process(input).await(cts)
             } finally {
                 runCatching { cts.cancel() }
             }
@@ -105,14 +141,11 @@ class MLKitDecoder(
                     val raw = b.rawValue?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
                     val symbology = MlKitSymbologyMapper.fromMlKit(b.format)
                     if (symbology !in supportedSymbologies) return@mapNotNull null
-                    // Rotated candidates: box coords are in pre-rotated space -> null them
-                    // rather than reporting misleading overlays.
-                    val rotated = frame.attemptRotation != 0
                     // Copy the box: ML Kit reuses the Rect object and Rect is
                     // mutable, so storing the reference would alias engine
                     // state into an immutable result (also lets hosts mutate
                     // our cached box through the result).
-                    val box = if (rotated) null else b.boundingBox?.let { android.graphics.Rect(it) }
+                    val box = if (keepGeometry) b.boundingBox?.let { android.graphics.Rect(it) } else null
                     DecodedBarcode(
                         rawValue = raw,
                         symbology = symbology,
@@ -120,9 +153,9 @@ class MLKitDecoder(
                         // the fusion coupling (minConfidence > 0.95 disables ML Kit).
                         confidence = 0.95f,
                         boundingBox = box,
-                        cornerPoints = if (rotated) null else b.cornerPoints?.toList(),
+                        cornerPoints = if (keepGeometry) b.cornerPoints?.toList() else null,
                         engineName = NAME,
-                        isUpsideDown = frame.isUpsideDownCandidate,
+                        isUpsideDown = upsideDown,
                     )
                 }
                 if (mapped.isEmpty()) DecodeOutcome.NotFound("ML Kit results filtered out")
