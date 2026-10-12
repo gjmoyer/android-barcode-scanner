@@ -1,6 +1,7 @@
 package com.barcodescanner.sdk.camera
 
 import android.graphics.Rect
+import com.barcodescanner.sdk.data.frame.NativeFrame
 import com.barcodescanner.sdk.domain.model.ScannerConfig
 import org.junit.Assert.assertEquals
 import org.junit.Test
@@ -106,5 +107,42 @@ class CameraRoiTest {
         val cropped = Rect(100, 100, 1100, 620)
         val out = CameraScanManager.viewBoxToBuffer(cropped, 1280, 720, 0, 1000, 400, region(0.5f, 0.5f))
         assertEquals(Rect(320, 232, 960, 488), out)
+    }
+
+    @Test
+    fun evenCrop_trimsOddEdgesInsideBox() {
+        assertEquals(Rect(10, 21, 114, 79), CameraScanManager.evenCrop(Rect(10, 21, 115, 80)))
+        assertEquals(Rect(0, 0, 640, 360), CameraScanManager.evenCrop(Rect(0, 0, 640, 360)))
+    }
+
+    @Test
+    fun evenCrop_degenerate_isNull() {
+        assertEquals(null, CameraScanManager.evenCrop(Rect(0, 0, 17, 15)))
+        assertEquals(Rect(0, 0, 16, 16), CameraScanManager.evenCrop(Rect(0, 0, 17, 17)))
+    }
+
+    @Test
+    fun clampToBuffer_keepsCropInsidePlane_neverEmpty() {
+        assertEquals(Rect(0, 0, 1280, 720), CameraScanManager.clampToBuffer(Rect(-8, -8, 1300, 740), 1280, 720))
+        // A crop starting at/after the edge used to make coerceIn throw.
+        assertEquals(Rect(1279, 719, 1280, 720), CameraScanManager.clampToBuffer(Rect(1280, 720, 1290, 730), 1280, 720))
+    }
+
+    @Test
+    fun normalizeRotation_onlyQuarterTurns() {
+        assertEquals(listOf(0, 90, 180, 270, 0, 0, 0), listOf(0, 90, 180, 270, 45, -90, 360).map(CameraScanManager::normalizeRotation))
+    }
+
+    @Test
+    fun portrait1080p_wideBox_yieldsEvenUprightCrop() {
+        // 16:9 1920x1080 analysis, sensor rotated 90, 1080x2400 (20:9) preview,
+        // 0.9 x 0.2 box: the geometry the aim-box regression simulated (~800x384).
+        val buf = Rect(0, 0, 1920, 1080)
+        val box = CameraScanManager.viewBoxToBuffer(buf, 1920, 1080, 90, 1080, 2400, region(0.9f, 0.2f))
+        val crop = CameraScanManager.evenCrop(box)!!
+        assertEquals(0, crop.width() % 2)
+        assertEquals(0, crop.height() % 2)
+        assertEquals(776, NativeFrame.uprightWidth(crop.width(), crop.height(), 90))
+        assertEquals(384, NativeFrame.uprightHeight(crop.width(), crop.height(), 90))
     }
 }

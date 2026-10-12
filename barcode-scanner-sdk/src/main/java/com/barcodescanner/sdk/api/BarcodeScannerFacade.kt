@@ -33,7 +33,12 @@ interface BarcodeScannerFacade : AutoCloseable {
     /** One-shot decode of an already-wrapped frame (advanced use). Throws after [close]. */
     suspend fun scanFrame(frame: ScanFrame): ScanResult
 
-    /** Live CameraX mode; binds to [lifecycleOwner]. Throws after [close]. */
+    /**
+     * Live CameraX mode; binds to [lifecycleOwner]. Throws after [close].
+     * What-you-see-is-what-scans: the [ScannerConfig.scanRegion] box is mapped
+     * through the view's FILL_CENTER crop, so an overlay drawn with the same
+     * fractions on [previewView] marks exactly the decoded pixels.
+     */
     fun startCamera(
         lifecycleOwner: androidx.lifecycle.LifecycleOwner,
         previewView: androidx.camera.view.PreviewView,
@@ -42,8 +47,11 @@ interface BarcodeScannerFacade : AutoCloseable {
     /**
      * Headless / Compose live mode: binds preview to any [Preview.SurfaceProvider]
      * (e.g. `PreviewView.surfaceProvider`, Compose `AndroidView` provider, or a
-     * custom surface). Prefer this over the [PreviewView] overload in new code —
-     * it keeps the CameraX *view* out of the scanner API. Throws after [close].
+     * custom surface). Keeps the CameraX *view* out of the scanner API, but with
+     * no view size the [ScannerConfig.scanRegion] fractions apply to the full
+     * sensor crop, not to the (usually narrower) displayed area — an overlay
+     * would understate the decoded region. Use the [PreviewView] overload when
+     * the on-screen box must be exact. Throws after [close].
      */
     fun startCamera(
         lifecycleOwner: androidx.lifecycle.LifecycleOwner,

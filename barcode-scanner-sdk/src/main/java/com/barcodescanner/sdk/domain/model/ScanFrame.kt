@@ -18,13 +18,11 @@ import android.graphics.Bitmap
  * @param attemptRotation Extra clockwise physical rotation already applied to
  *   [bitmap] by the multi-orientation retry loop (0 for the base frame).
  * @param allowFallbackSweep True (default): run the full engine chain including
- *   the expensive fallback sweep (full-frame MSI, thorough native pass,
- *   full-frame OCR). Live camera frames set this false while results are fresh:
- *   an empty ML Kit localization then ends the frame immediately and the next
- *   frame arrives ~100ms later — a 400ms+ sweep would only starve the viewfinder
- *   of fresh aiming chances. One-shot scans keep true (single chance). When
- *   aiming persists with no success the live path re-enables the sweep, so
- *   labels ML Kit cannot isolate still resolve via the thorough backstop.
+ *   the expensive fallback sweep (full-frame MSI, thorough native pass). False
+ *   ends the frame after ML Kit isolation and the native second opinion — for
+ *   callers streaming their own frames that would rather take the next frame
+ *   than wait for a sweep. The SDK camera no longer builds ScanFrames: live
+ *   frames go through the native aim-box path instead.
  */
 data class ScanFrame(
     val bitmap: Bitmap,

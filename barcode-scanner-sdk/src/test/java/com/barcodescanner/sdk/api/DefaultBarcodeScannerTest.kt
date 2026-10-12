@@ -1,9 +1,9 @@
 package com.barcodescanner.sdk.api
 
-import android.graphics.Bitmap
+import com.barcodescanner.sdk.data.frame.LumaFrame
+import com.barcodescanner.sdk.data.frame.NativeFrame
 import com.barcodescanner.sdk.di.ScannerContainer
 import com.barcodescanner.sdk.domain.model.DecodedBarcode
-import com.barcodescanner.sdk.domain.model.ScanFrame
 import com.barcodescanner.sdk.domain.model.ScannerConfig
 import com.barcodescanner.sdk.domain.model.Symbology
 import kotlinx.coroutines.Dispatchers
@@ -11,6 +11,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -132,38 +133,37 @@ class DefaultBarcodeScannerTest {
         }
     }
 
-    @Test
-    fun liveFrame_afterClose_doesNotThrow() = runBlocking {
-        // Regression: an analyzer callback dispatched before stop()/close()
-        // used to throw IllegalStateException out of the shared decode scope
-        // (uncaught coroutine exception = app crash). Live frames are
-        // droppable; only one-shots throw.
-        val scanner = scanner(suppressionMillis = 0)
-        val bmp = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
-        scanner.close()
-        try {
-            scanner.handleLiveFrame(ScanFrame(bitmap = bmp))
-        } finally {
-            bmp.recycle()
-        }
+    /** A prepared live frame: all-white luma, neutral chroma (nothing to decode). */
+    private fun blankFrame(): LumaFrame {
+        val buffer = NativeFrame.allocate(64, 32)
+        for (i in 0 until 64 * 32) buffer.put(i, 0xFF.toByte())
+        return LumaFrame(buffer, 64, 32)
     }
 
     @Test
-    fun liveFrame_emptyFrame_completesWithoutEmission() = runBlocking {
+    fun liveFrame_afterClose_doesNotThrow_andBufferStaysReusable() = runBlocking {
+        // Regression: an analyzer callback dispatched before stop()/close()
+        // used to throw IllegalStateException out of the shared decode scope
+        // (uncaught coroutine exception = app crash). Live frames are
+        // droppable; only one-shots throw. No engine touched the buffer.
+        val scanner = scanner(suppressionMillis = 0)
+        scanner.close()
+        assertTrue(scanner.handleLiveFrame(blankFrame()))
+    }
+
+    @Test
+    fun liveFrame_blankFrame_completesWithoutEmission() = runBlocking {
         // Full live path on the JVM (ML Kit/zxing/native all miss without
         // device libraries): must complete and emit nothing, not throw.
         val scanner = scanner(suppressionMillis = 0)
         val received = mutableListOf<ScanResult>()
         val job = launch(Dispatchers.Unconfined) { scanner.results.collect { received += it } }
-        val bmp = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
-        bmp.eraseColor(android.graphics.Color.WHITE)
         try {
-            scanner.handleLiveFrame(ScanFrame(bitmap = bmp))
+            scanner.handleLiveFrame(blankFrame())
             yield()
             assertEquals(emptyList<ScanResult>(), received)
             job.cancel()
         } finally {
-            bmp.recycle()
             scanner.close()
         }
     }

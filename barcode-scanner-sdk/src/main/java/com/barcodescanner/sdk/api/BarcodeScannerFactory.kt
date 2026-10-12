@@ -6,6 +6,7 @@ import android.os.SystemClock
 import androidx.camera.view.PreviewView
 import androidx.lifecycle.LifecycleOwner
 import com.barcodescanner.sdk.camera.CameraScanManager
+import com.barcodescanner.sdk.data.frame.LumaFrame
 import com.barcodescanner.sdk.di.ScannerContainer
 import com.barcodescanner.sdk.domain.decoder.DecodeOutcome
 import com.barcodescanner.sdk.domain.model.ScanFrame
@@ -20,20 +21,21 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.filterIsInstance
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Default [BarcodeScannerFacade] implementation.
  *
  * Threading: a private [SupervisorJob] + [Dispatchers.Default] scope owns all
  * decode work. Camera frames are single-flight conflated in [CameraScanManager]
- * so a slow MSI fallback can never pile up frames.
+ * so a slow decode can never pile up frames.
+ *
+ * Two decode paths: live camera frames arrive as one natively prepared aim-box
+ * [LumaFrame] and go through [ScannerContainer.liveFusion]; one-shot
+ * [scanBitmap]/[scanFrame] go through [ScannerContainer.fusedDecoder].
  *
  * Emission contract (fixed per review):
  *  - [scanBitmap]/[scanFrame] are pure one-shots: they NEVER touch [results].
@@ -58,15 +60,6 @@ internal class DefaultBarcodeScanner(
     private var cameraManager: CameraScanManager? = null
     private val cameraLock = Any()
     private val closed = AtomicBoolean(false)
-    /**
-     * Elapsed-realtime of the last live [ScanResult.Success] (any symbology,
-     * even dedup-suppressed). Drives the fallback-sweep policy: fresh frames
-     * skip the expensive sweep and let the next frame try; only aiming that
-     * persists with no success gets thorough sweeps. Starts 0 so the first
-     * frames after launch sweep exactly like one-shot scans.
-     */
-    private val lastSuccessAt = AtomicLong(0)
-
     /** Live-path dedup: key -> last emitted elapsed-realtime. */
     private val dedup = ConcurrentHashMap<String, Long>()
     private val emitMutex = Mutex()
@@ -81,8 +74,6 @@ internal class DefaultBarcodeScanner(
     private var pendingKey: String? = null
     @Volatile
     private var pendingCount = 0
-    /** Debug dump fires once per scanner instance (see [ScannerConfig.debugOcrFrameDump]). */
-    private val ocrDumpDone = AtomicBoolean(false)
 
     override suspend fun scanBitmap(bitmap: Bitmap, rotationDegrees: Int): ScanResult =
         scanFrame(
@@ -95,16 +86,21 @@ internal class DefaultBarcodeScanner(
 
     override suspend fun scanFrame(frame: ScanFrame): ScanResult {
         check(!closed.get()) { "Scanner is closed" }
-        return when (val outcome = container.fusedDecoder.decode(frame)) {
+        return container.fusedDecoder.decode(frame)
+            .toScanResult(frame.timestampMillis, frame.isRotatedCandidate)
+    }
+
+    private fun DecodeOutcome.toScanResult(timestampMillis: Long, rotatedCandidate: Boolean): ScanResult =
+        when (val outcome = this) {
             is DecodeOutcome.Success -> {
                 val best = outcome.barcodes.maxBy { it.confidence }
                 ScanResult.Success(
                     barcode = best,
                     allCandidates = outcome.barcodes,
-                    fromRotatedFrame = best.isUpsideDown || frame.isRotatedCandidate,
+                    fromRotatedFrame = best.isUpsideDown || rotatedCandidate,
                 )
             }
-            is DecodeOutcome.NotFound -> ScanResult.NotFound(frame.timestampMillis)
+            is DecodeOutcome.NotFound -> ScanResult.NotFound(timestampMillis)
             is DecodeOutcome.Error -> ScanResult.Failure(
                 message = outcome.cause.message ?: "decode failed",
                 cause = outcome.cause,
@@ -112,16 +108,21 @@ internal class DefaultBarcodeScanner(
                 else ScanResult.ErrorKind.UNKNOWN,
             )
         }
-    }
 
     override fun startCamera(lifecycleOwner: LifecycleOwner, previewView: PreviewView) {
-        startCamera(lifecycleOwner, previewView.surfaceProvider)
+        // The view itself (not just its surface): the manager needs its size to
+        // map the on-screen box through FILL_CENTER (what-you-see-is-what-scans).
+        startCameraWith { it.start(lifecycleOwner, previewView) }
     }
 
     override fun startCamera(
         lifecycleOwner: LifecycleOwner,
         surfaceProvider: androidx.camera.core.Preview.SurfaceProvider,
     ) {
+        startCameraWith { it.start(lifecycleOwner, surfaceProvider) }
+    }
+
+    private fun startCameraWith(start: (CameraScanManager) -> Unit) {
         synchronized(cameraLock) {
             // Checked inside the lock: close() sets `closed` then grabs the same
             // lock, so a check outside would allow starting a camera after close.
@@ -131,17 +132,16 @@ internal class DefaultBarcodeScanner(
                 context = container.app,
                 config = config,
                 scope = scope,
-                onFrame = { frame ->
-                    handleLiveFrame(frame)
-                },
+                onFrame = { frame -> handleLiveFrame(frame) },
                 onError = { t ->
-                    // Async bind failure (no/in-use camera, dead lifecycle):
-                    // the host's try/catch around startCamera cannot see it
-                    // (bind runs after start returns), so surface it on the
-                    // results flow instead of failing silently.
+                    // Async bind failure (no/in-use camera, dead lifecycle) or
+                    // no native frame library on this ABI: the host's
+                    // try/catch around startCamera cannot see either (bind
+                    // runs after start returns), so surface it on the results
+                    // flow instead of failing silently.
                     _results.tryEmit(
                         ScanResult.Failure(
-                            message = "camera unavailable: ${t.message}",
+                            message = "live scanning unavailable: ${t.message}",
                             cause = t,
                             kind = ScanResult.ErrorKind.TRANSIENT,
                         ),
@@ -149,7 +149,7 @@ internal class DefaultBarcodeScanner(
                 },
             )
             cameraManager = manager
-            manager.start(lifecycleOwner, surfaceProvider)
+            start(manager)
         }
     }
 
@@ -158,38 +158,37 @@ internal class DefaultBarcodeScanner(
     }
 
     /**
-     * Live-camera frame body; internal for tests.
+     * Live-camera frame body; internal for tests. Decodes the one prepared
+     * aim-box frame through [ScannerContainer.liveFusion] — engines read
+     * [frame] in place; nothing here touches pixels. Returns true when
+     * [LumaFrame.buffer] may be rewritten (the camera pool's contract): false
+     * after a timed-out decode, whose ML Kit task may still be reading it.
      *
      * Never throws for post-close or decode-internal failures: stop()/close()
      * can win the race against an already-dispatched analyzer callback, and
-     * [scanFrame] then throws IllegalStateException — faulting the shared
-     * decode scope with it would crash the app (uncaught coroutine
-     * exception). A dropped live frame is always safe (the next frame arrives
-     * ~100ms later); one-shot [scanFrame]/[scanBitmap] still throw to the
-     * caller as documented.
+     * faulting the shared decode scope would crash the app (uncaught
+     * coroutine exception). A dropped live frame is always safe (the next
+     * frame arrives ~100ms later); one-shot [scanFrame]/[scanBitmap] still
+     * throw to the caller as documented.
      */
-    internal suspend fun handleLiveFrame(frame: ScanFrame) {
-        if (closed.get()) return
+    internal suspend fun handleLiveFrame(frame: LumaFrame): Boolean {
+        if (closed.get()) return true
+        var reusable = false
         try {
-            val now = SystemClock.elapsedRealtime()
-            val stale = now - lastSuccessAt.get() > STALE_SWEEP_AFTER_MILLIS
-            val result = scanFrame(frame.copy(allowFallbackSweep = stale))
-            if (result is ScanResult.Success) {
-                lastSuccessAt.set(now)
-                // Stability gate swallows the first sighting of an MSI
-                // bar value; the next frame decides (see method).
-                if (confirmLiveBarHit(result)) {
-                    emitLiveDeduped(result)
-                    maybeDumpOcrFrame(frame, result)
-                }
-            }
+            val live = container.liveFusion.decode(frame)
+            reusable = live.bufferReusable
+            // Upright by construction (native rotate): no rotated candidates.
+            val result = live.outcome.toScanResult(SystemClock.elapsedRealtime(), rotatedCandidate = false)
+            // Stability gate swallows the first sighting of an MSI bar value;
+            // the next frame decides (see method).
+            if (result is ScanResult.Success && confirmLiveBarHit(result)) emitLiveDeduped(result)
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
-            // Includes the expected post-close IllegalStateException when a
-            // frame dispatched before stop() runs after close().
+            // Includes post-close failures of a frame dispatched before stop().
             android.util.Log.d(TAG, "live frame dropped: ${t.javaClass.simpleName}")
         }
+        return reusable
     }
 
     private fun stopCameraLocked() {
@@ -258,54 +257,10 @@ internal class DefaultBarcodeScanner(
         _results.emit(result)
     }
 
-    /**
-     * Debug dump of the first live `MsiOcr` frame (see
-     * [ScannerConfig.debugOcrFrameDump]). Runs synchronously through bitmap
-     * copy (the camera manager recycles [frame.bitmap] after `onFrame`
-     * returns, so the copy must happen here); PNG encode happens on IO.
-     * Capped to [OCR_DUMP_MAX_FILES] files in the app-private `ocr-debug/`
-     * dir — pull with
-     * `adb pull /sdcard/Android/data/<pkg>/files/ocr-debug`.
-     */
-    private fun maybeDumpOcrFrame(frame: ScanFrame, result: ScanResult.Success) {
-        if (!config.debugOcrFrameDump) return
-        if (result.barcode.engineName != OCR_DUMP_ENGINE) return
-        if (!ocrDumpDone.compareAndSet(false, true)) return
-        val snapshot = runCatching {
-            frame.bitmap.copy(frame.bitmap.config ?: Bitmap.Config.ARGB_8888, false)
-        }.getOrNull() ?: return
-        scope.launch(Dispatchers.IO) {
-            try {
-                val dir = File(container.app.getExternalFilesDir(null), OCR_DUMP_DIR)
-                dir.mkdirs()
-                dir.listFiles()
-                    ?.sortedByDescending { it.name }
-                    ?.drop(OCR_DUMP_MAX_FILES - 1)
-                    ?.forEach { runCatching { it.delete() } }
-                val sku = result.barcode.rawValue.filter { it.isLetterOrDigit() }
-                val out = File(dir, "ocr_${System.currentTimeMillis()}_${sku}.png")
-                out.outputStream().use { snapshot.compress(Bitmap.CompressFormat.PNG, 100, it) }
-                android.util.Log.d("OcrDump", "wrote ${out.absolutePath}")
-            } catch (t: Throwable) {
-                android.util.Log.w("OcrDump", "dump failed", t)
-            } finally {
-                runCatching { snapshot.recycle() }
-            }
-        }
-    }
-
     private companion object {
         const val TAG = "BarcodeScanner"
         /** Prune the live dedup map once it holds more than this many keys. */
         const val DEDUP_PRUNE_THRESHOLD = 64
-        /**
-         * Live frames newer than this after the last success skip the fallback
-         * sweep (ML Kit isolation + native second opinion only). Older aiming
-         * re-enables thorough sweeps so un-isolatable labels still resolve.
-         * Not a config knob: it is a frame-scheduling policy, and one-shot
-         * scans always sweep (see ScanFrame.allowFallbackSweep).
-         */
-        const val STALE_SWEEP_AFTER_MILLIS = 2_000L
         /**
          * Consecutive live sightings of one MSI bar value required to emit.
          * 2 separates systematic misparses (which repeat within a frame but
@@ -314,9 +269,6 @@ internal class DefaultBarcodeScanner(
          * correctness policy, and one-shot scans bypass it.
          */
         const val BAR_STABILITY_FRAMES = 2
-        const val OCR_DUMP_ENGINE = "MsiOcr"
-        const val OCR_DUMP_DIR = "ocr-debug"
-        const val OCR_DUMP_MAX_FILES = 3
     }
 }
 

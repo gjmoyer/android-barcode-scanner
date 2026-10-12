@@ -31,12 +31,10 @@ import kotlinx.coroutines.withTimeout
  *  - the WHOLE decode — preprocessing, orientation expansion, engine attempts —
  *    runs under [ScannerConfig.decodeTimeoutMillis] (transforms check
  *    cancellation between stages);
- *  - [ScanFrame.allowFallbackSweep] gates the expensive fallback sweep: fresh
- *    live frames run ML Kit isolation (decode + ROI crops) and the native
- *    second opinion only — an empty frame costs ~200ms instead of ~400ms+ and
- *    the next camera frame arrives sooner. Full-frame MSI and full-frame OCR
- *    wait for one-shot scans and stale live frames (see DefaultBarcodeScanner),
- *    so labels ML Kit cannot isolate still resolve via the thorough backstop;
+ *  - [ScanFrame.allowFallbackSweep] gates the expensive fallback sweep: false
+ *    runs ML Kit isolation (decode + ROI crops) and the native second opinion
+ *    only (~200ms instead of ~400ms+ on an empty frame). The SDK's own scans
+ *    are one-shots and always sweep; the live camera uses [LiveFusion];
  *  - when a [LastResortDecoder] is registered, the primary bar phase stops at
  *    [BAR_PHASE_PERCENT] of that budget and the remainder is reserved for the
  *    fallback, so the extra orientations/binarizations/TryHarder cannot starve it;

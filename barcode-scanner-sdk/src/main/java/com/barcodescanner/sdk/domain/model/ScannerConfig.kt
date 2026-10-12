@@ -14,7 +14,11 @@ data class ScannerConfig(
      * Default 4: the pipeline is cheap-first (upright first, confident
      * early-exit, lazy rotations), so easy frames never pay for the rotations
      * they don't try — there is no fast/degraded mode, only this bound for
-     * fixed-geometry hosts that know their aim.
+     * fixed-geometry hosts that know their aim. Applies to one-shot scans
+     * (`scanBitmap`/`scanFrame`). Live camera aim-box frames
+     * always try MSI upright only: the user holds the box on the tag, and
+     * reversed reads of upright tags were all false MOD 10 passes in the
+     * aim-box regression (ML Kit and zxing still resolve rotation themselves).
      */
     val maxOrientationsTried: Int,
     /** Per-frame decode timeout; fusion returns best-so-far after this. */
@@ -63,18 +67,18 @@ data class ScannerConfig(
      */
     val zxingTryHarder: Boolean? = null,
     /**
-     * Debug only: write the first live frame that yields an `MsiOcr` hit as a
-     * lossless PNG into the app's external `ocr-debug/` dir (capped, app-private
-     * storage, no extra permission). Lets developers pull the exact failing
-     * pixels via `adb pull` and reproduce bar-decode misses offline. Never
-     * affects decode results. Default false.
+     * Retired, no effect: dumped the first live `MsiOcr` frame as PNG. The OCR
+     * engine is gone and live frames are native luma crops, never bitmaps.
+     * Kept for source compatibility.
      */
     val debugOcrFrameDump: Boolean = false,
     /**
      * Viewfinder region as centered upright fractions (null = everything
-     * visible). The camera decodes only this region: fewer pixels (≈2× faster
-     * image stages at 45% area), less competing print, and — most importantly —
-     * the box tells the user where to aim so the tag fills it.
+     * visible). The live camera reads only this region — one native crop,
+     * stretch and rotate per frame, then every engine reads that crop in place:
+     * fewer pixels, less competing print, and — most importantly — the box
+     * tells the user where to aim so the tag fills it. A wide, short box (e.g.
+     * 0.9 x 0.2) suits shelf-tag MSI bars.
      *
      * What-you-see-is-what-scans: the fractions are of the DISPLAYED preview
      * (the overlay draws the same fractions on the PreviewView), and analysis
@@ -180,7 +184,7 @@ data class ScannerConfig(
         fun minConfidence(v: Float) = apply { minConf = v }
         /** Decouple zxing-cpp TryHarder from the always-thorough default; null is thorough. */
         fun zxingTryHarder(v: Boolean?) = apply { zxingHarder = v }
-        /** Debug only: dump the first `MsiOcr` live frame as PNG (see field). */
+        /** Retired, no effect (see field). */
         fun debugOcrFrameDump(v: Boolean) = apply { ocrDump = v }
         /**
          * Viewfinder region as centered upright fractions (0..1). Null (default)

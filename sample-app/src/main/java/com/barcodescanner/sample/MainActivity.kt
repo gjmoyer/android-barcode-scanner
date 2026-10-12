@@ -249,18 +249,11 @@ class MainActivity : ComponentActivity() {
             // Shelf SKUs are 6+ digits; a lower floor lets blurry live frames
             // emit short false positives (e.g. "0128") with 2 correlated votes.
             .msiMinPayloadDigits(6)
-            // Printed shelf SKUs omit the check digit (it lives in the barcode),
-            // so trust the OCR read as printed (emitted at confidence 0.5).
-            .msiOcrRequireChecksum(false)
-            // OCR is the last engine; give the fallback room to run after the
-            // bar engines on a bad label (default 1.5s cut it off).
-            .decodeTimeoutMillis(4_000)
+            // Default decode timeout (1.5s): live aim-box frames finish in tens
+            // of ms; the budget only bounds a stalled frame.
             // Viewfinder ROI: decode only the aimed box (faster frames, less
             // competing print). Fractions match the ViewfinderView overlay.
             .scanRegion(VIEWFINDER_W, VIEWFINDER_H)
-            // Debug: persist the first live MsiOcr frame as PNG for offline
-            // bar-miss forensics (adb pull .../files/ocr-debug).
-            .debugOcrFrameDump(true)
             .build()
         scanner = BarcodeScannerFactory.create(this, config)
         bindResults()
@@ -437,8 +430,12 @@ class MainActivity : ComponentActivity() {
 
     private companion object {
         const val READY_TEXT = "Ready — tap Scan, aim inside the box, then point at a barcode (QR, DataBar, MSI…)"
-        /** Viewfinder fractions (upright): must match scanRegion() in recreateScanner. */
+        /**
+         * Viewfinder fractions (upright): must match scanRegion() in
+         * recreateScanner. Wide and short: a shelf tag's MSI bars fill the
+         * width, and the short box keeps competing print out of the crop.
+         */
         const val VIEWFINDER_W = 0.9f
-        const val VIEWFINDER_H = 0.5f
+        const val VIEWFINDER_H = 0.2f
     }
 }

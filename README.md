@@ -83,9 +83,11 @@ No DI framework is imposed (manual `di/` container inside the SDK).
 
 ## Viewfinder overlay (host UI)
 
-All camera work lives in the SDK (`camera/` — CameraX binding, stride-aware
-YUV→ARGB, rotation, 1280px cap, single-flight conflation). The host owns only
-the preview surface and the overlay drawing:
+All camera work lives in the SDK (`camera/` — CameraX binding, 16:9 preview and
+~1080p analysis sharing one field of view, single-flight conflation, and ONE
+native pass per accepted frame that crops the aim box out of the Y plane,
+contrast-stretches it and rotates it upright; every engine then reads that one
+buffer in place). The host owns only the preview surface and the overlay drawing:
 
 - Pass a `PreviewView` to `startCamera` (or any `Preview.SurfaceProvider` for
   Compose/headless — overlays are then the host's own drawing).
