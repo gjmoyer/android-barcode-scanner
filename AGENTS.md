@@ -55,10 +55,15 @@ emulator image and local fixture photos.
   re-validates under the policy — keep both layers.
 - `ScannerConfig.msiSymbolLengths` (codeword length, checks included,
   policy-independent; grocery shelf tags = 9) follows the same path:
-  `DecodeOptions::minDigits/maxDigits` drop foreign-length hypotheses in
-  `decodeByDigitTemplates` *before* voting, and `acceptNativeRead`
-  re-checks. Rejected hypotheses still count as MSI evidence for the
-  small-module retry trigger — dropping that cost far-field reads.
+  `DecodeOptions::minDigits/maxDigits` skip foreign lengths in
+  `decodeByDigitTemplates` *before* template matching (no vote, no cost),
+  and `acceptNativeRead` re-checks. Hypotheses that fail only the required
+  checksum (valid under another scheme) count as MSI evidence for the 2D
+  small-module retry trigger — dropping that evidence cost far-field reads.
+- Failure-path retries run in order: 1D 2x profile retry (re-votes failed
+  ROIs with module <4.5px, no new ROI search), then the 2D NN 2x frame
+  retry. 2D bilinear and per-ROI 2D upscales were measured and rejected:
+  they re-detect ROIs and bred confident phantoms.
 - With 1-digit checksums, any mechanism that multiplies validation
   lotteries (more hypotheses, derived variants, single-vote acceptance)
   must be gated by independent multi-scanline agreement.

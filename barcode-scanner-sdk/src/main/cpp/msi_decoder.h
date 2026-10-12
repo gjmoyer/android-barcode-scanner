@@ -55,10 +55,9 @@ struct DecodeOptions {
     float scanTopFraction = 0.25f;
     // Accepted symbol lengths in digits, check digits included (the whole
     // codeword in the bars, e.g. 9 for a 7-digit SKU + 2 checks). 0 leaves a
-    // side unbounded; the engine itself reads 7..10 digits. Applied before
-    // candidate ranking and scanline voting, like `required`: out-of-range
-    // reads never outvote or displace an in-range one. They still count as
-    // MSI evidence for the small-module retry.
+    // side unbounded; the engine itself reads 7..10 digits. Out-of-range
+    // lengths are skipped before template matching, so they never outvote
+    // or displace an in-range read and cost no decode time.
     int minDigits = 0;
     int maxDigits = 0;
 };

@@ -71,7 +71,7 @@ No pipeline change.
   unneeded rotations never materialize thanks to confident early-exit).
 - `zxingTryHarder(false)` opts the native sweep out of thorough mode. The MSI
   engine is always thorough: multi-ROI scanline voting, digit-template
-  correlation, and a far-field 2x retry on small frames.
+  correlation, and small-module 1D/2D 2x retries.
 
 ## MSI decode path (detail)
 
@@ -86,7 +86,9 @@ Grayscale frame (row-major bytes via JNI)
     → checksum gate: host policy pushed down (only that scheme competes);
       NONE = MOD10/MOD11/MOD1010/MOD1110 in order; + ≥2-vote agreement
   → winner = most votes, ties by average score
-  → single 2x NN upscale retry if every ROI failed on a small frame (<800px
+  → 1D 2x profile retry if every ROI failed: re-vote each failed ROI with
+    module <4.5px on its own scanlines upsampled 2x (no new ROI search)
+  → single 2x NN upscale retry if still nothing, on a small frame (<800px
     edge) or on small modules with checksum-valid evidence
   → Kotlin: re-validate reported digits strictly under `msiChecksumPolicy`,
     strip check digits, reject degenerate (single-digit) payloads

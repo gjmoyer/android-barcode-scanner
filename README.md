@@ -163,8 +163,8 @@ docs/                         # ARCHITECTURE.md, MSI_PLESSEY_RESEARCH.md
    allocates unneeded rotations.
 3. **Per-engine retries** — zxing `TryRotate`/`TryInvert`/`TryHarder`; MSI
     multi-ROI scanline voting with blurred digit-template correlation
-    (shape matching, no binarization threshold), checksum gating, and a
-    far-field 2x retry on small frames.
+    (shape matching, no binarization threshold), checksum gating, and
+    small-module 1D/2D 2x retries.
 4. **Fusion voting** — hits pool across orientations (deduped on
     value+symbology, max confidence kept); a hit at confidence ≥0.95 stops
     the scan immediately. MSI hits additionally require ≥2 agreeing

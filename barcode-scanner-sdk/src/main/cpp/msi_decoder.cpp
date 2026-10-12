@@ -66,6 +66,11 @@ constexpr float kScanTopFraction = 0.25f;
 // frames only, so the 4x-pixel retry stays cheap. 1280px+ frames already
 // carry >=2px modules when a barcode is plausibly framed.
 constexpr int kUpscaleMaxLongEdge = 800;
+// Module ceiling (px at 1x) for the 1D 2x profile retry (decodeImpl). Shelf
+// set gains plateau at 4.5 (3.5 -> 4.5: +1 near, +5 far, +1 still; 6.0 and
+// open: identical to 4.5): module estimates on failed ROIs skew high when
+// false bars join the median, so the cap sits well above the true ~2-3px.
+constexpr float kProfileRetryMaxModule = 4.5f;
 
 struct Candidate {
     std::string digits;
@@ -142,19 +147,23 @@ int checksumStrength(const std::string& full) {
 // thread (NONE = accept any supported scheme). Thread-local so concurrent
 // decodes stay independent; only decode() sets and restores it.
 thread_local ChecksumPolicy t_required = ChecksumPolicy::NONE;
-// Caller symbol-length bounds for the decode() call in progress (0 = open),
-// and a running count of checksum-valid hypotheses they rejected (compared
-// before/after a ROI pass, so it never needs resetting).
+// Caller symbol-length bounds for the decode() call in progress (0 = open).
 thread_local int t_minDigits = 0;
 thread_local int t_maxDigits = 0;
-thread_local int t_lengthRejected = 0;
+// Running count of template hypotheses that failed only the caller-required
+// checksum (valid under another supported scheme). MSI evidence for the
+// small-module retry trigger; compared before/after a ROI pass, so it never
+// needs resetting.
+thread_local int t_policyRejected = 0;
 
 bool lengthAllowed(int nd) {
     return (t_minDigits <= 0 || nd >= t_minDigits) && (t_maxDigits <= 0 || nd <= t_maxDigits);
 }
 
-// Returns payload-without-check on success, empty on failure.
-std::string validateChecksum(const std::string& full, ChecksumPolicy& outPolicy) {
+// Returns payload-without-check on success, empty on failure. `required`
+// defaults to the caller's scheme for this decode; NONE = any supported one.
+std::string validateChecksum(const std::string& full, ChecksumPolicy& outPolicy,
+                             ChecksumPolicy required = t_required) {
     for (char c : full) if (c < '0' || c > '9') return {};
     // Reject uniform strings ("00000000", "8888"): blank/periodic texture
     // decodes to repeats that pass Mod10 by chance (verified FPs on rails).
@@ -180,8 +189,8 @@ std::string validateChecksum(const std::string& full, ChecksumPolicy& outPolicy)
     // photos, MOD1010 required: 378 -> 392/755 ok, wrong 55 -> 20.
     const ChecksumPolicy* order = anyOrder;
     size_t norder = sizeof(anyOrder) / sizeof(anyOrder[0]);
-    if (t_required != ChecksumPolicy::NONE) {
-        order = &t_required;
+    if (required != ChecksumPolicy::NONE) {
+        order = &required;
         norder = 1;
     }
     for (size_t k = 0; k < norder; ++k) {
@@ -755,6 +764,14 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
         // The template score + checksum will filter bad hypotheses.
         // If g_relaxedBars, allow more missing bars (faint images).
         for (int nd = kMinDigits; nd <= kMaxDigits; ++nd) {
+            // Host length bounds (DecodeOptions::minDigits/maxDigits) drop a
+            // foreign length before template matching (the dominant decode
+            // cost), so a lucky phantom of that length can neither win nor
+            // displace the in-range read (shelf set, MOD1010 + 9 digits: two
+            // far-field 7-digit phantoms became true reads, a 10-digit one a
+            // miss). Skipping here rather than after the checksum also halves
+            // miss-frame cost (clutter mean 2.8 -> 1.4ms).
+            if (!lengthAllowed(nd)) continue;
             int need = 1 + 4 * nd + 2;
             int loTol = g_relaxedBars ? 12 : 6;
             if (sIdx + need > nb + 6) continue;
@@ -797,15 +814,16 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
             }
             if (!ok) continue;
             ChecksumPolicy pol;
-            if (validateChecksum(digits, pol).empty()) continue;
-            // Host length bounds (DecodeOptions::minDigits/maxDigits) drop
-            // the hypothesis before ranking, so a lucky phantom of a foreign
-            // length can neither win nor displace the in-range read (shelf
-            // barcode set, MOD1010 + 9 digits: two far-field 7-digit phantoms
-            // became true reads, a 10-digit one a miss; no read lost). Still
-            // counted as MSI evidence for the small-module retry trigger:
-            // without that, bounds cost 17 far-field / 2 near / 3 still reads.
-            if (!lengthAllowed(nd)) { ++t_lengthRejected; continue; }
+            if (validateChecksum(digits, pol).empty()) {
+                // Valid under another scheme = still MSI-shaped evidence for
+                // the small-module retry trigger in decodeImpl (shelf set,
+                // MOD1010 + 9 digits: far-field 114 -> 121 ok with the profile
+                // retry). Counting is all it does; the hypothesis stays dropped.
+                if (t_required != ChecksumPolicy::NONE &&
+                    !validateChecksum(digits, pol, ChecksumPolicy::NONE).empty())
+                    ++t_policyRejected;
+                continue;
+            }
             // Sigma parsimony: heavier-blur templates match noise more
             // easily, so they must win decisively (>0.03/0.06) to outrank
             // the native 0.35 hypothesis. Without this, 0.95-sigma
@@ -914,6 +932,88 @@ void decodeProfile(const float* p, int n,
 
 }
 
+// Outcome of one ROI's scanline vote.
+struct RoiVote {
+    int votes = 0;              // winner's agreeing scanlines; 0 = no winner
+    float avgScore = -1e9f;
+    std::pair<std::string, ChecksumPolicy> best;
+    bool anyCandidate = false;  // any scanline produced a checksum-valid read
+    float minModule = 0;        // smallest plausible module seen (px)
+};
+
+// Decodes every scanline profile of one ROI and votes on (digits, policy).
+RoiVote voteScanlines(const std::vector<std::vector<float>>& profiles) {
+    struct Votes { int n = 0; float score = 0; float mod = 0; };
+    std::map<std::pair<std::string, ChecksumPolicy>, Votes> votes;
+    RoiVote out;
+    for (const auto& pr : profiles) {
+        std::vector<Candidate> cands;
+        float profModule = 0;
+        decodeProfile(pr.data(), (int)pr.size(), cands, &profModule);
+        if (profModule > 0.5f &&
+            (out.minModule <= 0 || profModule < out.minModule))
+            out.minModule = profModule;
+        // De-dup within this profile: keep highest score per (digits,policy).
+        std::sort(cands.begin(), cands.end(),
+                  [](const Candidate& a, const Candidate& b) {
+                      if (a.digits != b.digits) return a.digits < b.digits;
+                      return (int)a.policy < (int)b.policy;
+                  });
+        for (size_t i = 0; i < cands.size(); ) {
+            size_t j = i + 1;
+            float bestScore = cands[i].score;
+            float bestMod = cands[i].module;
+            while (j < cands.size() && cands[j].digits == cands[i].digits &&
+                   cands[j].policy == cands[i].policy) {
+                if (cands[j].score > bestScore) {
+                    bestScore = cands[j].score;
+                    bestMod = cands[j].module;
+                }
+                ++j;
+            }
+            auto key = std::make_pair(cands[i].digits, cands[i].policy);
+            votes[key].n++;
+            votes[key].score += bestScore;
+            votes[key].mod += bestMod;
+            i = j;
+        }
+    }
+    // Pick winner: most votes; tie-break by higher average score
+    // (NOT by length — longer false positives were winning).
+    // Small-module reads (<2.5px) need 6 agreeing scanlines instead of
+    // 2: at ~2px/module quantization noise dominates and confident
+    // wrong values outvote truth 4-to-1 (verified 0115783-hand).
+    for (auto& kv : votes) {
+        float avgMod = kv.second.mod / kv.second.n;
+        int need = (avgMod < 2.5f) ? 6 : kMinVotesCheck;
+        if (kv.second.n < need) continue;
+        float avg = kv.second.score / kv.second.n;
+        if (kv.second.n > out.votes ||
+            (kv.second.n == out.votes && avg > out.avgScore)) {
+            out.votes = kv.second.n;
+            out.avgScore = avg;
+            out.best = kv.first;
+        }
+    }
+    out.anyCandidate = !votes.empty();
+    return out;
+}
+
+// 2x linear upsample of a scanline profile at quarter-sample phase
+// (outputs at i-0.25 and i+0.25). No output duplicates an input, so every
+// output pair straddles a true source edge — the 1D analogue of the +1px
+// shift that keeps the 2D NN retry from phase-locking.
+void upsampleProfile2x(std::vector<float>& pr) {
+    const int n = (int)pr.size();
+    std::vector<float> up((size_t)n * 2);
+    for (int i = 0; i < n; ++i) {
+        const float l = pr[i > 0 ? i - 1 : 0], c = pr[i], r = pr[i + 1 < n ? i + 1 : n - 1];
+        up[2 * i] = 0.75f * c + 0.25f * l;
+        up[2 * i + 1] = 0.75f * c + 0.25f * r;
+    }
+    pr.swap(up);
+}
+
 } // namespace
 
 // Forward: decode() wraps decodeImpl() with the upscale retry enabled.
@@ -960,6 +1060,8 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
     // (avoids text false positives outvoting the true barcode).
     float minModuleSeen = 0;  // for the small-module upscale trigger below
     bool sawCandidate = false;  // any checksum-valid scanline read, any ROI
+    // Scanlines of failed small-module ROIs, moved here for the 1D retry.
+    std::vector<std::vector<std::vector<float>>> retryProfiles;
     for (int ri = 0; ri < nrois; ++ri) {
         const Rect& roi = rois[ri];
         if (g_debug) printf("[dbg] trying ROI %d x=[%d,%d] y=[%d,%d]\n",
@@ -980,80 +1082,49 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
             profiles.push_back(std::move(pr));
         }
 
-        // Vote within this ROI's scanlines.
-        // Key: (digits, policy). Value: (vote count, score sum, module sum).
-        struct Votes { int n = 0; float score = 0; float mod = 0; };
-        std::map<std::pair<std::string, ChecksumPolicy>, Votes> votes;
-        const int lengthRejectedBefore = t_lengthRejected;
-        float roiMinModule = 0;  // smallest plausible module seen in this ROI
-        for (auto& pr : profiles) {
-            std::vector<Candidate> cands;
-            float profModule = 0;
-            decodeProfile(pr.data(), (int)pr.size(), cands, &profModule);
-            if (profModule > 0.5f &&
-                (roiMinModule <= 0 || profModule < roiMinModule))
-                roiMinModule = profModule;
-            // De-dup within this profile: keep highest score per (digits,policy).
-            std::sort(cands.begin(), cands.end(),
-                      [](const Candidate& a, const Candidate& b) {
-                          if (a.digits != b.digits) return a.digits < b.digits;
-                          return (int)a.policy < (int)b.policy;
-                      });
-            for (size_t i = 0; i < cands.size(); ) {
-                size_t j = i + 1;
-                float bestScore = cands[i].score;
-                float bestMod = cands[i].module;
-                while (j < cands.size() && cands[j].digits == cands[i].digits &&
-                       cands[j].policy == cands[i].policy) {
-                    if (cands[j].score > bestScore) {
-                        bestScore = cands[j].score;
-                        bestMod = cands[j].module;
-                    }
-                    ++j;
-                }
-                auto key = std::make_pair(cands[i].digits, cands[i].policy);
-                votes[key].n++;
-                votes[key].score += bestScore;
-                votes[key].mod += bestMod;
-                i = j;
-            }
-        }
-        // Pick winner: most votes; tie-break by higher average score
-        // (NOT by length — longer false positives were winning).
-        // Small-module reads (<2.5px) need 6 agreeing scanlines instead of
-        // 2: at ~2px/module quantization noise dominates and confident
-        // wrong values outvote truth 4-to-1 (verified 0115783-hand).
-        int bestV = 0;
-        float bestAvg = -1e9f;
-        std::pair<std::string, ChecksumPolicy> best;
-        for (auto& kv : votes) {
-            float avgMod = kv.second.mod / kv.second.n;
-            int need = (avgMod < 2.5f) ? 6 : kMinVotesCheck;
-            if (kv.second.n < need) continue;
-            float avg = kv.second.score / kv.second.n;
-            if (kv.second.n > bestV ||
-                (kv.second.n == bestV && avg > bestAvg)) {
-                bestV = kv.second.n;
-                bestAvg = avg;
-                best = kv.first;
-            }
-        }
-        if (!votes.empty() || t_lengthRejected != lengthRejectedBefore) sawCandidate = true;
-        if (roiMinModule > 0.5f &&
-            (minModuleSeen <= 0 || roiMinModule < minModuleSeen))
-            minModuleSeen = roiMinModule;
-        if (bestV > 0) {
+        const int policyRejectedBefore = t_policyRejected;
+        const RoiVote v = voteScanlines(profiles);
+        if (v.anyCandidate || t_policyRejected != policyRejectedBefore) sawCandidate = true;
+        if (v.minModule > 0.5f &&
+            (minModuleSeen <= 0 || v.minModule < minModuleSeen))
+            minModuleSeen = v.minModule;
+        if (v.votes > 0) {
             res.ok = true;
-            res.digits = best.first;
-            res.policy = best.second;
-            res.votes = bestV;
+            res.digits = v.best.first;
+            res.policy = v.best.second;
+            res.votes = v.votes;
             if (g_debug) printf("[dbg] ROI %d succeeded: %s (avg score %.3f)\n",
-                                ri, res.digits.c_str(), bestAvg);
+                                ri, res.digits.c_str(), v.avgScore);
             return res;
         }
+        if (v.minModule > 0.5f && v.minModule < kProfileRetryMaxModule)
+            retryProfiles.push_back(std::move(profiles));
         if (g_debug) printf("[dbg] ROI %d: no decode\n", ri);
     }
-    // Every ROI failed. Far-field retry: modules below ~2px (distant shelf
+    // Every ROI failed. Small-module retry, 1D: re-vote each small-module
+    // ROI's own scanlines upsampled 2x (upsampleProfile2x). Below ~2.5px the
+    // bar detector and templates lose edges to quantization; doubling the
+    // samples restores them without touching ROI detection. A 2D upscale
+    // (below) re-detects ROIs on the new frame and, bilinear, bred confident
+    // phantoms (shelf set: 0516-4, 0440-3); this pass reuses the 1x ROIs and
+    // their row averaging, so it adds no new search area. Runs before the 2D
+    // retry, in ROI order, first winner returns; the vote gate is unchanged.
+    // Shelf set, MOD1010 + 9 digits (with the length skip and policy
+    // evidence above): near 118 -> 124, far 88 -> 126, still 116 -> 123 of
+    // 141, zero new wrong reads; barcode-free clutter mean 1.5 -> 2.5ms.
+    for (auto& profiles : retryProfiles) {
+        for (auto& pr : profiles) upsampleProfile2x(pr);
+        const RoiVote v = voteScanlines(profiles);
+        if (v.votes > 0) {
+            res.ok = true;
+            res.digits = v.best.first;
+            res.policy = v.best.second;
+            res.votes = v.votes;
+            if (g_debug) printf("[dbg] 1D 2x retry succeeded: %s\n", res.digits.c_str());
+            return res;
+        }
+    }
+    // Still nothing. 2D far-field retry: modules below ~2px (distant shelf
     // tags at native resolution) fall under the bar detector's working range
     // while the information is still there — one NN 2x upscale brings them
     // back. Runs ONLY on the failure path, so passing inputs never pay for
@@ -1067,7 +1138,9 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
     // join the median, so a true ~2.5px barcode can report 3.0 (verified
     // 0299692: six rows at exactly 3.00, zero consensus, no retry fired).
     // Also requires MSI evidence: at least one scanline produced a
-    // checksum-valid read that then failed the vote gate. Text and texture
+    // checksum-valid read that then failed the vote gate, or a hypothesis
+    // that failed only the caller-required scheme (t_policyRejected). Text
+    // and texture
     // clutter also yields small module estimates, so without this every
     // 1280x720 miss frame paid a 4x-pixel retry (3.1ms vs 0.4ms) for no
     // reads; real-photo regression keeps every rescued read (755 crops, 0

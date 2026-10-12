@@ -267,11 +267,17 @@ outvote it. Superseded by §8.3 before ever shipping. Leave it dead.
    otherwise MOD10 → MOD11 → MOD1010 → MOD1110, first hit wins.
    ≥`kMinVotesCheck`=2 agreeing scanline profiles required, 6 when the
    module is below 2.5px (NONE is disabled: too many false positives).
-6. Failure path only: one NN 2x upscale retry, single depth, +1px source
+6. Failure path only, two retries in order. (a) 1D: every failed ROI with
+   module <4.5px (`kProfileRetryMaxModule`) re-votes its own scanlines
+   upsampled 2x at quarter-sample phase; no new ROI search, same vote gate.
+   (b) 2D: one NN 2x upscale retry, single depth, +1px source
    shift so the xstep=2 sampler sees true boundaries. Fires on small frames
    (`kUpscaleMaxLongEdge`=800) or on small observed modules (<3.5px, long
-   edge <1600) when at least one scanline produced a checksum-valid read —
+   edge <1600) when at least one scanline produced a checksum-valid read or
+   a hypothesis failed only the required scheme —
    without that evidence, text clutter triggered it on every miss frame.
+   Bilinear and per-ROI 2D upscales were measured and rejected: re-detecting
+   ROIs on the upscaled frame bred confident phantoms (shelf set, MOD1010).
 7. Kotlin (`MsiNativeDecoder`): re-validate strictly under
    `msiChecksumPolicy`, strip check digits, reject degenerate
    single-repeated-digit payloads (blank areas decode as validating zeros).
