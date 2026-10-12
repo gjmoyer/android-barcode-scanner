@@ -87,7 +87,10 @@ Scandit checksum enum (Mod10/1010/11/1110 naming), tc-lib-barcode (family contex
 - The native engine reads horizontal scanlines per candidate; a 180°-relative
   candidate is flagged via `DecodedBarcode.isUpsideDown` (same convention as
   ML Kit/zxing-cpp), which feeds `ScanResult.fromRotatedFrame`.
-- Arbitrary tilt (15°, 30°, …) smears diagonal runs past scanlines: the ROI
+- Small tilt (up to ±15°) is handled natively by the skew retry (§8.3 step
+  7b): scanlines along the measured bar angle. Before it, horizontal
+  scanlines tolerated about ±5–7°.
+- Larger tilt (15°, 30°, …) smears diagonal runs past scanlines: the ROI
   path (`MlKitRegionLocalizer` isolation → padded crop → affine deskew in
   `MsiRegionCropper`, no OpenCV) rectifies the strip before the shared native
   decoder. Full-frame MSI runs first (intact quiet zones win ties); ROI is
@@ -324,12 +327,36 @@ outvote it. Superseded by §8.3 before ever shipping. Leave it dead.
    run off the photo edge. This is an open item; MOD1010 and 9-digit bounds
    have none. At 9-digit bounds no true read is lost. Open lengths lose 2
    tight still crops whose quiet zone is cut, as intended.
-7. Failure path only, two retries in order. (a) 1D: every failed ROI with
+7. Failure path only, three retries in order. (a) 1D: every failed ROI with
    module <4.5px (`kProfileRetryMaxModule`) re-votes its own scanlines
    upsampled 2x at quarter-sample phase; no new ROI search, same vote and
    guard gates. Top level only: inside the 2D recursion it compounds to 4x
    interpolation and bred a phantom on an unreadable tag.
-   (b) 2D: one NN 2x upscale retry, single depth, +1px source
+   (b) Skew, top level only. A tilted symbol defeats horizontal scanlines:
+   `0540-1` (about 7°, 310×50 px) drifts a row 38 px, off the bar field, and
+   row averaging smears the bars. `estimateSkew` shifts each row of the ROI
+   band along a trial slope and maximises the edge energy of the band
+   average, over ±15° in 1° steps then ±0.5°. Gain = best energy / energy at
+   0°. ROIs below 1.5° or gain 1.5 skip; tilted shelf tags gain 1.65–21
+   (median 6.6), while 92% of clutter ROIs fall below 1.5, so 84% of clutter
+   miss frames skip the skew scanlines. Only the first gated
+   ROI is scanned (`kSkewMaxRois`): every shelf skew read came from it,
+   while slanted clutter gated 2–5 ROIs and scanning them all raised the
+   worst clutter frames from 18–25 to 30–36 ms. Scanlines then follow the
+   symbol axis: a sub-pixel deskewed band average plus up to 9 lines with
+   linear interpolation, each with its verification tail along the same
+   line. They run over the deskewed extent first, then the original ROI
+   extent. The horizontal extent cuts a tilted symbol's outer digits:
+   rotated crops gave 8-digit MOD10-valid prefixes that passed every guard.
+   The deskewed extent alone takes in trailing print on full photo
+   `IMG_0540`, where it yields no checksum-valid read (fit-ranking gap,
+   step 4). Small modules get the 1D 2x upsample.
+   Measured and rejected:
+   - a structure-tensor angle estimate: biased about 3° on 0540-1;
+   - an evidence gate on the retry, the fallback extent or the upsample: each
+     lost reads;
+   - running it inside the 2D recursion: cost.
+   (c) 2D: one NN 2x upscale retry, single depth, +1px source
    shift so the xstep=2 sampler sees true boundaries. Fires on small frames
    (`kUpscaleMaxLongEdge`=800) or on small observed modules (<3.5px, long
    edge <1600) when at least one scanline produced a checksum-valid read or
@@ -462,26 +489,45 @@ Ok / wrong per mode (near / far / still):
 |---|---|---|---|
 | grid-residual gate (f02fffc) | 124/125/123, wrong 2/1/3 | 126/126/124, wrong 0/0/1 | 123/119/122, wrong 2/2/5 |
 | + uncapped Start, guard gate | 141/135/138, wrong 0 | 141/135/138, wrong 0 | 140/132/137, wrong 0/2/0 |
-| + no trailing-bar floor | **147/139/143, wrong 0** | **147/139/143, wrong 0** | 146/136/142, wrong 0/2/0 |
+| + no trailing-bar floor | 147/139/143, wrong 0 | 147/139/143, wrong 0 | 146/136/142, wrong 0/2/0 |
+| + skew retry | **148/140/144, wrong 0** | **148/140/144, wrong 0** | 147/137/143, wrong 0/2/0 |
 
 The two NONE far wrong reads are checksum-less digit errors with strong
 guards, inherent to `NONE`. At open lengths NONE adds a third
 (`0504-3` far, a MOD11-valid blur misread on the 2x-upscaled frame). Full
-photos with open lengths: MOD10 52 → 62 → 82 ok, MOD1010 52 → 64 → 85
-and NONE 62 → 78, all with 0 wrong. Unreadable tags give 0 false reads at
+photos with open lengths: MOD10 52 → 62 → 82 → 83 ok, MOD1010
+52 → 64 → 85 → 86 and NONE 62 → 78 → 79, all with 0 wrong. Unreadable tags give 0 false reads at
 9-digit bounds; at open lengths see §8.3 step 6 (cut-off tags, MOD10/NONE).
 There are 0 false reads on 3430 clutter frames. Removing the trailing-bar
 floor raised 9-digit MOD10 clutter latency from 2.5/8.0/18.3 to
-3.9/12.7/29.6 ms (mean/p95/max).
+3.9/12.7/29.6 ms (mean/p95/max); the skew retry moves it to
+4.1/13.4/28.5 ms.
 
 Scoring caveat: count wrong reads over every row, not just scored ones.
 Unreadable tags must never misread.
 
-Most remaining scored misses are tilt. `0540-1` (about 7° clockwise, a
-310×50 px symbol) drifts a horizontal scanline about 38 px, off the bars,
-and smears the averaged profile. Rotated 2–10° counter-clockwise, it reads.
-A rotation sweep (±3/6/9°) recovers 5 of the 6 remaining misses with 0
-wrong reads, which motivates skew-aware scanlines.
+Tilt. `0540-1` (about 7° clockwise, a 310×50 px symbol) drifts a
+horizontal scanline about 38 px, off the bars, and smears the averaged
+profile; a commercial scanner reads it. The skew retry (§8.3 step 7b) reads
+it in every mode. Tilt tolerance is measured on the 141 scored crops rotated
+in software (median-colour fill), MOD1010, 9-digit bounds:
+
+| Rotation | −10° | −6° | +6° | +10° |
+|---|---|---|---|---|
+| no floor (2f5406b) | 4 | 81 | 62 | 4 |
+| + skew retry | 122 | 123 | 125 | 118 |
+
+Both rows have 0 wrong reads. At open lengths the rotated MOD10 wrong reads
+go from 6 to 5 over the four angles (mostly prefix truncations near the
+crop edge; NONE is similar). The host harness asserts the synthetic shelf
+format at ±3–12° with and without text clutter (`tiltSuite`; 2f5406b missed
+12 of those 48), plus tilted text strokes that must stay silent.
+
+Scored misses left at 9-digit bounds: `0446-6` and `0481-2` (tilted; the
+skew pass finds the angle but does not decode), `0533-1` (no tilt), and
+far-only `0457-1` and `0504-4`. An earlier rotation sweep (±3/6/9°) read
+all of them except `0446-6`, so the rest look like extent or ranking
+problems rather than angle.
 
 Known limitation: full 12 MP stills through the SDK path read 0–4 of 110
 for every variant — `DownscaleTransform` caps the long edge at 1280 before

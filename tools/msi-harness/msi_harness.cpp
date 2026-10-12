@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -788,6 +789,69 @@ static void shelfFormatSuite() {
     check("req mod10 on mod1010", d, "011578333", "mod10", true, P::MOD10);
 }
 
+// `g` rotated `deg` clockwise about its centre (bilinear, white fill): a
+// hand-held tilt, unlike rotateCw's 90-degree sensor rotations.
+static Gray rotateSmall(const Gray& g, float deg) {
+    const float t = deg * 3.14159265f / 180.0f, c = std::cos(t), s = std::sin(t);
+    const float cx = 0.5f * (g.w - 1), cy = 0.5f * (g.h - 1);
+    Gray o;
+    o.w = g.w;
+    o.h = g.h;
+    o.px.assign(g.px.size(), 255);
+    for (int y = 0; y < g.h; ++y)
+        for (int x = 0; x < g.w; ++x) {
+            const float sx = cx + (x - cx) * c + (y - cy) * s;
+            const float sy = cy - (x - cx) * s + (y - cy) * c;
+            const int x0 = (int)std::floor(sx), y0 = (int)std::floor(sy);
+            if (x0 < 0 || y0 < 0 || x0 + 1 >= g.w || y0 + 1 >= g.h) continue;
+            const float fx = sx - x0, fy = sy - y0;
+            auto at = [&](int xx, int yy) { return (float)g.px[(size_t)yy * g.w + xx]; };
+            const float v = (at(x0, y0) * (1 - fx) + at(x0 + 1, y0) * fx) * (1 - fy) +
+                            (at(x0, y0 + 1) * (1 - fx) + at(x0 + 1, y0 + 1) * fx) * fy;
+            o.px[(size_t)y * g.w + x] = (uint8_t)(v + 0.5f);
+        }
+    return o;
+}
+
+// Hand-held tilt on the shelf format (9-digit mod1010, blur 1, with and
+// without text clutter). The upright path tolerates about +-7 degrees at
+// 4-5px modules and misses +-10-12 (2f5406b: 12 of these 48 missed); the
+// skew retry reads all of them. Text strokes tilted the same way must stay
+// silent: the retry deskews clutter too.
+static void tiltSuite() {
+    printf("--- tilt (spec-rendered shelf format, rotated) ---\n");
+    const struct { const char* full; int m; } tags[] = {{"011578333", 5}, {"024307670", 4}, {"082814799", 3}};
+    for (auto& t : tags) {
+        const int barsW = (int)modulesFor(t.full).size() * t.m;
+        const int w = barsW + 60 * t.m, h = 400, top = 220, barH = 110;
+        const int bx0 = (w - barsW) / 2, bx1 = bx0 + barsW;
+        for (int txt = 0; txt < 2; ++txt)
+            for (float a : {-12.f, -10.f, -7.f, -3.f, 3.f, 7.f, 10.f, 12.f}) {
+                Gray g = renderMsi(t.full, t.m, w, h, top, barH);
+                if (txt) {
+                    addStrokes(g, bx0, bx1, top - 70, top - 30, 7);
+                    addStrokes(g, bx1 + 10 * t.m, bx1 + 25 * t.m, top + 20, top + 60, 11);
+                    addStrokes(g, bx0 - 25 * t.m, bx0 - 10 * t.m, top + 20, top + 60, 13);
+                }
+                boxBlur(g, 1);
+                char nm[64];
+                snprintf(nm, sizeof nm, "tilt %s %dpx %s %+.0f", t.full, t.m, txt ? "text" : "clean", a);
+                check(nm, rotateSmall(g, a), t.full, nullptr, true);
+            }
+    }
+    for (float a : {-8.f, 8.f}) {
+        Gray g;
+        g.w = 700;
+        g.h = 400;
+        g.px.assign((size_t)g.w * g.h, 255);
+        addStrokes(g, 60, 640, 150, 260, 21);
+        boxBlur(g, 1);
+        char nm[64];
+        snprintf(nm, sizeof nm, "neg tilt strokes %+.0f", a);
+        check(nm, rotateSmall(g, a), nullptr, nullptr, true);
+    }
+}
+
 struct ShelfCase {
     const char* file;
     const char* full;  // expected full codeword (payload + checks)
@@ -1004,6 +1068,7 @@ int main(int argc, char** argv) {
                                       : "../../barcode-scanner-sdk/src/test/resources/msi-shelf";
     syntheticSuite();
     shelfFormatSuite();
+    tiltSuite();
     shelfSuite(shelfDir);
     frameSuite();
     benchSuite(shelfDir);

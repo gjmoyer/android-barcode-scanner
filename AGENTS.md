@@ -63,9 +63,19 @@ emulator image and local fixture photos.
   small-module retry trigger — dropping that evidence cost far-field reads.
 - Failure-path retries run in order: 1D 2x profile retry (re-votes failed
   ROIs with module <4.5px, no new ROI search; top level only, since inside
-  the 2D recursion it compounds to 4x and bred phantoms), then the 2D NN 2x
-  frame retry. 2D bilinear and per-ROI 2D upscales were measured and rejected:
-  they re-detect ROIs and bred confident phantoms.
+  the 2D recursion it compounds to 4x and bred phantoms), then the skew
+  retry, then the 2D NN 2x frame retry. 2D bilinear and per-ROI 2D upscales
+  were measured and rejected: they re-detect ROIs and bred confident phantoms.
+- Skew retry (`estimateSkew`, top level only): projection search over ±15°
+  for the angle that sharpens the deskewed band average; gated by
+  |angle| ≥1.5° and gain ≥1.5, first gated ROI only (`kSkewMaxRois`; more
+  ROIs only cost clutter time). Scanlines run along the symbol axis over the
+  deskewed extent first (the horizontal extent cuts outer digits and those
+  prefixes passed every guard), then the original extent (the wider one can
+  take in trailing print). Don't evidence-gate the upsample or the fallback
+  extent, and don't use the structure tensor for the angle (biased about 3°):
+  all were measured and lost reads.
+  Measure tilt with rotated crops, not only the upright set.
 - With 1-digit checksums, any mechanism that multiplies validation
   lotteries (more hypotheses, derived variants, single-vote acceptance)
   must be gated by independent multi-scanline agreement.

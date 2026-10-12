@@ -71,6 +71,23 @@ constexpr int kUpscaleMaxLongEdge = 800;
 // open: identical to 4.5): module estimates on failed ROIs skew high when
 // false bars join the median, so the cap sits well above the true ~2-3px.
 constexpr float kProfileRetryMaxModule = 4.5f;
+// Skew retry (decodeImpl): bar-angle search half-range (degrees, 1-degree
+// steps, then +-0.5 refinement), the smallest tilt worth a retry (the upright
+// pass already reads below it), and the deskew gain gate. Gain is the band
+// average's edge energy at the best angle over that at 0 degrees: tilted
+// shelf tags score 1.65-21 (median 6.6), while 92% of searched clutter ROIs
+// score below 1.5, so 84% of clutter miss frames skip the skew scanlines.
+constexpr int kSkewMaxDegrees = 15;
+constexpr float kSkewMinDegrees = 1.5f;
+constexpr float kSkewMinGain = 1.5f;
+// Row subsampling for the angle search only (alignment, not decoding).
+constexpr int kSkewSearchRowStep = 4;
+// Gated ROIs that get skew scanlines, strongest first. Every skew read on
+// the shelf set (341 rotated-crop reads, 0540-1) came from the first gated
+// ROI; slanted clutter can gate 2-5 ROIs per miss frame, and scanning them
+// all raised the worst clutter frames from 18-25 to 30-36ms (serial, Mac).
+constexpr int kSkewMaxRois = 1;
+constexpr float kDegToRad = 3.14159265f / 180.0f;
 // Digit-grid residual ceiling (modules) for decodeByDigitTemplates. MSI digits
 // sit on a uniform 12-module pitch, so the chosen digit windows must fall on a
 // line. Window/alignment search leaves true reads within ~1 module (shelf set:
@@ -432,6 +449,147 @@ void appendVerifyTail(const uint8_t* g, int W, const Rect& roi, int y,
     for (int x = roi.x1; x < roi.x1 + ext; ++x) {
         const float c = at(x);
         pr.push_back(x - 1 >= 0 && x + 1 < W ? (at(x - 1) + 2 * c + at(x + 1)) * 0.25f : c);
+    }
+}
+
+// ------------------------------------------------------- skew (tilted bars)
+// A tilted symbol defeats horizontal scanlines: at 7 degrees a 310px symbol
+// drifts 38px vertically, off a 50px-tall bar field, and row averaging smears
+// the bars together. These helpers sample along the symbol axis instead,
+// with axis slope dy/dx (positive = clockwise tilt in image coordinates).
+
+// Edge energy (mean squared first difference) of the band average with each
+// row shifted along slope. Aligned bars maximise it. Integer shifts suffice:
+// the search needs alignment, not sub-pixel samples.
+float deskewSharpness(const uint8_t* g, int W, const Rect& roi, float slope) {
+    const int n = roi.x1 - roi.x0;
+    if (n < 3) return 0;
+    const float yc = 0.5f * (roi.y0 + roi.y1);
+    std::vector<float> acc(n, 0.0f);
+    int cnt = 0;
+    for (int y = roi.y0; y < roi.y1; y += kSkewSearchRowStep) {
+        const int x0 = roi.x0 + (int)std::lround(-slope * (y - yc));
+        const uint8_t* r = g + (size_t)y * W;
+        const int lo = std::min(n, std::max(0, -x0));
+        const int hi = std::max(lo, std::min(n, W - x0));
+        for (int i = 0; i < lo; ++i) acc[i] += r[0];
+        for (int i = lo; i < hi; ++i) acc[i] += r[x0 + i];
+        for (int i = hi; i < n; ++i) acc[i] += r[W - 1];
+        ++cnt;
+    }
+    if (cnt == 0) return 0;
+    double e = 0;
+    for (int i = 1; i < n; ++i) {
+        const double d = (acc[i] - acc[i - 1]) / cnt;
+        e += d * d;
+    }
+    return (float)(e / n);
+}
+
+// Best bar-axis slope for the ROI by maximising deskewSharpness over
+// +-kSkewMaxDegrees; also returns the gain over the unrotated band.
+float estimateSkew(const uint8_t* g, int W, const Rect& roi, float& gain) {
+    const float e0 = deskewSharpness(g, W, roi, 0.0f);
+    float bestE = e0, bestDeg = 0;
+    for (int d = -kSkewMaxDegrees; d <= kSkewMaxDegrees; ++d) {
+        if (d == 0) continue;
+        const float e = deskewSharpness(g, W, roi, std::tan(d * kDegToRad));
+        if (e > bestE) { bestE = e; bestDeg = (float)d; }
+    }
+    const float coarse = bestDeg;
+    for (float d : {coarse - 0.5f, coarse + 0.5f}) {
+        const float e = deskewSharpness(g, W, roi, std::tan(d * kDegToRad));
+        if (e > bestE) { bestE = e; bestDeg = d; }
+    }
+    gain = e0 > 0 ? bestE / e0 : 0;
+    return bestDeg;
+}
+
+// findRoiCandidates' column-extent rule in deskewed coordinates. A tilted
+// symbol crosses the band diagonally, so its end columns fall short of the
+// per-column edge count and the horizontal extent cuts the outer digits off
+// (shelf crops rotated 6-10 degrees read 8-digit MOD10-valid prefixes that
+// passed every guard). Returns false when no extent qualifies.
+bool deskewExtent(const uint8_t* g, int W, const Rect& roi, float slope, Rect& out) {
+    const int gradThr = 24;
+    const float yc = 0.5f * (roi.y0 + roi.y1);
+    std::vector<int> col(W, 0);
+    for (int y = roi.y0; y < roi.y1; ++y) {
+        const uint8_t* r = g + (size_t)y * W;
+        const int sh = (int)std::lround(-slope * (y - yc));
+        const int lo = std::max(0, -sh), hi = std::min(W, W - 1 - sh);
+        for (int xp = lo; xp < hi; ++xp) {
+            int d = (int)r[xp + sh + 1] - (int)r[xp + sh];
+            if (d < 0) d = -d;
+            if (d > gradThr) ++col[xp];
+        }
+    }
+    const int need = std::max(3, (roi.y1 - roi.y0) / 3);
+    int x0 = 0, x1 = W - 1;
+    while (x0 < W && col[x0] < need) ++x0;
+    while (x1 > x0 && col[x1] < need) --x1;
+    if (x1 - x0 < 60) return false;
+    out = {std::max(0, x0 - 20), x1, roi.y0, roi.y1};
+    return true;
+}
+
+// Linear interpolation across rows (sampleY) or along a row (sampleX),
+// clamped to the frame.
+inline float sampleY(const uint8_t* g, int W, int H, int x, float y) {
+    if (y <= 0) return g[x];
+    if (y >= H - 1) return g[(size_t)(H - 1) * W + x];
+    const int yi = (int)y;
+    const float f = y - yi;
+    return g[(size_t)yi * W + x] * (1 - f) + g[(size_t)(yi + 1) * W + x] * f;
+}
+inline float sampleX(const uint8_t* g, int W, int y, float x) {
+    const uint8_t* r = g + (size_t)y * W;
+    if (x <= 0) return r[0];
+    if (x >= W - 1) return r[W - 1];
+    const int xi = (int)x;
+    const float f = x - xi;
+    return r[xi] * (1 - f) + r[xi + 1] * f;
+}
+
+// Scanline along the symbol axis at height yc on the ROI centre column, with
+// a verification tail (appendVerifyTail's length) along the same line.
+// Smoothing matches extractProfile + appendVerifyTail: (l + 2c + r) / 4,
+// end samples of the decode part and of the tail raw.
+void extractSkewProfile(const uint8_t* g, int W, int H, const Rect& roi, float yc,
+                        float slope, std::vector<float>& out) {
+    const float xm = 0.5f * (roi.x0 + roi.x1);
+    const int n = roi.x1 - roi.x0;
+    const int ext = std::max(0, std::min(std::max(48, n / 6), W - roi.x1));
+    std::vector<float> raw(n + ext);
+    for (int i = 0; i < n + ext; ++i) {
+        const int x = roi.x0 + i;
+        raw[i] = sampleY(g, W, H, x, yc + (x - xm) * slope);
+    }
+    out.resize(n + ext);
+    for (int i = 0; i < n + ext; ++i) {
+        const bool raw1 = i == 0 || i == n - 1 || i == n + ext - 1;
+        out[i] = raw1 ? raw[i] : (raw[i - 1] + 2 * raw[i] + raw[i + 1]) * 0.25f;
+    }
+}
+
+// Band average with each row shifted along the bars (sub-pixel), plus its
+// verification tail; decode part and tail smoothed separately.
+void averageSkewProfile(const uint8_t* g, int W, const Rect& roi, float slope,
+                        std::vector<float>& out) {
+    const int n = roi.x1 - roi.x0;
+    const int ext = std::max(0, std::min(std::max(48, n / 6), W - roi.x1));
+    const float yc = 0.5f * (roi.y0 + roi.y1);
+    std::vector<float> raw(n + ext, 0.0f);
+    for (int y = roi.y0; y < roi.y1; ++y) {
+        const float dx = -slope * (y - yc);
+        for (int i = 0; i < n + ext; ++i) raw[i] += sampleX(g, W, y, roi.x0 + i + dx);
+    }
+    const float inv = 1.0f / std::max(1, roi.y1 - roi.y0);
+    for (auto& v : raw) v *= inv;
+    out.resize(n + ext);
+    for (int i = 0; i < n + ext; ++i) {
+        const bool raw1 = i == 0 || i == n - 1 || i == n || i == n + ext - 1;
+        out[i] = raw1 ? raw[i] : (raw[i - 1] + 2 * raw[i] + raw[i + 1]) * 0.25f;
     }
 }
 
@@ -1340,6 +1498,69 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
             res.votes = v.votes;
             if (g_debug) printf("[dbg] 1D 2x retry succeeded: %s\n", res.digits.c_str());
             return res;
+        }
+    }
+    // Still nothing. Skew retry (top level only, like the 1D retry): a
+    // tilted symbol defeats horizontal scanlines (shelf 0540-1, about 7
+    // degrees, read by a commercial scanner, missed in every mode). Per ROI,
+    // estimateSkew finds the bar angle; ROIs below kSkewMinDegrees or
+    // kSkewMinGain skip. Scanlines then run along the symbol axis, over the
+    // deskewed extent first (the horizontal extent cuts a tilted symbol's
+    // outer digits, and those prefixes passed every guard), then over the
+    // original extent (the wider one can take in trailing print, where the
+    // fit-ranking gap hides the true read). Same vote and guard gates; small
+    // modules get the 1D 2x upsample (unconditionally: 32 of 341 rotated-
+    // crop reads came from upsampled lines whose 1x vote saw no checksum-
+    // valid read). The fallback extent is not evidence-gated either: on
+    // full photo IMG_0540 the deskewed extent yields no checksum-valid read
+    // and only the original extent decodes. Shelf set, 9-digit bounds:
+    // MOD1010 147/139/143 -> 148/140/144 (near/far/still), 0 wrong; crops
+    // rotated +-6/10 degrees 4-81 -> 118-125 of 141 ok, 0 wrong; clutter 0
+    // false reads, mean +0.2ms.
+    if (allowUpscale) {
+        int skewTried = 0;
+        for (int ri = 0; ri < nrois && skewTried < kSkewMaxRois; ++ri) {
+            const Rect& roi = rois[ri];
+            float gain = 0;
+            const float deg = estimateSkew(gray, width, roi, gain);
+            if (g_debug) printf("[dbg] skew ROI %d: %.1f deg gain %.2f\n", ri, deg, gain);
+            if (std::fabs(deg) < kSkewMinDegrees || gain < kSkewMinGain) continue;
+            ++skewTried;
+            const float slope = std::tan(deg * kDegToRad);
+            Rect ext = roi;
+            const bool haveExt = deskewExtent(gray, width, roi, slope, ext) &&
+                                 (ext.x0 != roi.x0 || ext.x1 != roi.x1);
+            for (int pass = 0; pass < (haveExt ? 2 : 1); ++pass) {
+                const Rect& sroi = (haveExt && pass == 0) ? ext : roi;
+                RoiScanlines scan;
+                scan.n = sroi.x1 - sroi.x0;
+                std::vector<float> avg;
+                averageSkewProfile(gray, width, sroi, slope, avg);
+                scan.lines.push_back(std::move(avg));
+                const int bandH = sroi.y1 - sroi.y0;
+                const int nLines = std::min(kMaxScanlines, 1 + bandH / 8);
+                for (int i = 0; i < nLines; ++i) {
+                    const float yc = sroi.y0 + (bandH * (i + 1)) / (float)(nLines + 1);
+                    std::vector<float> pr;
+                    extractSkewProfile(gray, width, height, sroi, yc, slope, pr);
+                    scan.lines.push_back(std::move(pr));
+                }
+                RoiVote v = voteScanlines(scan);
+                if (v.votes == 0 && v.minModule > 0.5f && v.minModule < kProfileRetryMaxModule) {
+                    for (auto& pr : scan.lines) upsampleProfile2x(pr, scan.n);
+                    scan.n *= 2;
+                    v = voteScanlines(scan);
+                }
+                if (v.votes > 0) {
+                    res.ok = true;
+                    res.digits = v.best.first;
+                    res.policy = v.best.second;
+                    res.votes = v.votes;
+                    if (g_debug) printf("[dbg] skew retry succeeded: %s (%.1f deg, pass %d)\n",
+                                        res.digits.c_str(), deg, pass);
+                    return res;
+                }
+            }
         }
     }
     // Still nothing. 2D far-field retry: modules below ~2px (distant shelf

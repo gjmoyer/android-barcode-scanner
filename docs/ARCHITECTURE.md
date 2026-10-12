@@ -97,6 +97,10 @@ Grayscale frame (row-major bytes via JNI)
   → 1D 2x profile retry if every ROI failed (top level only): re-vote each
     failed ROI with module <4.5px on its own scanlines upsampled 2x (no new
     ROI search)
+  → skew retry if still nothing (top level only): projection search finds
+    the bar angle (±15°) on the first ROI tilted ≥1.5° whose deskew sharpens
+    the band ≥1.5x; scanlines along the symbol axis, deskewed extent first,
+    then the original extent; same vote and guard gates
   → single 2x NN upscale retry if still nothing, on a small frame (<800px
     edge) or on small modules with checksum-valid evidence
   → Kotlin: re-validate reported digits strictly under `msiChecksumPolicy`,
@@ -106,7 +110,8 @@ Grayscale frame (row-major bytes via JNI)
 - **Full-frame MSI runs before ROI MSI** (measured more accurate: intact quiet
   zones beat tight-crop edge artifacts; easy frames early-exit before
   localization costs). `MsiRegionAssistDecoder` (ML Kit isolation → pad +
-  deskew crop → shared native decoder) stays the tilted-label backup.
+  deskew crop → shared native decoder) stays the backup for tilts beyond
+  the native skew retry's ±15°.
 - **One decoder instance per path**, each owning a synchronized `MsiVoteGate`,
   so ROI misses can never reset the full-frame consecutive count.
 - **Native library is optional at runtime**: `MsiNativeDecoder.nativeAvailable`
