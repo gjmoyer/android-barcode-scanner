@@ -67,10 +67,13 @@ Scandit checksum enum (Mod10/1010/11/1110 naming), tc-lib-barcode (family contex
    luminance minima (no binarization threshold to tune); module from median
    bar spacing; each digit window correlated against Gaussian-blurred
    12-module templates, so shape — not absolute widths — decides.
-4. Checksum gate (MOD10 → MOD11 → MOD1010 → MOD1110, first validating scheme
-   wins) + ≥2 agreeing scanline votes → confidence 1.0. Single votes never
-   emit. A single NN 2x upscale retry covers far-field frames whose modules
-   fall below ~2px (failure path only; success paths never pay for it).
+4. Checksum gate: the host's `msiChecksumPolicy` is pushed into native
+   candidate selection (only strings valid under it compete; `NONE` lets
+   MOD10 → MOD11 → MOD1010 → MOD1110 compete, first validating scheme
+   reported) + ≥2 agreeing scanline votes (6 below 2.5px modules) →
+   confidence 1.0. Single votes never emit. A single NN 2x upscale retry
+   covers far-field frames whose modules fall below ~2px (failure path only;
+   success paths never pay for it).
 5. Kotlin post-gate: re-validate reported digits strictly under the host's
    `msiChecksumPolicy`, strip check digits, reject degenerate
    single-repeated-digit payloads (blank areas decode as all-zeros windows
@@ -144,6 +147,15 @@ Kotlin re-validates strictly under the configured policy before stripping.
 | silkalm `0826593` | ✅ EXACT (`MOD_10` → `0826593`, 1.0, MsiNative) | Bars carry 8/9 digits; full-frame-first ordering fixed this (ROI crops phantomized). Repeat-stable ×3. |
 | quakotml `0186477` | ❌ honest NotFound | Full-res modules overshoot the template range (truncated read, policy-gated). Resolves at 0.75 scale on the host harness; tracked gap. |
 | ondeg `0243523` | ❌ phantoms validate | True bars never resolve; shifted windows checksum-validate by luck. Tracked gap; live stability gate is the remaining defense. |
+
+> **Truth-label caveat (see §10).** These fixtures are not in the repo and
+> could not be re-verified. real 9-digit shelf tags encode 9 digits (item + Mod10 +
+> Mod10), and every 8-digit prefix of such a codeword is Mod10-valid, so the
+> 8-digit `MOD_10` labels above (yakult `08281479`, dixie `00875732`, ondeg
+> `02435238`) are most likely physical truncations that happen to strip to
+> the item under `MOD_10`. Yakult's item computes to `082814799` under
+> Mod1010; branch commit 3e51fb3 treated that full read as a phantom, which
+> is likely inverted. Re-label from the fixtures before trusting them.
 
 No wrong-value emission inside the asserted set: truncated reads are gated to
 `NotFound` by policy revalidation, and blank areas (all-zeros windows that
@@ -241,13 +253,25 @@ outvote it. Superseded by §8.3 before ever shipping. Leave it dead.
 4. `decodeByDigitTemplates`: for each of the first 5 bars as start and each
    plausible digit count, anchor 12-module windows at bar centers and
    correlate against Gaussian-blurred digit templates (two width hypotheses
-   × ±0.5-module search). Blurred templates are rebuilt per distinct module
-   estimate and cached thread-locally on exact float match (bit-identical).
-5. `validateChecksum` tries MOD10 → MOD11 → MOD1010 → MOD1110, first hit wins;
-   ≥`kMinVotesCheck`=2 agreeing scanline profiles required (NONE is disabled:
-   too many false positives).
-6. Failure path only: one NN 2x upscale retry (`kUpscaleMaxLongEdge`=800,
-   +1px source shift so the xstep=2 sampler sees true boundaries), single depth.
+   × ±0.5-module search) at three blur sigmas (0.35/0.6/0.95 × module),
+   pooled. Blurred templates are cached thread-locally per sigma on exact
+   float match of the module estimate (bit-identical). Start hypotheses
+   must sit on a wide bar and have a ≥7-module quiet zone before them (a
+   bar closer than that means the hypothesis starts inside the digit field
+   and drops leading digits). A shorter read only drops a longer one that
+   extends it when strictly stronger AND better bar-fitting — on ties the
+   longer read stays (every prefix of a Mod1010 codeword is Mod10-valid).
+5. `validateChecksum`: with a required policy (`decode(..., required)`,
+   pushed from `msiChecksumPolicy` via JNI) only that scheme validates, so
+   it constrains ranking and voting rather than filtering the winner;
+   otherwise MOD10 → MOD11 → MOD1010 → MOD1110, first hit wins.
+   ≥`kMinVotesCheck`=2 agreeing scanline profiles required, 6 when the
+   module is below 2.5px (NONE is disabled: too many false positives).
+6. Failure path only: one NN 2x upscale retry, single depth, +1px source
+   shift so the xstep=2 sampler sees true boundaries. Fires on small frames
+   (`kUpscaleMaxLongEdge`=800) or on small observed modules (<3.5px, long
+   edge <1600) when at least one scanline produced a checksum-valid read —
+   without that evidence, text clutter triggered it on every miss frame.
 7. Kotlin (`MsiNativeDecoder`): re-validate strictly under
    `msiChecksumPolicy`, strip check digits, reject degenerate
    single-repeated-digit payloads (blank areas decode as validating zeros).
@@ -320,3 +344,51 @@ landscape mixed — distinct labels matter, repeats are free in-test.
 5. **Privacy rule (non-negotiable):** real photos never enter the repo. Only
    derived artifacts may be committed: spec-rendered vectors reproducing a
    failure, aggregate pass/fail tables, and the generator script.
+
+## 10. Real-photo regression (110 shelf photos, Oct 2026)
+
+110 user-supplied HEIC shelf photos (each with ≥1 MSI tag; never committed).
+Ground truth: macOS Vision OCR of the printed item line (`NNNNNNN 000-…`),
+151 tags in 97 photos. Bar counts settle the format: 101 of 126 measurable
+tags have 39 bars = 9 digits, i.e. **item (7) + Mod10 + Mod10 (Mod1010)**;
+hand decode of item 0115783 gives `011578333`. Non-39 counts were crop
+clipping or noise.
+
+Consequences:
+- Every prefix of a Mod1010 codeword is Mod10-valid, so an 8-digit
+  truncation (`01157833`) is indistinguishable from a real Mod10 code
+  unless the policy is pushed down.
+- Luhn and Mod11 ignore leading zeros, so a dropped leading `0`
+  (`11578333`) still validates.
+- Under `MOD_10` grocery shelf tags emit the 8-digit `item+check1`; hosts scanning
+  grocery shelf tags should configure `MOD_10_10` to get the 7-digit item.
+
+Inputs: per tag, tight crops below the item line at 1.0/1.5/2.0/3.0× and a
+1.5× context crop (755 crops), with the SDK's 2/98 contrast stretch.
+Scored against the 9-digit truth (ok / 8-digit truncation / wrong / none):
+
+| Decoder | ok | trunc8 | wrong | none |
+|---|---|---|---|---|
+| main (d1a8e17) | 68 | 145 | 311 | 231 |
+| shelf-truth refinements (4c9be3b) | 237 | 33 | 200 | 285 |
+| + prefix-drop tie fix | 298 | 7 | 168 | 282 |
+| + quiet-zone gate (NONE policy) | 378 | 16 | 55 | 306 |
+| + `MOD1010` pushed down | **392** | **3** | **20** | 340 |
+| same, `MOD10` pushed down | 381 | 16 | 48 | 310 |
+
+Removing Path B, direct search and the lead-0 gate swapped 4 rows (totals
+unchanged); the per-sigma cache and evidence-gated upscale change no row.
+0/30 false positives on 1280×720 text-clutter negatives for every variant;
+miss frames 3.1 → 0.4 ms after the upscale gate. Ablations (MOD1010
+pushed down): single sigma −8 ok / −3 wrong but 2.25× faster; dropping the
+6-vote small-module gate +2 wrong; dropping the module-triggered upscale
+−3 ok.
+
+Known limitation: full 12 MP stills through the SDK path read 0–4 of 110
+for every variant — `DownscaleTransform` caps the long edge at 1280 before
+`MsiRegionAssistDecoder` crops, leaving ~0.75px modules. Crop from the
+full-resolution frame (or skip the downscale for stills) to fix.
+
+Reproduce locally (photos and OCR output stay out of the repo): convert to
+upright grayscale, OCR the item lines, crop below each, run the host decoder
+over the manifest, and score against `item + Luhn + Luhn`.

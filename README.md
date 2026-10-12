@@ -117,7 +117,10 @@ val config = ScannerConfigBuilder()
   thorough mode.
 - MSI results are re-validated strictly under `msiChecksumPolicy` and short or
   degenerate reads are withheld — a wrong policy yields `NotFound`, never a
-  misread presented as valid.
+  misread presented as valid. The policy is also pushed into the native
+  engine's candidate selection. grocery shelf tags are 9-digit Mod1010 (item +
+  two checks): use `MOD_10_10`; under `MOD_10` they emit the 8-digit
+  `item + check` and lose truncation protection.
 - `msiMinPayloadDigits` (default 3, spec floor): raise to ~6 for shelf SKUs;
   short MSI parses validate by luck and can win blurry live frames.
 - Duplicate suppression only affects the live `results` flow; one-shot

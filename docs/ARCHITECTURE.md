@@ -83,9 +83,11 @@ Grayscale frame (row-major bytes via JNI)
   → per ROI: averaged profile + up to 9 individual scanline rows
     → bar centers as prominent luminance minima; module = median spacing / 3
     → digit windows correlated against blurred 12-module templates
-    → checksum gate (MOD10/MOD11/MOD1010/MOD1110, in order) + ≥2-vote agreement
+    → checksum gate: host policy pushed down (only that scheme competes);
+      NONE = MOD10/MOD11/MOD1010/MOD1110 in order; + ≥2-vote agreement
   → winner = most votes, ties by average score
-  → single 2x NN upscale retry if every ROI failed on a small frame (<800px edge)
+  → single 2x NN upscale retry if every ROI failed on a small frame (<800px
+    edge) or on small modules with checksum-valid evidence
   → Kotlin: re-validate reported digits strictly under `msiChecksumPolicy`,
     strip check digits, reject degenerate (single-digit) payloads
 ```
@@ -116,8 +118,9 @@ Grayscale frame (row-major bytes via JNI)
 - **Native C++ MSI engine** (`src/main/cpp/msi_decoder.cpp`, no third-party
   barcode code): signal-template correlation survives the blur that defeats
   width thresholding. `MsiCodeTable`/`MsiChecksumValidator` stay in Kotlin —
-  the validator enforces the host's `msiChecksumPolicy` on native-reported
-  digits (the engine auto-detects; Kotlin decides). Verified by the host
+  the host's `msiChecksumPolicy` is pushed into native candidate selection
+  (under `MOD_10_10` a Mod10-valid truncation cannot outvote the full read) and the
+  validator re-enforces it on native-reported digits. Verified by the host
   harness (`tools/msi-harness`, host-compiled, no device needed), JVM
   contract tests, and on-device sweeps (`DeviceMsiTest`).
 - **Fusion owns orientation**, engines own inversion/binarization: avoids N×M retry explosion.
