@@ -77,12 +77,49 @@ constexpr float kProfileRetryMaxModule = 4.5f;
 // max 0.63); one slipped anchor bar moves a window >=2.5 modules, and
 // checksum-valid phantoms that ride dropped/extra bars sat at 6-52 modules.
 constexpr float kMaxDigitGridResidual = 1.5f;
+// Start/Stop/quiet-zone confirmation floors (guardEvidence units: digit-field
+// intensity standard deviations). The template decode never checks the
+// guards, so a checksum-valid string can be a reversed (180-degree) scan, a
+// shifted grid, texture, or a truncated symbol. Truncation is the dangerous
+// case for MOD10: an 8-digit prefix of a 9-digit MOD1010 code always passes
+// MOD10, and digits 0-7 begin with "1001", so the cut lands on a perfect fake
+// Stop. Each element must be confirmed on at least one agreeing scanline.
+// Shelf set (crops at 9 digits, full photos at open lengths; MOD10, MOD1010
+// and NONE pooled), per read best scanline, true reads vs checksum-valid
+// phantoms with the gate off:
+//   Start "110" (2-module bar mean vs space):   true >= 0.76; phantoms <= 0.49
+//   Stop "1001", each space module vs the
+//   brighter bar (strict; a mean let reversed
+//   reads through at ~1.0):                     true >= 0.41; phantoms <= 0.08
+//   Quiet zone, darkest of kQuietModules after
+//   the Stop vs the brighter Stop bar:          true >= 0.52; 2 truncations <= -1.3
+constexpr float kMinStartContrast = 0.6f;
+constexpr float kMinStopContrast = 0.25f;
+constexpr float kMinQuietContrast = 0.3f;
+// Six modules always reach the next bar after a fake Stop (a truncated digit
+// continues within 3 modules) with slack for the +/-0.5-module placement.
+constexpr int kQuietModules = 6;
+constexpr float kGuardUnseen = -1e9f;
+
+// Guard evidence of one decoded hypothesis; kGuardUnseen marks an element
+// that falls outside the profile.
+struct GuardEvidence {
+    float start = kGuardUnseen;
+    float stop = kGuardUnseen;
+    float quiet = kGuardUnseen;
+    void keepBest(const GuardEvidence& o) {
+        start = std::max(start, o.start);
+        stop = std::max(stop, o.stop);
+        quiet = std::max(quiet, o.quiet);
+    }
+};
 
 struct Candidate {
     std::string digits;
     ChecksumPolicy policy;
     float score;  // average template correlation (higher = better)
     float module;  // bar-module size in profile pixels for this observation
+    GuardEvidence guard;  // guardEvidence() of the winning hypothesis
 };
 
 const char* policyNameImpl(ChecksumPolicy p) {
@@ -164,6 +201,11 @@ thread_local int t_policyRejected = 0;
 
 bool lengthAllowed(int nd) {
     return (t_minDigits <= 0 || nd >= t_minDigits) && (t_maxDigits <= 0 || nd <= t_maxDigits);
+}
+
+// True when a symbol longer than nd digits would also be accepted.
+bool longerSymbolAllowed(int nd) {
+    return nd < (t_maxDigits > 0 ? t_maxDigits : kMaxDigits);
 }
 
 // Returns payload-without-check on success, empty on failure. `required`
@@ -365,6 +407,32 @@ void averageProfile(const uint8_t* g, int W, const Rect& roi,
         s[i] = v;
     }
     out.swap(s);
+}
+
+// Appends the verification tail to a scanline (y >= 0) or band-average
+// (y < 0) profile: image columns from roi.x1 on, smoothed like the profile,
+// for guardEvidence() only — decoding never sees them. findRoiCandidates cuts
+// the ROI at the last strong gradient column, which can fall inside the Stop
+// (shelf set: 10 true reads had no measurable Stop) and never covers the
+// quiet zone. Padding the ROI itself was tried and perturbed marginal decodes
+// both ways; the tail checks without decoding. Length max(48px, ROI/6) covers
+// the Stop plus kQuietModules (a symbol spans ~115 modules, so ROI/6 >= 19);
+// a frame edge shortens it, which is how guardEvidence sees a cut.
+void appendVerifyTail(const uint8_t* g, int W, const Rect& roi, int y,
+                      std::vector<float>& pr) {
+    const int ext = std::min(std::max(48, (roi.x1 - roi.x0) / 6), W - roi.x1);
+    if (ext <= 0) return;
+    auto at = [&](int x) {
+        if (y >= 0) return (float)g[y * W + x];
+        float m = 0;
+        for (int r = roi.y0; r < roi.y1; ++r) m += g[r * W + x];
+        return m / (roi.y1 - roi.y0);
+    };
+    pr.reserve(pr.size() + ext);
+    for (int x = roi.x1; x < roi.x1 + ext; ++x) {
+        const float c = at(x);
+        pr.push_back(x - 1 >= 0 && x + 1 < W ? (at(x - 1) + 2 * c + at(x + 1)) * 0.25f : c);
+    }
 }
 
 // ------------------------------------------------------- bar detection
@@ -623,33 +691,59 @@ struct DigitTemplateCache {
 constexpr int kNumSigmas = 3;
 thread_local DigitTemplateCache t_digitCache[kNumSigmas];
 
-// Guard-pattern check: MSI Start is "110" modules (dark,dark,bright)
-// immediately before the first digit; Stop is "1001" (dark,bright,
-// bright,dark) right after the last digit. Returns margin (brightMean -
-// darkMean over guard modules); unreadable zones are skipped, and a fully
-// out-of-bounds guard scores 0 so cut-guard tags degrade to previous
-// behavior instead of failing outright.
-float guardMargin(const float* p, int n, float firstStart, int nd, float module) {
-    if (module < 1.0f) return 0;
-    float dark = 0, bright = 0;
-    int ndn = 0, nbn = 0;
-    auto acc = [&](float x0, float x1, bool wantDark) {
-        int a = (int)(x0 + 0.5f), b = (int)(x1 + 0.5f);
-        if (a < 0 || b > n || b <= a) return;
-        float m = 0;
-        for (int i = a; i < b; ++i) m += p[i];
-        m /= (b - a);
-        if (wantDark) { dark += m; ++ndn; } else { bright += m; ++nbn; }
+// Start, Stop and trailing quiet-zone contrast of a decoded hypothesis, in
+// units of the digit field's intensity standard deviation. MSI Start is "110"
+// (2-module bar, 1-module space) ending where the first digit window starts;
+// Stop is "1001" (bar, 2-module space, bar) starting where the last digit
+// window ends, then kQuietModules of quiet zone. Positions come from the
+// fitted digit windows, not from bar centres (a bar-based estimate biased an
+// earlier guard ranking toward shifted grids). Each element takes the best of
+// three +/-0.5-module placements, matching the window search slack.
+// p[0, n) is the decoded profile; p[n, nVerify) is its verification tail
+// (appendVerifyTail), so a Stop cut tight by the ROI is still measured.
+// Elements past nVerify (the frame edge) stay kGuardUnseen.
+GuardEvidence guardEvidence(const float* p, int n, int nVerify, float firstStart,
+                            float lastEnd, float module) {
+    GuardEvidence g;
+    const int a = std::max(0, (int)firstStart), b = std::min(n, (int)lastEnd);
+    if (b - a < 2 || module < 0.5f) return g;
+    float mu = 0, var = 0;
+    for (int i = a; i < b; ++i) mu += p[i];
+    mu /= (b - a);
+    for (int i = a; i < b; ++i) var += (p[i] - mu) * (p[i] - mu);
+    const float sd = std::max(sqrtf(var / (b - a)), 1e-3f);
+    auto mean = [&](float x0, float x1, float& m) {
+        const int i0 = (int)(x0 + 0.5f), i1 = (int)(x1 + 0.5f);
+        if (i0 < 0 || i1 > nVerify || i1 <= i0) return false;
+        m = 0;
+        for (int i = i0; i < i1; ++i) m += p[i];
+        m /= (i1 - i0);
+        return true;
     };
-    float s = firstStart;
-    acc(s - 3 * module, s - 1 * module, true);  // Start bars
-    acc(s - 1 * module, s, false);             // Start trailing space
-    float e = firstStart + nd * 12 * module;
-    acc(e, e + 1 * module, true);                // Stop first bar
-    acc(e + 1 * module, e + 3 * module, false);  // Stop wide space
-    acc(e + 3 * module, e + 4 * module, true);   // Stop last bar
-    if (!ndn || !nbn) return 0;
-    return bright / nbn - dark / ndn;
+    for (int sh = -1; sh <= 1; ++sh) {
+        const float s = firstStart + sh * 0.5f * module, e = lastEnd + sh * 0.5f * module;
+        // module k after the Stop's leading edge
+        auto stopModule = [&](int k, float& m) { return mean(e + k * module, e + (k + 1) * module, m); };
+        float bar, space;
+        if (mean(s - 3 * module, s - module, bar) && mean(s - module, s, space))
+            g.start = std::max(g.start, (space - bar) / sd);
+        float b0, s1, s2, b3;
+        if (!stopModule(0, b0) || !stopModule(1, s1) || !stopModule(2, s2) || !stopModule(3, b3))
+            continue;
+        // Strict: both space modules must clear the brighter bar. A mean over
+        // the pair let 180-degree reads through, whose "Stop" is a digit cell
+        // with one dark module inside the space.
+        const float barMax = std::max(b0, b3);
+        g.stop = std::max(g.stop, (std::min(s1, s2) - barMax) / sd);
+        float darkest = 1e9f, m;
+        bool seen = true;
+        for (int k = 4; k < 4 + kQuietModules && seen; ++k) {
+            seen = stopModule(k, m);
+            darkest = std::min(darkest, m);
+        }
+        if (seen) g.quiet = std::max(g.quiet, (darkest - barMax) / sd);
+    }
+    return g;
 }
 
 // Largest distance (px) of any digit window start from the least-squares line
@@ -668,7 +762,8 @@ float maxDigitGridResidual(const float* pos, int nd) {
 }
 
 bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
-                            float module, std::string& outDigits, float& outScore) {
+                            float module, std::string& outDigits, float& outScore,
+                            float& outFirstStart, float& outLastEnd) {
     // Build 10 digit templates (12 modules each), blurred.
     // Template patterns from MSI spec.
     static const char* kDigitPat[10] = {
@@ -691,10 +786,13 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
         int strength;
         int need;  // expected bar count: 1 + 4*nd + 2
         int sIdx;  // start-bar hypothesis index
-        float guard;  // Start/Stop guard margin (larger = better fit)
+        float firstStart;  // first digit window start (px)
+        float lastEnd;     // last digit window end (px)
     };
-    Valid all[4 * kNumSigmas * 5 * (kMaxDigits - kMinDigits + 1)];
-    int nall = 0;
+    // Every bar may now host a Start hypothesis, so the pool is unbounded;
+    // reused per thread to keep the per-scanline path allocation-free.
+    static thread_local std::vector<Valid> all;
+    all.clear();
     for (int sgi = 0; sgi < kNumSigmas; ++sgi) {
     DigitTemplateCache& cache = t_digitCache[sgi];
     uint32_t bits = 0;
@@ -755,8 +853,13 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
     cache.tmplLen = tmplLen;
     cache.valid = true;
 
-    // Try each of the first few bars as the start candidate, and plausible n.
-    // The checksum gate identifies the correct alignment.
+    // Try every bar as the start candidate, and plausible n.
+    // The checksum gate identifies the correct alignment. Shelf tags often
+    // carry printed clutter left of the symbol (price text, rules), pushing
+    // the true Start past the first few bars (a former 5-bar cap was the
+    // dominant miss: shelf set MOD1010 near/far/still 124/125/123 -> 135/
+    // 135/133). The start-guard and quiet-zone gates below keep the
+    // hypothesis count small.
     // For each digit, anchor the 12-module window at the first bar's center:
     // try both narrow-bar (0.5 mod) and wide-bar (1.0 mod) offsets.
     // Start-guard prefilter: bars[sIdx] must be a WIDE bar (MSI Start is a
@@ -769,7 +872,10 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
     // string that is a strict prefix of a longer valid one is almost always a
     // truncated read (commercial truth: 02739407 vs true 027394071/mod1010).
     // Ties break by score.
-    for (int sIdx = 0; sIdx < 5 && sIdx < nb; ++sIdx) {
+    for (int sIdx = 0; sIdx < nb; ++sIdx) {
+        // No shortest symbol fits in the remaining bars (upper tolerance
+        // below), and later Starts only leave fewer.
+        if (sIdx + 1 + 4 * kMinDigits + 2 > nb + 6) break;
         // Start-guard prefilter (see above). Skip only when clearly narrow;
         // keep borderline cases for the checksum/score machinery.
         if (module > 0.5f && bars[sIdx].width < 1.2f * module) continue;
@@ -867,14 +973,12 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
             // first-match policy understates double-check codes, which
             // validate single-check legs trivially.
             int strength = checksumStrength(digits);
-            if (nall < (int)(sizeof(all) / sizeof(all[0]))) {
-                float firstStart = bars[sIdx + 1].center - 0.75f * module;
-                float gm = guardMargin(p, n, firstStart, nd, module);
-                all[nall++] = {digits, score, pol, strength, 1 + 4 * nd + 2, sIdx, gm};
-            }
+            all.push_back({digits, score, pol, strength, 1 + 4 * nd + 2, sIdx,
+                           winPos[0], winPos[nd - 1] + 12 * module});
         }
     }  // for sIdx — end start-candidate hypotheses for this sigma
     }  // for sgi — end sigma hypotheses; selection pools across sigmas
+    const int nall = (int)all.size();
     if (nall == 0) return false;
     // Prefix duplicates: shorter is a strict PREFIX of longer. Every prefix
     // of a Mod1010 code passes Mod10 (grocery shelf tags are 7-digit item +
@@ -887,7 +991,8 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
     // Phantom LEADING digits (quiet zone as "0") are NOT hard-dropped:
     // real shelf SKUs often start with 0 — bar-fit ranking below tells
     // them apart (phantoms exceed the observed bar count).
-    bool drop[4 * 3 * 5 * (kMaxDigits - kMinDigits + 1)] = {};
+    static thread_local std::vector<char> drop;
+    drop.assign(nall, 0);
     for (int i = 0; i < nall; ++i)
         for (int j = 0; j < nall; ++j) {
             if (i == j || all[j].digits.size() <= all[i].digits.size()) continue;
@@ -912,11 +1017,9 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
     // then stronger checks, then correlation score. (Strength-first was
     // tried 2026-10-11: phantoms validating double-checks by chance then
     // outrank true single-check reads, e.g. 01157833 lost to 804556044.)
-    // NOTE: Start/Stop guard-margin ranking was tried 2026-10-11 and
-    // REVERTED — the firstStart estimate (bars[sIdx+1] - 0.75*module)
-    // systematically favored shifted hypotheses, regressing synthetic
-    // 12345674 -> phantom and 2 shelf truths. guardMargin() is kept for
-    // future use with calibrated geometry; it is computed but not ranked.
+    // Guard contrast is NOT a ranking key (bar-estimated guard ranking
+    // regressed synthetic 12345674 and 2 shelf truths, 2026-10-11); it is
+    // measured for the winner only and gated per read in voteScanlines.
     int bi = -1;
     int bfit = 0;
     for (int i = 0; i < nall; ++i) {
@@ -934,10 +1037,14 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
     if (bi < 0) return false;  // all dropped (should not happen)
     outDigits = all[bi].digits;
     outScore = all[bi].score;
+    outFirstStart = all[bi].firstStart;
+    outLastEnd = all[bi].lastEnd;
     return true;
 }
 
-void decodeProfile(const float* p, int n,
+// Decodes p[0, n); p[n, nVerify) is the verification tail read only by
+// guardEvidence().
+void decodeProfile(const float* p, int n, int nVerify,
                    std::vector<Candidate>& cands, float* moduleOut = nullptr) {
     Bar bars[kMaxBars];
     // Use sensitive bar detection in relaxed mode (for faint images).
@@ -953,12 +1060,15 @@ void decodeProfile(const float* p, int n,
 
     // Primary: digit-template correlation.
     std::string digits;
-    float score = 0;
-    if (decodeByDigitTemplates(p, n, bars, nb, module, digits, score)) {
-        if (g_debug) printf("[dbg] template digits: %s (score=%.3f)\n", digits.c_str(), score);
+    float score = 0, firstStart = 0, lastEnd = 0;
+    if (decodeByDigitTemplates(p, n, bars, nb, module, digits, score, firstStart, lastEnd)) {
+        const GuardEvidence guard = guardEvidence(p, n, nVerify, firstStart, lastEnd, module);
+        if (g_debug)
+            printf("[dbg] template digits: %s (score=%.3f start=%.2f stop=%.2f quiet=%.2f)\n",
+                   digits.c_str(), score, guard.start, guard.stop, guard.quiet);
         ChecksumPolicy pol;
         if (!validateChecksum(digits, pol).empty()) {
-            cands.push_back({digits, pol, score, module});
+            cands.push_back({digits, pol, score, module, guard});
         } else if (g_debug) {
             printf("[dbg] checksum failed for %s\n", digits.c_str());
         }
@@ -975,15 +1085,36 @@ struct RoiVote {
     float minModule = 0;        // smallest plausible module seen (px)
 };
 
+// One ROI's scanline profiles. Every line holds n decode samples followed by
+// its verification tail (appendVerifyTail).
+struct RoiScanlines {
+    std::vector<std::vector<float>> lines;
+    int n = 0;
+};
+
+// Why a voted read's best guard evidence fails, or nullptr if it passes.
+const char* guardFailure(const GuardEvidence& g, int nd) {
+    if (g.start < kMinStartContrast) return "start";
+    if (g.stop > kGuardUnseen && g.stop < kMinStopContrast) return "stop";
+    if (g.quiet > kGuardUnseen && g.quiet < kMinQuietContrast) return "quiet zone";
+    // Stop or quiet zone past the frame edge (photo border or aim-box crop):
+    // unconfirmable, and the cut may hide the rest of a longer symbol (shelf
+    // photo: a 9-digit tag cut by the border read as its MOD10-valid 8-digit
+    // prefix). Accepted on the Start alone only when no longer symbol is
+    // allowed; two tight shelf crops with a 9-digit bound rely on this.
+    if (g.quiet == kGuardUnseen && longerSymbolAllowed(nd)) return "cut by frame edge";
+    return nullptr;
+}
+
 // Decodes every scanline profile of one ROI and votes on (digits, policy).
-RoiVote voteScanlines(const std::vector<std::vector<float>>& profiles) {
-    struct Votes { int n = 0; float score = 0; float mod = 0; };
+RoiVote voteScanlines(const RoiScanlines& scan) {
+    struct Votes { int n = 0; float score = 0; float mod = 0; GuardEvidence guard; };
     std::map<std::pair<std::string, ChecksumPolicy>, Votes> votes;
     RoiVote out;
-    for (const auto& pr : profiles) {
+    for (const auto& pr : scan.lines) {
         std::vector<Candidate> cands;
         float profModule = 0;
-        decodeProfile(pr.data(), (int)pr.size(), cands, &profModule);
+        decodeProfile(pr.data(), scan.n, (int)pr.size(), cands, &profModule);
         if (profModule > 0.5f &&
             (out.minModule <= 0 || profModule < out.minModule))
             out.minModule = profModule;
@@ -997,8 +1128,10 @@ RoiVote voteScanlines(const std::vector<std::vector<float>>& profiles) {
             size_t j = i + 1;
             float bestScore = cands[i].score;
             float bestMod = cands[i].module;
+            GuardEvidence bestGuard = cands[i].guard;
             while (j < cands.size() && cands[j].digits == cands[i].digits &&
                    cands[j].policy == cands[i].policy) {
+                bestGuard.keepBest(cands[j].guard);
                 if (cands[j].score > bestScore) {
                     bestScore = cands[j].score;
                     bestMod = cands[j].module;
@@ -1009,6 +1142,7 @@ RoiVote voteScanlines(const std::vector<std::vector<float>>& profiles) {
             votes[key].n++;
             votes[key].score += bestScore;
             votes[key].mod += bestMod;
+            votes[key].guard.keepBest(bestGuard);
             i = j;
         }
     }
@@ -1021,6 +1155,21 @@ RoiVote voteScanlines(const std::vector<std::vector<float>>& profiles) {
         float avgMod = kv.second.mod / kv.second.n;
         int need = (avgMod < 2.5f) ? 6 : kMinVotesCheck;
         if (kv.second.n < need) continue;
+        // Start/Stop/quiet-zone confirmation (see kMinStartContrast). Each
+        // element is taken from its best agreeing scanline, not required on
+        // one line: blur and clutter weaken single lines. Shelf set, MOD10 at
+        // open lengths (the SDK default): a Start/Stop-only gate still let 7
+        // crop and 5 full-photo wrong reads through (mostly 8-digit prefixes
+        // cut at the aim-box or photo edge); this gate leaves 0. True reads
+        // at 9-digit bounds unchanged; open lengths lose the 2 frame-cut crops
+        // in guardFailure().
+        if (const char* why = guardFailure(kv.second.guard, (int)kv.first.first.size())) {
+            if (g_debug)
+                printf("[dbg] guard reject %s (%s; start=%.2f stop=%.2f quiet=%.2f)\n",
+                       kv.first.first.c_str(), why, kv.second.guard.start,
+                       kv.second.guard.stop, kv.second.guard.quiet);
+            continue;
+        }
         float avg = kv.second.score / kv.second.n;
         if (kv.second.n > out.votes ||
             (kv.second.n == out.votes && avg > out.avgScore)) {
@@ -1036,15 +1185,20 @@ RoiVote voteScanlines(const std::vector<std::vector<float>>& profiles) {
 // 2x linear upsample of a scanline profile at quarter-sample phase
 // (outputs at i-0.25 and i+0.25). No output duplicates an input, so every
 // output pair straddles a true source edge — the 1D analogue of the +1px
-// shift that keeps the 2D NN retry from phase-locking.
-void upsampleProfile2x(std::vector<float>& pr) {
-    const int n = (int)pr.size();
-    std::vector<float> up((size_t)n * 2);
-    for (int i = 0; i < n; ++i) {
-        const float l = pr[i > 0 ? i - 1 : 0], c = pr[i], r = pr[i + 1 < n ? i + 1 : n - 1];
-        up[2 * i] = 0.75f * c + 0.25f * l;
-        up[2 * i + 1] = 0.75f * c + 0.25f * r;
-    }
+// shift that keeps the 2D NN retry from phase-locking. The decode samples
+// [0, n) and the verification tail are upsampled separately, so the decode
+// part is identical to upsampling it alone.
+void upsampleProfile2x(std::vector<float>& pr, int n) {
+    std::vector<float> up(pr.size() * 2);
+    auto run = [&](int a, int b) {
+        for (int i = a; i < b; ++i) {
+            const float l = pr[i > a ? i - 1 : a], c = pr[i], r = pr[i + 1 < b ? i + 1 : b - 1];
+            up[2 * i] = 0.75f * c + 0.25f * l;
+            up[2 * i + 1] = 0.75f * c + 0.25f * r;
+        }
+    };
+    run(0, n);
+    run(n, (int)pr.size());
     pr.swap(up);
 }
 
@@ -1095,29 +1249,32 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
     float minModuleSeen = 0;  // for the small-module upscale trigger below
     bool sawCandidate = false;  // any checksum-valid scanline read, any ROI
     // Scanlines of failed small-module ROIs, moved here for the 1D retry.
-    std::vector<std::vector<std::vector<float>>> retryProfiles;
+    std::vector<RoiScanlines> retryScans;
     for (int ri = 0; ri < nrois; ++ri) {
         const Rect& roi = rois[ri];
         if (g_debug) printf("[dbg] trying ROI %d x=[%d,%d] y=[%d,%d]\n",
                             ri, roi.x0, roi.x1, roi.y0, roi.y1);
 
-        // Collect profiles: averaged + several rows.
+        // Collect profiles: averaged + several rows, each with its tail.
+        RoiScanlines scan;
+        scan.n = roi.x1 - roi.x0;
         std::vector<float> avg;
         averageProfile(gray, width, roi, avg);
+        appendVerifyTail(gray, width, roi, -1, avg);
         int bandH = roi.y1 - roi.y0;
         int nLines = std::min(kMaxScanlines, 1 + bandH / 8);
-        std::vector<std::vector<float>> profiles;
-        profiles.reserve(nLines + 1);
-        profiles.push_back(std::move(avg));
+        scan.lines.reserve(nLines + 1);
+        scan.lines.push_back(std::move(avg));
         for (int i = 0; i < nLines; ++i) {
             int y = roi.y0 + (bandH * (i + 1)) / (nLines + 1);
             std::vector<float> pr;
             extractProfile(gray, width, roi, y, pr);
-            profiles.push_back(std::move(pr));
+            appendVerifyTail(gray, width, roi, y, pr);
+            scan.lines.push_back(std::move(pr));
         }
 
         const int policyRejectedBefore = t_policyRejected;
-        const RoiVote v = voteScanlines(profiles);
+        const RoiVote v = voteScanlines(scan);
         if (v.anyCandidate || t_policyRejected != policyRejectedBefore) sawCandidate = true;
         if (v.minModule > 0.5f &&
             (minModuleSeen <= 0 || v.minModule < minModuleSeen))
@@ -1131,8 +1288,11 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
                                 ri, res.digits.c_str(), v.avgScore);
             return res;
         }
-        if (v.minModule > 0.5f && v.minModule < kProfileRetryMaxModule)
-            retryProfiles.push_back(std::move(profiles));
+        // The 1D retry runs at the top level only: inside the 2D recursion it
+        // compounds to 4x interpolation and bred phantoms (shelf set: an
+        // unreadable tag's 022000046) at the cost of one far read.
+        if (allowUpscale && v.minModule > 0.5f && v.minModule < kProfileRetryMaxModule)
+            retryScans.push_back(std::move(scan));
         if (g_debug) printf("[dbg] ROI %d: no decode\n", ri);
     }
     // Every ROI failed. Small-module retry, 1D: re-vote each small-module
@@ -1146,9 +1306,10 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
     // Shelf set, MOD1010 + 9 digits (with the length skip and policy
     // evidence above): near 118 -> 124, far 88 -> 126, still 116 -> 123 of
     // 141, zero new wrong reads; barcode-free clutter mean 1.5 -> 2.5ms.
-    for (auto& profiles : retryProfiles) {
-        for (auto& pr : profiles) upsampleProfile2x(pr);
-        const RoiVote v = voteScanlines(profiles);
+    for (auto& scan : retryScans) {
+        for (auto& pr : scan.lines) upsampleProfile2x(pr, scan.n);
+        scan.n *= 2;
+        const RoiVote v = voteScanlines(scan);
         if (v.votes > 0) {
             res.ok = true;
             res.digits = v.best.first;

@@ -87,9 +87,14 @@ Grayscale frame (row-major bytes via JNI)
       (uniform pitch); off-grid checksum-valid hypotheses are dropped
     → checksum gate: host policy pushed down (only that scheme competes);
       NONE = MOD10/MOD11/MOD1010/MOD1110 in order; + ≥2-vote agreement
+  → guard gate per vote key: Start / strict Stop / 6-module trailing quiet
+    zone, each the best over agreeing scanlines. Scanlines carry a
+    verification tail past the ROI; a quiet zone cut by the frame edge
+    rejects the read unless the length bounds forbid a longer symbol
   → winner = most votes, ties by average score
-  → 1D 2x profile retry if every ROI failed: re-vote each failed ROI with
-    module <4.5px on its own scanlines upsampled 2x (no new ROI search)
+  → 1D 2x profile retry if every ROI failed (top level only): re-vote each
+    failed ROI with module <4.5px on its own scanlines upsampled 2x (no new
+    ROI search)
   → single 2x NN upscale retry if still nothing, on a small frame (<800px
     edge) or on small modules with checksum-valid evidence
   → Kotlin: re-validate reported digits strictly under `msiChecksumPolicy`,

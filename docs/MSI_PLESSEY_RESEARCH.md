@@ -250,8 +250,9 @@ outvote it. Superseded by §8.3 before ever shipping. Leave it dead.
 2. Per ROI: one averaged profile + up to `kMaxScanlines`=9 individual rows.
 3. `findBars` (prominent luminance minima) → `filterBars` (drop
    sub-1.8-module splits) → module = median bar spacing / 3.
-4. `decodeByDigitTemplates`: for each of the first 5 bars as start and each
-   plausible digit count, anchor 12-module windows at bar centers and
+4. `decodeByDigitTemplates`: for every bar as start (a former 5-bar cap
+   was the dominant miss behind left-side clutter) and each plausible digit
+   count, anchor 12-module windows at bar centers and
    correlate against Gaussian-blurred digit templates (two width hypotheses
    × ±0.5-module search) at three blur sigmas (0.35/0.6/0.95 × module),
    pooled. Blurred templates are cached thread-locally per sigma on exact
@@ -276,9 +277,40 @@ outvote it. Superseded by §8.3 before ever shipping. Leave it dead.
    otherwise MOD10 → MOD11 → MOD1010 → MOD1110, first hit wins.
    ≥`kMinVotesCheck`=2 agreeing scanline profiles required, 6 when the
    module is below 2.5px (NONE is disabled: too many false positives).
-6. Failure path only, two retries in order. (a) 1D: every failed ROI with
+6. Guard gate (`guardEvidence` → `guardFailure`), applied per vote key
+   before the winner is picked. Each element is the best over the key's
+   agreeing scanlines, because blur and clutter weaken single lines and a
+   one-line conjunctive rule lost true reads:
+   - Start ≥0.6: the Start space minus its wide bar, relative to the
+     digit-field contrast. With the Start bar uncapped, phantoms score
+     ≤0.49 and true reads ≥0.76.
+   - Strict Stop ≥0.25 (if measured): min(Stop spaces) − max(Stop bars). A
+     mean-based Stop let 180° reversed reads through at about 1.0; the strict
+     form scores them ≤0.08, while true reads score ≥0.41.
+   - Trailing quiet zone ≥0.3 (if measured): the darkest of modules 4..9
+     after the Stop, minus the bar reference. Digits 0–7 begin with `1001`
+     (the Stop pattern), so a truncated read lands on a perfect fake Stop. A
+     real bar always follows within about 3 modules. The two measurable
+     truncations scored ≤−1.34, while true reads score ≥0.52.
+   - Frame cut: the ROI has no right padding, so every scanline carries a
+     verification tail of max(48 px, ROI/6) beyond it, clamped at the frame
+     edge (`appendVerifyTail`). Decoding sees only `[0, n)`; the 1D retry
+     upsamples the two parts separately. If the tail is clamped before the
+     quiet zone, the read is rejected unless the length bounds forbid a
+     longer symbol. With open lengths (the SDK default), a tag cut by the
+     photo or aim-box edge stays silent rather than emitting its
+     MOD10-valid prefix.
+
+   Shelf set, open lengths, compared with a Start/Stop-only gate: full-photo
+   MOD10/NONE wrong reads 5 → 0 (the 5-bar-cap build read none of those
+   photos) and live/still crop MOD10 wrong reads 7 → 0. At
+   9-digit bounds no true read is lost. Open lengths lose 2 tight still crops
+   whose quiet zone is cut, as intended.
+7. Failure path only, two retries in order. (a) 1D: every failed ROI with
    module <4.5px (`kProfileRetryMaxModule`) re-votes its own scanlines
-   upsampled 2x at quarter-sample phase; no new ROI search, same vote gate.
+   upsampled 2x at quarter-sample phase; no new ROI search, same vote and
+   guard gates. Top level only: inside the 2D recursion it compounds to 4x
+   interpolation and bred a phantom on an unreadable tag.
    (b) 2D: one NN 2x upscale retry, single depth, +1px source
    shift so the xstep=2 sampler sees true boundaries. Fires on small frames
    (`kUpscaleMaxLongEdge`=800) or on small observed modules (<3.5px, long
@@ -287,7 +319,7 @@ outvote it. Superseded by §8.3 before ever shipping. Leave it dead.
    without that evidence, text clutter triggered it on every miss frame.
    Bilinear and per-ROI 2D upscales were measured and rejected: re-detecting
    ROIs on the upscaled frame bred confident phantoms (shelf set, MOD1010).
-7. Kotlin (`MsiNativeDecoder`): re-validate strictly under
+8. Kotlin (`MsiNativeDecoder`): re-validate strictly under
    `msiChecksumPolicy`, strip check digits, reject degenerate
    single-repeated-digit payloads (blank areas decode as validating zeros).
 
@@ -324,7 +356,8 @@ so the repo pins runtime synthetics + honest-NotFound gates, never
 luck-decided reads. Revisit ONLY on a real-world misparse with this
 signature (leading/trailing digit drop on a crisp gallery import): the
 principled fix would be structural guard verification around the winning
-window, never another score tiebreak.
+window, never another score tiebreak. (§8.3 step 6 now gates real
+truncations this way; the crisp synthetic tie itself was not re-tested.)
 
 ## 9. Photo-trip handoff: ground-truth + fixture protocol
 
@@ -398,6 +431,24 @@ miss frames 3.1 → 0.4 ms after the upscale gate. Ablations (MOD1010
 pushed down): single sigma −8 ok / −3 wrong but 2.25× faster; dropping the
 6-vote small-module gate +2 wrong; dropping the module-triggered upscale
 −3 ok.
+
+### 10.1 Shelf-tag truth set (176 tags, aim-box live + still)
+
+A later pass rebuilt the truth per tag (176 tags with verified SKUs;
+one, `0471-4`, is unreadable even by a commercial scanner and is only scored
+for silence). It drives the live aim box near and far plus the still path
+with 9-digit bounds, and also runs the full photos with open lengths.
+Ok / wrong per mode (near / far / still):
+
+| Build | MOD10 | MOD1010 | NONE |
+|---|---|---|---|
+| grid-residual gate (f02fffc) | 124/125/123, wrong 2/1/3 | 126/126/124, wrong 0/0/1 | 123/119/122, wrong 2/2/5 |
+| + uncapped Start, guard gate | **141/135/138, wrong 0** | **141/135/138, wrong 0** | 140/132/137, wrong 0/2/0 |
+
+The two NONE far wrong reads are checksum-less digit errors with strong
+guards, inherent to `NONE`. Full photos with open lengths: MOD10 52 → 62
+ok and MOD1010 52 → 64, both with 0 wrong. There are 0 false reads on
+3430 clutter frames, and clutter latency stays within 0.1 ms.
 
 Known limitation: full 12 MP stills through the SDK path read 0–4 of 110
 for every variant — `DownscaleTransform` caps the long edge at 1280 before

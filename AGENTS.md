@@ -47,7 +47,8 @@ emulator image and local fixture photos.
   Mod10 over (item + first check), 39 bars. Item 0115783 → `011578333`.
   Every prefix of such a codeword is Mod10-valid and Luhn/Mod11 ignore
   leading zeros, so 8-digit truncations and dropped leading zeros validate.
-  Hosts scanning these tags should use `MsiChecksumPolicy.MOD_10_10`.
+  Hosts scanning these tags should use `MsiChecksumPolicy.MOD_10_10` with
+  `msiSymbolLengths` 9..9.
 - The host policy is pushed into native candidate selection
   (`msi::decode(..., required)` ← JNI `nativeDecode(..., requiredPolicy)` ←
   `MsiNativeDecoder.nativePolicyCode`). The JNI codes are pinned by
@@ -61,8 +62,9 @@ emulator image and local fixture photos.
   checksum (valid under another scheme) count as MSI evidence for the 2D
   small-module retry trigger — dropping that evidence cost far-field reads.
 - Failure-path retries run in order: 1D 2x profile retry (re-votes failed
-  ROIs with module <4.5px, no new ROI search), then the 2D NN 2x frame
-  retry. 2D bilinear and per-ROI 2D upscales were measured and rejected:
+  ROIs with module <4.5px, no new ROI search; top level only, since inside
+  the 2D recursion it compounds to 4x and bred phantoms), then the 2D NN 2x
+  frame retry. 2D bilinear and per-ROI 2D upscales were measured and rejected:
   they re-detect ROIs and bred confident phantoms.
 - With 1-digit checksums, any mechanism that multiplies validation
   lotteries (more hypotheses, derived variants, single-vote acceptance)
@@ -73,6 +75,19 @@ emulator image and local fixture photos.
   purpose so off-grid MSI-shaped hypotheses still feed the retry trigger.
   Vote-dominance, template-margin, source-module vote rules and retry vote
   floors were measured and rejected: none separated phantoms from true reads.
+- Every bar may host a Start hypothesis (a 5-bar cap was the dominant miss
+  behind left-side clutter), so the guard gate (`guardFailure`) is what
+  keeps phantoms out. A vote key that meets the vote count must also show
+  Start ≥0.6, strict Stop ≥0.25 and a 6-module trailing quiet zone ≥0.3.
+  Each value is the best over the key's agreeing scanlines; requiring all
+  three on one line lost true reads.
+- Digits 0–7 begin with the Stop pattern `1001`, so a truncated read sits on
+  a perfect fake Stop; only the quiet zone after it exposes the cut.
+  Scanlines carry a verification tail past the ROI (`appendVerifyTail`;
+  decode still sees only `[0, n)`). Where the tail hits the frame edge the
+  quiet zone is unseen, and the read is rejected unless the length bounds
+  forbid a longer symbol. Open lengths (the SDK default) therefore reject
+  symbols touching the photo or aim-box edge, by design.
 - Fixture truth labels in `shelfSuite`/`DeviceMsiTest` that are 8-digit
   `MOD_10` may be truncations of 9-digit tags (research doc §6 caveat).
 
