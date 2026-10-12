@@ -74,3 +74,15 @@ diff <(grep -E '^(PASS|FAIL)' /tmp/base.txt) <(grep -E '^(PASS|FAIL)' /tmp/fixed
 ```
 
 Only `BENCH` timings (and the fixed close-up case) should differ.
+
+## JNI smoke test
+
+`jni-smoke/run.sh` builds `libmsi_decoder` for the host and drives the JNI
+glue in `msi_jni.cpp` from a real JVM (Robolectric unit tests cannot load the
+`.so`, and this harness calls C++ directly): direct-buffer capacity, row-stride
+and unpadded-last-row handling, rejection of heap/short/out-of-plane inputs,
+the `digits|policy|votes|relativeRotation` result format. The Java stubs under
+`jni-smoke/src` mirror the Kotlin `external fun` signatures of `NativeFrame`
+and `MsiNativeDecoder` — update both together (JNI binds by name only, so a
+signature drift is silent undefined behaviour, not a link error). Needs a JDK
+(`JAVA_HOME`, else Android Studio's JBR) and an Android NDK (for `jni.h`).

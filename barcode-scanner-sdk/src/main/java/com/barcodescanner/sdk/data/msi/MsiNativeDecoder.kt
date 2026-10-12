@@ -1,6 +1,7 @@
 package com.barcodescanner.sdk.data.msi
 
 import android.graphics.Bitmap
+import com.barcodescanner.sdk.data.frame.LumaFrame
 import com.barcodescanner.sdk.domain.decoder.BarcodeDecoder
 import com.barcodescanner.sdk.domain.decoder.DecodeOutcome
 import com.barcodescanner.sdk.domain.decoder.DecoderException
@@ -12,6 +13,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.nio.ByteBuffer
 
 /**
  * JNI wrapper for the clean-room C++ MSI Plessey decoder
@@ -71,6 +73,15 @@ class MsiNativeDecoder(
         requiredPolicy: Int,
     ): String?
 
+    private external fun nativeDecodeLuma(
+        gray: ByteBuffer,
+        width: Int,
+        height: Int,
+        maxOrientations: Int,
+        scanTopFraction: Float,
+        requiredPolicy: Int,
+    ): String?
+
     private val requiredNativePolicy: Int = nativePolicyCode(checksumPolicy)
 
     // Single-path temporal voting state (see [MsiVoteGate]; synchronized).
@@ -108,82 +119,8 @@ class MsiNativeDecoder(
                     DecoderException("MSI native library not loaded", e),
                     recoverable = false,
                 )
-            } ?: run {
-                // Native miss: reset temporal voting.
-                voteGate.reset()
-                return@withContext DecodeOutcome.NotFound("MSI native: no decode")
             }
-            // Format: "digits|policy|votes"
-            val parts = raw.split("|")
-            if (parts.size != 3) {
-                voteGate.reset()
-                return@withContext DecodeOutcome.NotFound("MSI native: bad result format")
-            }
-            val full = parts[0]
-            val nativePolicy = parts[1]
-            if (full.length < minPayloadDigits) {
-                voteGate.reset()
-                return@withContext DecodeOutcome.NotFound("MSI native: payload too short")
-            }
-            // Host-policy enforcement: re-validate the reported digits under
-            // the configured scheme (see [checksumPolicy]). Rejects foreign
-            // schemes; double-check codewords still pass their own config.
-            val validation = MsiChecksumValidator.validate(full, checksumPolicy)
-            if (!validation.valid) {
-                voteGate.reset()
-                return@withContext DecodeOutcome.NotFound(
-                    "MSI native: rejected under $checksumPolicy (native: $nativePolicy)",
-                )
-            }
-            val validated = validation.payloadWithoutChecksum
-            // Degenerate reads (blank/shadow areas decode as all-same-digit
-            // windows that still checksum-validate, e.g. all-zeros) are
-            // withheld: a real payload is never a single repeated digit.
-            // Documented tradeoff — a hypothetical all-same-digit label would
-            // miss — vastly preferable to emitting zeros from empty areas.
-            if (validated.toSet().size < 2) {
-                voteGate.reset()
-                return@withContext DecodeOutcome.NotFound("MSI native: degenerate payload")
-            }
-            // stripChecksum=false still validates under the policy (precision
-            // gate stays) but emits the full codeword WITH check digits and
-            // reports checksumStripped=false; length floors then count codeword
-            // digits (see ScannerConfig.msiStripChecksum).
-            val (payload, stripped) = if (stripChecksum) {
-                validated to (validated.length != full.length)
-            } else {
-                full to false
-            }
-            if (payload.length < minPayloadDigits) {
-                voteGate.reset()
-                return@withContext DecodeOutcome.NotFound("MSI native: stripped payload too short")
-            }
-            // Temporal voting: require the same payload across consecutive
-            // observations before emitting. Transient false positives
-            // (motion-blur phantoms) rarely repeat; true barcodes do.
-            // The gate auto-resets on confirmation, so an unchanged value
-            // does not re-emit until it changes and returns.
-            if (!voteGate.observe(payload)) {
-                val (_, n) = voteGate.progress()
-                return@withContext DecodeOutcome.NotFound(
-                    "MSI native: awaiting confirmation ($n/${voteGate.required})",
-                )
-            }
-            DecodeOutcome.Success(
-                listOf(
-                    DecodedBarcode(
-                        rawValue = payload,
-                        symbology = Symbology.MSI_PLESSEY,
-                        confidence = 1.0f,
-                        engineName = NAME,
-                        checksumStripped = stripped,
-                        // Same convention as ML Kit / zxing-cpp: a read off a
-                        // 180°-relative candidate was decoded after 180°
-                        // re-orientation. (Previously always false for MSI.)
-                        isUpsideDown = frame.isUpsideDownCandidate,
-                    ),
-                ),
-            )
+            acceptNativeRead(raw, upsideDown = frame.isUpsideDownCandidate)
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
@@ -192,6 +129,127 @@ class MsiNativeDecoder(
             android.util.Log.w(NAME, "decode failed: ${t.javaClass.simpleName}: ${t.message}")
             DecodeOutcome.Error(DecoderException("MSI native decode failed", t), recoverable = true)
         }
+    }
+
+    /**
+     * Live/still fast path: decodes the shared prepared [LumaFrame] in place
+     * (no pixel copy, no Kotlin conversion). Orientation attempts and the
+     * band-search window come from the frame; the winning relative rotation
+     * reports 180 as [DecodedBarcode.isUpsideDown]. Same validation, vote
+     * gate and payload contract as [decode].
+     */
+    internal suspend fun decodeLuma(frame: LumaFrame): DecodeOutcome = withContext(dispatcher) {
+        try {
+            if (!nativeAvailable) {
+                return@withContext DecodeOutcome.NotFound("MSI native library not loaded")
+            }
+            val raw = try {
+                nativeDecodeLuma(
+                    frame.buffer,
+                    frame.width,
+                    frame.height,
+                    frame.maxOrientations,
+                    frame.scanTopFraction,
+                    requiredNativePolicy,
+                )
+            } catch (e: UnsatisfiedLinkError) {
+                return@withContext DecodeOutcome.Error(
+                    DecoderException("MSI native library not loaded", e),
+                    recoverable = false,
+                )
+            }
+            acceptNativeRead(raw, upsideDown = false)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (t: Throwable) {
+            android.util.Log.w(NAME, "decodeLuma failed: ${t.javaClass.simpleName}: ${t.message}")
+            DecodeOutcome.Error(DecoderException("MSI native decode failed", t), recoverable = true)
+        }
+    }
+
+    /**
+     * Shared acceptance tail for both native entry points. [raw] is
+     * `digits|policy|votes` (bitmap path) or `digits|policy|votes|relRot`
+     * (luma path; relRot 180 overrides [upsideDown]); null is a native miss.
+     * Every rejection resets the vote gate.
+     */
+    internal fun acceptNativeRead(raw: String?, upsideDown: Boolean): DecodeOutcome {
+        if (raw == null) {
+            // Native miss: reset temporal voting.
+            voteGate.reset()
+            return DecodeOutcome.NotFound("MSI native: no decode")
+        }
+        val parts = raw.split("|")
+        if (parts.size !in 3..4) {
+            voteGate.reset()
+            return DecodeOutcome.NotFound("MSI native: bad result format")
+        }
+        val full = parts[0]
+        val nativePolicy = parts[1]
+        val isUpsideDown = if (parts.size == 4) parts[3] == "180" else upsideDown
+        if (full.length < minPayloadDigits) {
+            voteGate.reset()
+            return DecodeOutcome.NotFound("MSI native: payload too short")
+        }
+        // Host-policy enforcement: re-validate the reported digits under
+        // the configured scheme (see [checksumPolicy]). Rejects foreign
+        // schemes; double-check codewords still pass their own config.
+        val validation = MsiChecksumValidator.validate(full, checksumPolicy)
+        if (!validation.valid) {
+            voteGate.reset()
+            return DecodeOutcome.NotFound(
+                "MSI native: rejected under $checksumPolicy (native: $nativePolicy)",
+            )
+        }
+        val validated = validation.payloadWithoutChecksum
+        // Degenerate reads (blank/shadow areas decode as all-same-digit
+        // windows that still checksum-validate, e.g. all-zeros) are
+        // withheld: a real payload is never a single repeated digit.
+        // Documented tradeoff — a hypothetical all-same-digit label would
+        // miss — vastly preferable to emitting zeros from empty areas.
+        if (validated.toSet().size < 2) {
+            voteGate.reset()
+            return DecodeOutcome.NotFound("MSI native: degenerate payload")
+        }
+        // stripChecksum=false still validates under the policy (precision
+        // gate stays) but emits the full codeword WITH check digits and
+        // reports checksumStripped=false; length floors then count codeword
+        // digits (see ScannerConfig.msiStripChecksum).
+        val (payload, stripped) = if (stripChecksum) {
+            validated to (validated.length != full.length)
+        } else {
+            full to false
+        }
+        if (payload.length < minPayloadDigits) {
+            voteGate.reset()
+            return DecodeOutcome.NotFound("MSI native: stripped payload too short")
+        }
+        // Temporal voting: require the same payload across consecutive
+        // observations before emitting. Transient false positives
+        // (motion-blur phantoms) rarely repeat; true barcodes do.
+        // The gate auto-resets on confirmation, so an unchanged value
+        // does not re-emit until it changes and returns.
+        if (!voteGate.observe(payload)) {
+            val (_, n) = voteGate.progress()
+            return DecodeOutcome.NotFound(
+                "MSI native: awaiting confirmation ($n/${voteGate.required})",
+            )
+        }
+        return DecodeOutcome.Success(
+            listOf(
+                DecodedBarcode(
+                    rawValue = payload,
+                    symbology = Symbology.MSI_PLESSEY,
+                    confidence = 1.0f,
+                    engineName = NAME,
+                    checksumStripped = stripped,
+                    // Same convention as ML Kit / zxing-cpp: a read off a
+                    // 180°-relative orientation was decoded after 180°
+                    // re-orientation.
+                    isUpsideDown = isUpsideDown,
+                ),
+            ),
+        )
     }
 
     // withContext(dispatcher) already checks cancellation on entry; this is a
