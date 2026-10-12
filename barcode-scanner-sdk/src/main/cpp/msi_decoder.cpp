@@ -801,8 +801,12 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
                 float gm = (v.sIdx + 1 < nb)
                                ? guardMargin(p, n, fs, ndv, module)
                                : 0;
+                // No score epsilon: derivations compete on equal footing.
+                // An earlier -0.01 penalty systematically hid true
+                // prepend-0 reads behind their truncated originals on ties
+                // (verified 026769141 lost to 26769141 on fit+score ties).
                 if (nall < cap) {
-                    all[nall++] = {v.t, all[i].score - 0.01f, pv,
+                    all[nall++] = {v.t, all[i].score, pv,
                                    checksumStrength(v.t), v.need, v.sIdx, gm};
                 }
             }
