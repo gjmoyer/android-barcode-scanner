@@ -47,7 +47,11 @@ constexpr int kMinDigits = 7;   // shelf SKUs are 7-digit + 1-2 checks; shorter
                               // candidates are texture false positives that pass
                               // Mod10 by 1-in-10 chance (verified vs commercial
                               // truth 2026-10-11: 75 short FPs, zero real <7).
-constexpr int kMaxDigits = 16;
+constexpr int kMaxDigits = 10;   // real MSI payloads + checks top out here
+                               // (7-digit SKU + 2 checks = 9; meat 6+2 = 8).
+                               // Longer "valid" strings are template noise
+                               // that happened to pass checks (verified FPs
+                               // with 11-15 digits on rails).
 constexpr int kMinVotesNone = 3;     // NONE policy needs more agreement
 constexpr int kMinVotesCheck = 2;    // checksum'd policies need 2
 // Fraction of the frame height skipped at the top during ROI band search.
@@ -65,6 +69,7 @@ struct Candidate {
     std::string digits;
     ChecksumPolicy policy;
     float score;  // average template correlation (higher = better)
+    float module;  // bar-module size in profile pixels for this observation
 };
 
 const char* policyNameImpl(ChecksumPolicy p) {
@@ -987,7 +992,7 @@ void decodeProfile(const float* p, int n,
         if (g_debug) printf("[dbg] template digits: %s (score=%.3f)\n", digits.c_str(), score);
         ChecksumPolicy pol;
         if (!validateChecksum(digits, pol).empty()) {
-            cands.push_back({digits, pol, score});
+            cands.push_back({digits, pol, score, module});
         } else if (g_debug) {
             printf("[dbg] checksum failed for %s\n", digits.c_str());
         }
@@ -1038,8 +1043,9 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
         }
 
         // Vote within this ROI's scanlines.
-        // Key: (digits, policy). Value: (vote count, sum of scores).
-        std::map<std::pair<std::string, ChecksumPolicy>, std::pair<int, float>> votes;
+        // Key: (digits, policy). Value: (vote count, score sum, module sum).
+        struct Votes { int n = 0; float score = 0; float mod = 0; };
+        std::map<std::pair<std::string, ChecksumPolicy>, Votes> votes;
         for (auto& pr : profiles) {
             std::vector<Candidate> cands;
             decodeProfile(pr.data(), (int)pr.size(), cands);
@@ -1052,29 +1058,38 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
             for (size_t i = 0; i < cands.size(); ) {
                 size_t j = i + 1;
                 float bestScore = cands[i].score;
+                float bestMod = cands[i].module;
                 while (j < cands.size() && cands[j].digits == cands[i].digits &&
                        cands[j].policy == cands[i].policy) {
-                    bestScore = std::max(bestScore, cands[j].score);
+                    if (cands[j].score > bestScore) {
+                        bestScore = cands[j].score;
+                        bestMod = cands[j].module;
+                    }
                     ++j;
                 }
                 auto key = std::make_pair(cands[i].digits, cands[i].policy);
-                votes[key].first++;
-                votes[key].second += bestScore;
+                votes[key].n++;
+                votes[key].score += bestScore;
+                votes[key].mod += bestMod;
                 i = j;
             }
         }
         // Pick winner: most votes; tie-break by higher average score
         // (NOT by length — longer false positives were winning).
+        // Small-module reads (<2.5px) need 6 agreeing scanlines instead of
+        // 2: at ~2px/module quantization noise dominates and confident
+        // wrong values outvote truth 4-to-1 (verified 0115783-hand).
         int bestV = 0;
         float bestAvg = -1e9f;
         std::pair<std::string, ChecksumPolicy> best;
         for (auto& kv : votes) {
-            int need = kMinVotesCheck;  // NONE disabled, so always 2
-            if (kv.second.first < need) continue;
-            float avg = kv.second.second / kv.second.first;
-            if (kv.second.first > bestV ||
-                (kv.second.first == bestV && avg > bestAvg)) {
-                bestV = kv.second.first;
+            float avgMod = kv.second.mod / kv.second.n;
+            int need = (avgMod < 2.5f) ? 6 : kMinVotesCheck;
+            if (kv.second.n < need) continue;
+            float avg = kv.second.score / kv.second.n;
+            if (kv.second.n > bestV ||
+                (kv.second.n == bestV && avg > bestAvg)) {
+                bestV = kv.second.n;
                 bestAvg = avg;
                 best = kv.first;
             }
