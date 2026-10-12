@@ -92,10 +92,11 @@ internal class DefaultBarcodeScanner(
      * One-shot still: converted once natively (gray, upright per
      * [ScanFrame.effectiveRotation], no contrast stretch), then decoded like
      * a live frame but with [ScannerConfig.maxOrientationsTried] MSI orientations
-     * (gallery photos arrive in any orientation) and the full-frame band
-     * window. Conversion runs on [Dispatchers.Default] outside the decode
-     * timeout. Without the native library (32-bit x86) the result is a
-     * [ScanResult.Failure].
+     * (gallery photos arrive in any orientation), the full-frame band
+     * window and an MSI retry through the contrast stretch when every
+     * orientation misses ([LumaFrame.stretchRetry]). Conversion runs on
+     * [Dispatchers.Default] outside the decode timeout. Without the native
+     * library (32-bit x86) the result is a [ScanResult.Failure].
      */
     override suspend fun scanFrame(frame: ScanFrame): ScanResult {
         check(!closed.get()) { "Scanner is closed" }

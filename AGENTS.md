@@ -76,6 +76,13 @@ emulator image and local fixture photos.
   extent, and don't use the structure tensor for the angle (biased about 3°):
   all were measured and lost reads.
   Measure tilt with rotated crops, not only the upright set.
+- Stills retry stretched (`FrameOptions.stretchRetry`, set only by
+  `NativeFrame.prepareStill`): `decodeFrame` sweeps every orientation
+  plain, then once more through the 2%/98% contrast stretch. Never stretch
+  stills up front (a whole-photo stretch clips bars that already read), and
+  keep it a retry so existing reads and orientations cannot change. Live
+  aim-box crops are already stretched; never enable it on the live path,
+  where nearly every frame misses and would pay a second sweep.
 - With 1-digit checksums, any mechanism that multiplies validation
   lotteries (more hypotheses, derived variants, single-vote acceptance)
   must be gated by independent multi-scanline agreement.

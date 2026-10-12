@@ -364,7 +364,22 @@ outvote it. Superseded by §8.3 before ever shipping. Leave it dead.
    without that evidence, text clutter triggered it on every miss frame.
    Bilinear and per-ROI 2D upscales were measured and rejected: re-detecting
    ROIs on the upscaled frame bred confident phantoms (shelf set, MOD1010).
-8. Kotlin (`MsiNativeDecoder`): re-validate strictly under
+8. Stills only, outside `msi::decode`: when every orientation misses,
+   `decodeFrame` sweeps them again through the SDK's 2%/98% contrast
+   stretch (`FrameOptions.stretchRetry`, set by `NativeFrame.prepareStill`).
+   Stills are not stretched up front, because a whole-photo stretch clipped
+   bars that already read (7 of 43 full-photo reads lost). Washed-out or
+   soft tags read only after it: `0481-2` spans 92 gray levels, `0533-1`
+   has almost no edge over 24 levels. Run as a retry, it cannot lose a
+   read or change the orientation. On the shelf set it adds 4 still crops
+   and 4–6 full photos, with no new wrong reads at 9 digits. It also gains
+   3–8 rotated crops per angle. It doubles only the time of a still that
+   reads nothing: the full-photo median went from 117 to 241 ms on the host,
+   within the 1500 ms decode budget. The photo's stretch range did not
+   separate helped from unhelped photos (177–237 levels in both groups), so
+   there is no skip threshold. Live aim-box crops are stretched up front
+   and never retry.
+9. Kotlin (`MsiNativeDecoder`): re-validate strictly under
    `msiChecksumPolicy`, strip check digits, reject degenerate
    single-repeated-digit payloads (blank areas decode as validating zeros).
 
@@ -490,13 +505,14 @@ Ok / wrong per mode (near / far / still):
 | grid-residual gate (f02fffc) | 124/125/123, wrong 2/1/3 | 126/126/124, wrong 0/0/1 | 123/119/122, wrong 2/2/5 |
 | + uncapped Start, guard gate | 141/135/138, wrong 0 | 141/135/138, wrong 0 | 140/132/137, wrong 0/2/0 |
 | + no trailing-bar floor | 147/139/143, wrong 0 | 147/139/143, wrong 0 | 146/136/142, wrong 0/2/0 |
-| + skew retry | **148/140/144, wrong 0** | **148/140/144, wrong 0** | 147/137/143, wrong 0/2/0 |
+| + skew retry | 148/140/144, wrong 0 | 148/140/144, wrong 0 | 147/137/143, wrong 0/2/0 |
+| + still stretch retry | **148/140/148, wrong 0** | **148/140/148, wrong 0** | 147/137/147, wrong 0/2/0 |
 
 The two NONE far wrong reads are checksum-less digit errors with strong
 guards, inherent to `NONE`. At open lengths NONE adds a third
 (`0504-3` far, a MOD11-valid blur misread on the 2x-upscaled frame). Full
-photos with open lengths: MOD10 52 → 62 → 82 → 83 ok, MOD1010
-52 → 64 → 85 → 86 and NONE 62 → 78 → 79, all with 0 wrong. Unreadable tags give 0 false reads at
+photos with open lengths: MOD10 52 → 62 → 82 → 83 → 88 ok, MOD1010
+52 → 64 → 85 → 86 → 90 and NONE 62 → 78 → 79 → 85, all with 0 wrong. Unreadable tags give 0 false reads at
 9-digit bounds; at open lengths see §8.3 step 6 (cut-off tags, MOD10/NONE).
 There are 0 false reads on 3430 clutter frames. Removing the trailing-bar
 floor raised 9-digit MOD10 clutter latency from 2.5/8.0/18.3 to
@@ -516,18 +532,18 @@ in software (median-colour fill), MOD1010, 9-digit bounds:
 |---|---|---|---|---|
 | no floor (2f5406b) | 4 | 81 | 62 | 4 |
 | + skew retry | 122 | 123 | 125 | 118 |
+| + still stretch retry | 128 | 126 | 128 | 125 |
 
-Both rows have 0 wrong reads. At open lengths the rotated MOD10 wrong reads
+Every row has 0 wrong reads. At open lengths the rotated MOD10 wrong reads
 go from 6 to 5 over the four angles (mostly prefix truncations near the
-crop edge; NONE is similar). The host harness asserts the synthetic shelf
+crop edge) and stay at 5 with the stretch retry. NONE goes from 6 to 7:
+`0481-2` at +10° reads a checksum-less 8-digit fragment. The host harness asserts the synthetic shelf
 format at ±3–12° with and without text clutter (`tiltSuite`; 2f5406b missed
 12 of those 48), plus tilted text strokes that must stay silent.
 
-Scored misses left at 9-digit bounds: `0446-6` and `0481-2` (tilted; the
-skew pass finds the angle but does not decode), `0533-1` (no tilt), and
-far-only `0457-1` and `0504-4`. An earlier rotation sweep (±3/6/9°) read
-all of them except `0446-6`, so the rest look like extent or ranking
-problems rather than angle.
+Scored misses left at 9-digit bounds: far-only `0457-1` and `0504-4`. The
+still-only `0446-6`, `0481-2` and `0533-1` read with the still stretch
+retry (§8.3 step 8): they were contrast problems, not angle problems.
 
 Known limitation: full 12 MP stills through the SDK path read 0–4 of 110
 for every variant — `DownscaleTransform` caps the long edge at 1280 before

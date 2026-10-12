@@ -82,6 +82,7 @@ class MsiNativeDecoder(
         requiredPolicy: Int,
         minDigits: Int,
         maxDigits: Int,
+        stretchRetry: Boolean,
     ): String?
 
     private val requiredNativePolicy: Int = nativePolicyCode(checksumPolicy)
@@ -156,6 +157,7 @@ class MsiNativeDecoder(
                 requiredNativePolicy,
                 nativeMinDigits,
                 nativeMaxDigits,
+                frame.stretchRetry,
             )
         } catch (e: UnsatisfiedLinkError) {
             return DecodeOutcome.Error(

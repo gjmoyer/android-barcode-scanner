@@ -112,6 +112,11 @@ Grayscale frame (row-major bytes via JNI)
   localization costs). `MsiRegionAssistDecoder` (ML Kit isolation → pad +
   deskew crop → shared native decoder) stays the backup for tilts beyond
   the native skew retry's ±15°.
+- **Stills retry contrast-stretched**: `decodeFrame` tries every orientation
+  plain, then (`FrameOptions.stretchRetry`, stills only) once more through
+  the 2%/98% stretch. Stills are never stretched up front: a whole-photo
+  stretch clips bars that already read. Live aim-box crops are stretched
+  once in `prepareRegion` and never retry.
 - **One decoder instance per path**, each owning a synchronized `MsiVoteGate`,
   so ROI misses can never reset the full-frame consecutive count.
 - **Native library is optional at runtime**: `MsiNativeDecoder.nativeAvailable`

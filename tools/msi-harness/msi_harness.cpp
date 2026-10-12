@@ -645,6 +645,37 @@ static void frameSuite() {
                    msi::grayFromPixels(pv, 2, small.data()) &&
                    msi::decodeFrame(small.data(), dw, dh, so).decode.digits == "12345674");
     }
+    {
+        // 8. Still stretch retry: a soft, washed-out tag (~51 gray levels,
+        //    3x3 blur) misses plain and reads only through the 2%/98%
+        //    stretch, which decodeFrame applies after every plain
+        //    orientation failed — keeping the orientation it read under.
+        Gray soft = renderMsi("12345674", 5, 800, 300, 90, 120);
+        boxBlur(soft, 1);
+        photometric(soft, 0.2f, 0);
+        msi::FrameOptions so;
+        so.maxOrientations = 4;
+        so.scanTopFraction = 0.25f;
+        assertTrue("still soft low-contrast tag: no read without stretchRetry",
+                   !msi::decodeFrame(soft.px.data(), soft.w, soft.h, so).decode.ok);
+        so.stretchRetry = true;
+        msi::FrameResult sr = msi::decodeFrame(soft.px.data(), soft.w, soft.h, so);
+        assertTrue("still soft low-contrast tag: stretchRetry reads upright",
+                   sr.decode.ok && sr.decode.digits == "12345674" && sr.relativeRotation == 0);
+        Gray softFlip = rotateCw(soft, 180);
+        msi::FrameResult sf = msi::decodeFrame(softFlip.px.data(), softFlip.w, softFlip.h, so);
+        assertTrue("still soft low-contrast tag upside down: stretchRetry -> relativeRotation 180",
+                   sf.decode.ok && sf.decode.digits == "12345674" && sf.relativeRotation == 180);
+        // The stretched sweep never touches the caller's buffer.
+        Gray before = soft;
+        msi::decodeFrame(soft.px.data(), soft.w, soft.h, so);
+        assertTrue("still stretchRetry leaves the input buffer untouched", soft.px == before.px);
+        // A flat frame (range under 12 levels) has no stretch to retry.
+        Gray flat = soft;
+        photometric(flat, 0.04f, 0);
+        assertTrue("still flat frame: stretchRetry -> no read",
+                   !msi::decodeFrame(flat.px.data(), flat.w, flat.h, so).decode.ok);
+    }
 }
 
 // ------------------------------------------------------------ suites

@@ -109,14 +109,20 @@ struct FrameOptions {
     // DecodeOptions::minDigits.
     int minDigits = 0;
     int maxDigits = 0;
+    // When every orientation fails, retry them once more through the SDK's
+    // 2%/98% contrast stretch (see prepareRegion), computed over the whole
+    // buffer. For stills, which are never stretched up front; live aim-box
+    // crops are already stretched and leave this off.
+    bool stretchRetry = false;
 };
 
 // Orientation-aware decode of a contiguous gray buffer (stride = width).
 // Tries up to options.maxOrientations rotations relative to upright, in the
 // order 0, 180, 90, 270. Each attempt is one msi::decode() on a rotated view
 // (the upright attempt on an upright buffer reads `gray` in place; others
-// rotate into one per-call scratch buffer). First success wins. Does not
-// retain `gray`. Thread-safe.
+// rotate into one per-call scratch buffer). First success wins; with
+// options.stretchRetry a second, contrast-stretched sweep follows a miss.
+// Does not retain `gray`. Thread-safe.
 FrameResult decodeFrame(const uint8_t* gray, int width, int height, const FrameOptions& options);
 
 } // namespace msi

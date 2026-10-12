@@ -44,8 +44,9 @@ class LumaFrameTest {
     @Test
     fun lumaFrame_validatesBufferAndOptions() {
         val ok = NativeFrame.allocate(8, 4)
-        LumaFrame(ok, 8, 4)
-        LumaFrame(ok, 8, 4, maxOrientations = 4, scanTopFraction = 0.25f)
+        // Live frames never pay the still-only MSI stretch retry.
+        assertEquals(false, LumaFrame(ok, 8, 4).stretchRetry)
+        LumaFrame(ok, 8, 4, maxOrientations = 4, scanTopFraction = 0.25f, stretchRetry = true)
         assertThrows(IllegalArgumentException::class.java) {
             LumaFrame(ByteBuffer.allocate(48), 8, 4) // heap buffer
         }

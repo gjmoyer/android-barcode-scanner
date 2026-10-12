@@ -62,6 +62,36 @@ void rotateInto(const uint8_t* src, int srcStride, int w, int h, int deg,
     }
 }
 
+// Builds the 2%/98% percentile stretch table for a w x h plane (rows
+// `rowStride` apart). False (lut untouched) for flat planes whose clipped
+// range is under kMinStretchRange levels: those are left as-is.
+bool buildStretchLut(const uint8_t* origin, int rowStride, int w, int h, uint8_t lut[256]) {
+    uint32_t hist[256] = {0};
+    for (int y = 0; y < h; ++y) {
+        const uint8_t* row = origin + static_cast<size_t>(y) * static_cast<size_t>(rowStride);
+        for (int x = 0; x < w; ++x) ++hist[row[x]];
+    }
+    // Percentile bounds, float accumulation exactly as the Kotlin
+    // transform: low = last bin with cumulative share < 2%, high = last
+    // bin <= 98%.
+    const float n = static_cast<float>(static_cast<size_t>(w) * static_cast<size_t>(h));
+    float acc = 0.0f;
+    int low = 0;
+    int high = 255;
+    for (int i = 0; i < 256; ++i) {
+        acc += static_cast<float>(hist[i]) / n;
+        if (acc < kLowPercentile) low = i;
+        if (acc <= kHighPercentile) high = i;
+    }
+    if (high - low < kMinStretchRange) return false;
+    const float scale = 255.0f / static_cast<float>(high - low);
+    for (int g = 0; g < 256; ++g) {
+        const int v = static_cast<int>(static_cast<float>(g - low) * scale + 0.5f);
+        lut[g] = static_cast<uint8_t>(std::min(std::max(v, 0), 255));
+    }
+    return true;
+}
+
 int normalizeRotation(int degrees) {
     const int r = ((degrees % 360) + 360) % 360;
     return r % 90 == 0 ? r : -1;
@@ -219,34 +249,7 @@ bool prepareRegion(const LumaView& src, const Region& region, int rotationDegree
         src.data + static_cast<size_t>(r.top) * static_cast<size_t>(src.rowStride) + r.left;
     // Pass 1 (read-only, stretch only): histogram of the region.
     uint8_t lut[256];
-    bool useLut = false;
-    if (stretch) {
-        uint32_t hist[256] = {0};
-        for (int y = 0; y < h; ++y) {
-            const uint8_t* row = origin + static_cast<size_t>(y) * static_cast<size_t>(src.rowStride);
-            for (int x = 0; x < w; ++x) ++hist[row[x]];
-        }
-        // Percentile bounds, float accumulation exactly as the Kotlin
-        // transform: low = last bin with cumulative share < 2%, high = last
-        // bin <= 98%.
-        const float n = static_cast<float>(static_cast<size_t>(w) * static_cast<size_t>(h));
-        float acc = 0.0f;
-        int low = 0;
-        int high = 255;
-        for (int i = 0; i < 256; ++i) {
-            acc += static_cast<float>(hist[i]) / n;
-            if (acc < kLowPercentile) low = i;
-            if (acc <= kHighPercentile) high = i;
-        }
-        if (high - low >= kMinStretchRange) {  // flat crops are left as-is
-            const float scale = 255.0f / static_cast<float>(high - low);
-            for (int g = 0; g < 256; ++g) {
-                const int v = static_cast<int>(static_cast<float>(g - low) * scale + 0.5f);
-                lut[g] = static_cast<uint8_t>(std::min(std::max(v, 0), 255));
-            }
-            useLut = true;
-        }
-    }
+    const bool useLut = stretch && buildStretchLut(origin, src.rowStride, w, h, lut);
     // Pass 2: the only write — crop, stretch and rotate upright in one sweep.
     rotateInto(origin, src.rowStride, w, h, deg, useLut ? lut : nullptr, out);
     return true;
@@ -272,24 +275,36 @@ FrameResult decodeFrame(const uint8_t* gray, int width, int height, const FrameO
     // One scratch buffer per call (not thread-local): full-resolution stills
     // would otherwise pin ~12 MB per decode thread for the process lifetime.
     std::vector<uint8_t> scratch;
-    for (int k = 0; k < attempts; ++k) {
-        const int deg = (sensor + kOrder[k]) % 360;
-        const uint8_t* view = gray;
-        int vw = width;
-        int vh = height;
-        if (deg != 0) {
-            scratch.resize(static_cast<size_t>(width) * static_cast<size_t>(height));
-            rotateInto(gray, width, width, height, deg, nullptr, scratch.data());
-            view = scratch.data();
-            if (deg != 180) std::swap(vw, vh);
+    // One sweep over the orientations; a non-null `lut` is applied in the
+    // same pass as the rotation (so even the upright view goes to scratch).
+    const auto sweep = [&](const uint8_t* lut) {
+        for (int k = 0; k < attempts; ++k) {
+            const int deg = (sensor + kOrder[k]) % 360;
+            const uint8_t* view = gray;
+            int vw = width;
+            int vh = height;
+            if (deg != 0 || lut != nullptr) {
+                scratch.resize(static_cast<size_t>(width) * static_cast<size_t>(height));
+                rotateInto(gray, width, width, height, deg, lut, scratch.data());
+                view = scratch.data();
+                if (deg == 90 || deg == 270) std::swap(vw, vh);
+            }
+            DecodeResult r = decode(view, vw, vh, decodeOptions);
+            if (r.ok) {
+                result.decode = std::move(r);
+                result.relativeRotation = kOrder[k];
+                return true;
+            }
         }
-        DecodeResult r = decode(view, vw, vh, decodeOptions);
-        if (r.ok) {
-            result.decode = std::move(r);
-            result.relativeRotation = kOrder[k];
-            return result;
-        }
-    }
+        return false;
+    };
+    if (sweep(nullptr)) return result;
+    // Stills are never stretched up front (a whole-photo stretch clips bars
+    // that already read), but low-contrast or soft tags only read after it:
+    // retry stretched only once every plain orientation has failed, so
+    // existing reads keep their result and orientation.
+    uint8_t lut[256];
+    if (options.stretchRetry && buildStretchLut(gray, width, width, height, lut)) sweep(lut);
     return result;
 }
 

@@ -107,9 +107,11 @@ internal object NativeFrame {
      * Converts a still [bitmap] into the one upright [LumaFrame] every engine
      * reads: gray conversion (box-downscaled per [stillScale]) and rotation
      * upright by [rotationDegrees] (clockwise) in one native call. Never
-     * contrast-stretched: over a whole photo the 2%/98% stretch clips the
-     * bars (measured on real shelf tags), unlike on a small live aim-box
-     * crop. The caller's bitmap is never modified; configs the
+     * contrast-stretched up front: over a whole photo the 2%/98% stretch
+     * clips the bars (measured on real shelf tags), unlike on a small live
+     * aim-box crop. The frame is marked [LumaFrame.stretchRetry] instead, so
+     * MSI retries stretched only after a plain read fails. The caller's
+     * bitmap is never modified; configs the
      * native side cannot lock or read (HARDWARE, RGBA_F16, RGBA_1010102) are
      * first copied to ARGB_8888 by the framework and the copy is recycled.
      *
@@ -154,7 +156,7 @@ internal object NativeFrame {
         } finally {
             if (readable !== bitmap) readable.recycle()
         }
-        return LumaFrame(dst, outW, outH, maxOrientations, scanTopFraction)
+        return LumaFrame(dst, outW, outH, maxOrientations, scanTopFraction, stretchRetry = true)
     }
 
     /** Configs `msi_bitmap_jni.cpp` locks and reads directly. */

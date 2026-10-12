@@ -24,6 +24,10 @@ import java.nio.ByteBuffer
  *   all false MOD 10 passes in the aim-box regression.
  * @param scanTopFraction Share of the height the MSI band search skips (see
  *   `msi::DecodeOptions`): 0 for aim-box crops, 0.25 for full frames.
+ * @param stretchRetry When the MSI read fails, retry it once through the
+ *   2%/98% contrast stretch (`msi::FrameOptions.stretchRetry`). Set for
+ *   stills, which are never stretched up front; live aim-box crops are
+ *   already stretched.
  */
 internal class LumaFrame(
     val buffer: ByteBuffer,
@@ -31,6 +35,7 @@ internal class LumaFrame(
     val height: Int,
     val maxOrientations: Int = 1,
     val scanTopFraction: Float = 0f,
+    val stretchRetry: Boolean = false,
 ) {
     init {
         require(buffer.isDirect) { "LumaFrame needs a direct buffer (engines read it natively)" }

@@ -105,9 +105,11 @@ Java_com_barcodescanner_sdk_data_frame_NativeFrame_nativePrepareBitmap(
 
     const msi::LumaView luma{gray.data(), grayWidth, grayHeight, grayWidth};
     const msi::Region all{0, 0, grayWidth, grayHeight};
-    // Never stretched: a 2%/98% stretch over a whole shelf photo clips the
-    // bars (on the 110-photo regression it cost 7 of 43 MSI reads and added
-    // wrong ones); it only pays off on small live aim-box crops.
+    // Never stretched up front: a 2%/98% stretch over a whole shelf photo
+    // clips the bars (on the 110-photo regression it cost 7 of 43 MSI reads
+    // and added wrong ones); it only pays off on small live aim-box crops.
+    // MSI instead retries a failed still read stretched
+    // (msi::FrameOptions::stretchRetry, via LumaFrame.stretchRetry).
     return msi::prepareRegion(luma, all, rotationDegrees, /*stretch=*/false, out) ? JNI_TRUE
                                                                                    : JNI_FALSE;
 }
