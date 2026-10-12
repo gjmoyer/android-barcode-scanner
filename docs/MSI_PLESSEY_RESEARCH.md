@@ -252,13 +252,15 @@ outvote it. Superseded by §8.3 before ever shipping. Leave it dead.
    `msiChecksumPolicy`, strip check digits, reject degenerate
    single-repeated-digit payloads (blank areas decode as validating zeros).
 
-### 8.4 Direct profile search (faint-image fallback)
+### 8.4 Direct profile search (removed)
 
-`decodeByDirectSearch`: when the template path yields a suspiciously short
-(<7 digit) read, sweep module 4.0–5.2 × offsets with greedy per-position
-template picks (weak matches <0.25 rejected), checksum-gated. Longer reads
-win. Votes reported as 1. Rare path; do not tune it without a faint-image
-corpus that exercises it.
+`decodeByDirectSearch` (sweep module 4.0–5.2 × offsets, greedy per-position
+template picks) fired only on <7-digit template reads. Once `kMinDigits`
+became 7 it was unreachable (0 calls across the synthetic sweep and 755 real
+tag crops) and was deleted together with the Path B derivation variants
+(prepend-0 / strip-first / strip-last: zero net effect on real photos) and
+the double-check leading-zero gate (prepending `0` never changes Luhn/Mod11
+validity, so it carried no evidence).
 
 ### 8.5 Dead-code inventory (`msi_decoder.cpp`, verified via -Wall)
 
