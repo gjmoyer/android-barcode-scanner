@@ -531,6 +531,119 @@ static void frameSuite() {
     assertTrue("frame scanTop 0 reads a tag in the top quarter",
                msi::decodeFrame(high.px.data(), high.w, high.h, fo).decode.ok &&
                !msi::decode(high.px.data(), high.w, high.h, legacy).ok);
+
+    // 7. Still conversion (bitmap -> gray), the core of nativePrepareBitmap.
+    assertTrue("still gray dims: even trim, integer scale, invalid -> 0",
+               msi::stillGrayDim(4000, 1) == 4000 && msi::stillGrayDim(4001, 1) == 4000 &&
+               msi::stillGrayDim(8000, 2) == 4000 && msi::stillGrayDim(7, 2) == 2 &&
+               msi::stillGrayDim(1, 1) == 0 && msi::stillGrayDim(0, 1) == 0 &&
+               msi::stillGrayDim(100, 0) == 0);
+    {
+        // Neutral RGBA (R=G=B=v) round-trips exactly (weights sum to 256);
+        // row padding and alpha must be ignored.
+        const int rowBytes = tag.w * 4 + 12;
+        std::vector<uint8_t> rgba((size_t)rowBytes * tag.h, 0xEE);
+        for (int y = 0; y < tag.h; ++y)
+            for (int x = 0; x < tag.w; ++x) {
+                uint8_t* p = &rgba[(size_t)y * rowBytes + (size_t)x * 4];
+                p[0] = p[1] = p[2] = tag.px[(size_t)y * tag.w + x];
+                p[3] = 0x7F;
+            }
+        msi::PixelView pv{rgba.data(), tag.w, tag.h, rowBytes, msi::PixelFormat::RGBA_8888};
+        std::vector<uint8_t> g((size_t)tag.w * tag.h);
+        assertTrue("still RGBA_8888 neutral -> exact luma (strided)",
+                   msi::grayFromPixels(pv, 1, g.data()) && g == tag.px);
+        // Full still flow: convert, rotate upright (sensor 90), 4-way decode.
+        Gray side90 = rotateCw(tag, 270);  // a 90-degree still of the tag
+        std::vector<uint8_t> rgba90((size_t)side90.w * side90.h * 4);
+        for (size_t i = 0; i < side90.px.size(); ++i)
+            rgba90[i * 4] = rgba90[i * 4 + 1] = rgba90[i * 4 + 2] = side90.px[i];
+        msi::PixelView pv90{rgba90.data(), side90.w, side90.h, side90.w * 4,
+                            msi::PixelFormat::RGBA_8888};
+        std::vector<uint8_t> g90(side90.px.size()), up90(side90.px.size());
+        msi::LumaView lv{g90.data(), side90.w, side90.h, side90.w};
+        msi::Region all{0, 0, side90.w, side90.h};
+        msi::FrameOptions so;
+        so.maxOrientations = 4;
+        so.scanTopFraction = 0.25f;
+        const bool ok = msi::grayFromPixels(pv90, 1, g90.data()) &&
+                        msi::prepareRegion(lv, all, 90, true, up90.data());
+        msi::FrameResult sr = msi::decodeFrame(up90.data(), side90.h, side90.w, so);
+        assertTrue("still RGBA rotation 90 -> convert, prepare upright, decode upright",
+                   ok && sr.decode.ok && sr.decode.digits == "12345674" && sr.relativeRotation == 0);
+    }
+    {
+        uint8_t px[3 * 4] = {200, 100, 50, 255, 0, 0, 0, 0, 255, 255, 255, 0};
+        msi::PixelView pv{px, 2, 1, 12, msi::PixelFormat::RGBA_8888};
+        uint8_t g[2] = {0, 0};
+        assertTrue("still rejects image under 2 px after even trim", !msi::grayFromPixels(pv, 1, g));
+        msi::PixelView pv2{px, 2, 2, 4 * 2 - 4, msi::PixelFormat::RGBA_8888};
+        assertTrue("still rejects stride < width * 4", !msi::grayFromPixels(pv2, 1, g));
+    }
+    {
+        // 2x2 RGBA: weights (77R + 150G + 29B) >> 8, alpha ignored.
+        const uint8_t px[16] = {200, 100, 50, 0, 255, 255, 255, 255,
+                                0, 0, 0, 255, 255, 0, 0, 255};
+        msi::PixelView pv{px, 2, 2, 8, msi::PixelFormat::RGBA_8888};
+        uint8_t g[4] = {0, 0, 0, 0};
+        assertTrue("still RGBA weights 77/150/29",
+                   msi::grayFromPixels(pv, 1, g) && g[0] == 124 && g[1] == 255 && g[2] == 0 &&
+                   g[3] == 76);
+        // Premultiplied RGBA reads as unpremultiplied (what getPixels gave):
+        // opaque gray bar vs half-transparent white space stay distinct.
+        const uint8_t pm[16] = {128, 128, 128, 255, 128, 128, 128, 128,
+                                0, 0, 0, 0, 64, 32, 16, 128};
+        msi::PixelView ppm{pm, 2, 2, 8, msi::PixelFormat::RGBA_8888};
+        ppm.premultiplied = true;
+        assertTrue("still premultiplied RGBA is unpremultiplied (a=255, a=128, a=0)",
+                   msi::grayFromPixels(ppm, 1, g) && g[0] == 128 && g[1] == 255 && g[2] == 0 &&
+                   g[3] == 79);
+        ppm.premultiplied = false;
+        assertTrue("still straight RGBA ignores alpha",
+                   msi::grayFromPixels(ppm, 1, g) && g[0] == 128 && g[1] == 128 && g[2] == 0 &&
+                   g[3] == 39);
+        // RGB_565 little-endian: red 0xF800, white 0xFFFF, black, green 0x07E0.
+        const uint8_t p565[8] = {0x00, 0xF8, 0xFF, 0xFF, 0x00, 0x00, 0xE0, 0x07};
+        msi::PixelView pv565{p565, 2, 2, 4, msi::PixelFormat::RGB_565};
+        assertTrue("still RGB_565 bit-replicated expand",
+                   msi::grayFromPixels(pv565, 1, g) && g[0] == 76 && g[1] == 255 && g[2] == 0 &&
+                   g[3] == 149);
+        msi::PixelView pv565s{p565, 2, 2, 3, msi::PixelFormat::RGB_565};
+        assertTrue("still rejects RGB_565 stride < width * 2", !msi::grayFromPixels(pv565s, 1, g));
+    }
+    {
+        // A_8 is luma; odd 5x3 trims to 4x2 from the top-left.
+        uint8_t a8[15];
+        for (int i = 0; i < 15; ++i) a8[i] = (uint8_t)(i * 10);
+        msi::PixelView pv{a8, 5, 3, 5, msi::PixelFormat::A_8};
+        uint8_t g[8] = {0};
+        const uint8_t want[8] = {0, 10, 20, 30, 50, 60, 70, 80};
+        assertTrue("still A_8 identity, odd edge trimmed",
+                   msi::grayFromPixels(pv, 1, g) && memcmp(g, want, 8) == 0);
+        // Scale 2 box mean (rounded): 4x4 -> 2x2; 5x5 -> 2x2 (edge dropped).
+        const uint8_t b[16] = {10, 11, 0, 0,
+                               12, 13, 0, 1,
+                               255, 255, 7, 7,
+                               255, 254, 7, 8};
+        msi::PixelView pb{b, 4, 4, 4, msi::PixelFormat::A_8};
+        uint8_t m[4] = {0};
+        assertTrue("still box downscale 2: rounded block means",
+                   msi::grayFromPixels(pb, 2, m) && m[0] == 12 && m[1] == 0 && m[2] == 255 &&
+                   m[3] == 7);
+        assertTrue("still rejects scale 0", !msi::grayFromPixels(pb, 0, m));
+    }
+    {
+        // A tag rendered at 10 px modules survives a 2x box downscale.
+        Gray big = renderMsi("12345674", 10, 1600, 600, 180, 240);
+        msi::PixelView pv{big.px.data(), big.w, big.h, big.w, msi::PixelFormat::A_8};
+        const int dw = msi::stillGrayDim(big.w, 2), dh = msi::stillGrayDim(big.h, 2);
+        std::vector<uint8_t> small((size_t)dw * dh);
+        msi::FrameOptions so;
+        so.maxOrientations = 1;
+        assertTrue("still 2x box downscale keeps a 10px-module tag readable",
+                   msi::grayFromPixels(pv, 2, small.data()) &&
+                   msi::decodeFrame(small.data(), dw, dh, so).decode.digits == "12345674");
+    }
 }
 
 // ------------------------------------------------------------ suites

@@ -49,9 +49,6 @@ class MLKitDecoder(
 
     override val name: String = NAME
 
-    /** ML Kit normalizes the view via the rotation hint; any candidate is the same image. */
-    override val resolvesOrientationInternally: Boolean = true
-
     override val supportedSymbologies: Set<Symbology> =
         enabledSymbologies.intersect(Symbology.mlKitNatives)
 

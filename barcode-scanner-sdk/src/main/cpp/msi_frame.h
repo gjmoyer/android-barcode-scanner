@@ -50,6 +50,39 @@ bool clampRegion(const LumaView& src, Region& region);
 bool prepareRegion(const LumaView& src, const Region& region, int rotationDegrees, bool stretch,
                    uint8_t* out);
 
+// Still-image pixel layouts converted natively (the Android bitmap formats
+// ANDROID_BITMAP_FORMAT_RGBA_8888 / RGB_565 / A_8), bytes as laid out in
+// memory: RGBA_8888 is R,G,B,A; RGB_565 is a little-endian uint16 with red in
+// the top 5 bits; A_8 is one byte read as luma (the zxing-cpp convention).
+enum class PixelFormat { RGBA_8888, RGB_565, A_8 };
+
+// Read-only still image. rowStride is in BYTES (>= width * bytes per pixel).
+// `premultiplied` applies to RGBA_8888 only (android.graphics.Bitmap
+// .isPremultiplied): such pixels are unpremultiplied before weighting.
+struct PixelView {
+    const uint8_t* data = nullptr;
+    int width = 0;
+    int height = 0;
+    int rowStride = 0;
+    PixelFormat format = PixelFormat::RGBA_8888;
+    bool premultiplied = false;
+};
+
+// Gray output extent of a still dimension after an integer box-downscale by
+// `scale` (>= 1), trimmed to even (the NV21 frame every engine reads):
+// (dim / scale) rounded down to even. 0 for invalid input.
+int stillGrayDim(int dim, int scale);
+
+// Converts `src` to 8-bit gray, (77R + 150G + 29B) >> 8 per pixel (the SDK's
+// historical luma, so MSI tuning carries over), averaging each scale x scale
+// block (rounded) into `out`: contiguous, stillGrayDim(width) x
+// stillGrayDim(height) bytes. The odd remainder at the right/bottom edge is
+// dropped. Alpha is otherwise ignored: RGBA reads as the unpremultiplied
+// colour, exactly what Bitmap.getPixels returned to the retired Kotlin path
+// (fully transparent pixels read as 0). False on invalid input or allocation
+// failure; never throws (it runs while JNI holds the bitmap's pixel lock).
+bool grayFromPixels(const PixelView& src, int scale, uint8_t* out);
+
 struct FrameResult {
     DecodeResult decode;
     // Clockwise rotation, relative to the upright view, under which the read

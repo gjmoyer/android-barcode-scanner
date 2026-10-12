@@ -17,11 +17,11 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "1.0"
-        // ARM-only APK: strips the x86/x86_64 slices that prebuilt AARs
-        // (zxing-cpp) would otherwise package. Matches the SDK's own ABI
-        // filters; non-ARM devices gracefully lose native decode paths.
+        // Matches the SDK's ABI filters (ARM devices + x86_64 emulators);
+        // strips the 32-bit x86 slices prebuilt AARs (zxing-cpp) would
+        // otherwise package.
         ndk {
-            abiFilters += listOf("armeabi-v7a", "arm64-v8a")
+            abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86_64")
         }
     }
     buildTypes {

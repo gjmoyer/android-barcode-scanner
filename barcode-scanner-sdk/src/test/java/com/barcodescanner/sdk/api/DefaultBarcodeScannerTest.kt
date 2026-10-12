@@ -1,5 +1,6 @@
 package com.barcodescanner.sdk.api
 
+import android.graphics.Bitmap
 import com.barcodescanner.sdk.data.frame.LumaFrame
 import com.barcodescanner.sdk.data.frame.NativeFrame
 import com.barcodescanner.sdk.di.ScannerContainer
@@ -57,6 +58,22 @@ class DefaultBarcodeScannerTest {
             ScannerContainer(RuntimeEnvironment.getApplication(), config),
             config,
         )
+    }
+
+    @Test
+    fun scanBitmap_withoutNativeLib_isFailureNotCrash() = runBlocking {
+        // The still path is native-only; on an ABI without the library (here:
+        // the JVM) a one-shot reports Failure instead of throwing.
+        val scanner = scanner(suppressionMillis = 0)
+        val bmp = Bitmap.createBitmap(64, 32, Bitmap.Config.ARGB_8888)
+        try {
+            val result = scanner.scanBitmap(bmp)
+            assertTrue("expected Failure, got $result", result is ScanResult.Failure)
+            assertTrue((result as ScanResult.Failure).message.contains("native"))
+        } finally {
+            bmp.recycle()
+            scanner.close()
+        }
     }
 
     @Test

@@ -1,11 +1,14 @@
 // JNI bridge for the clean-room MSI Plessey decoder and the native frame
 // path (msi_frame). Called from com.barcodescanner.sdk.data.msi.MsiNativeDecoder
-// and com.barcodescanner.sdk.data.frame.NativeFrame.
+// and com.barcodescanner.sdk.data.frame.NativeFrame. Bitmap conversion lives
+// in msi_bitmap_jni.cpp (NDK-only header).
 #include <jni.h>
 #include <cstdint>
+#include <new>
 #include <string>
 #include "msi_decoder.h"
 #include "msi_frame.h"
+#include "msi_jni_buffers.h"
 
 namespace {
 
@@ -22,64 +25,9 @@ msi::ChecksumPolicy toRequiredPolicy(jint code) {
     }
 }
 
-// Base address of a direct ByteBuffer holding at least `need` bytes, else
-// null (heap buffer, null reference, or too small). 64-bit math throughout:
-// bogus Kotlin dimensions must never pass as a small product.
-uint8_t* directBytes(JNIEnv* env, jobject buffer, int64_t need) {
-    if (buffer == nullptr || need <= 0) return nullptr;
-    void* address = env->GetDirectBufferAddress(buffer);
-    const jlong capacity = env->GetDirectBufferCapacity(buffer);
-    if (address == nullptr || capacity < 0 || static_cast<int64_t>(capacity) < need) {
-        return nullptr;
-    }
-    return static_cast<uint8_t*>(address);
-}
-
 } // namespace
 
 extern "C" {
-
-// Returns "digits|policy|votes" on success, null on failure.
-// gray: grayscale bytes (0=black, 255=white), row-major, width*height bytes.
-// requiredPolicy: see toRequiredPolicy.
-JNIEXPORT jstring JNICALL
-Java_com_barcodescanner_sdk_data_msi_MsiNativeDecoder_nativeDecode(
-    JNIEnv* env, jobject /*thiz*/,
-    jbyteArray grayBytes, jint width, jint height, jint requiredPolicy) {
-
-    // Defensive validation in 64-bit math: width*height as jint can
-    // overflow for bogus dimensions and pass the length check, causing an
-    // OOB read in msi::decode. Null arrays (GetArrayLength(NULL) crashes
-    // the VM) are rejected too. Kotlin never sends these; this is the last
-    // line of defense at the native boundary.
-    if (grayBytes == nullptr || width <= 0 || height <= 0) {
-        return nullptr;
-    }
-    jsize len = env->GetArrayLength(grayBytes);
-    const int64_t need = static_cast<int64_t>(width) * static_cast<int64_t>(height);
-    if (static_cast<int64_t>(len) < need) {
-        return nullptr;
-    }
-    jbyte* bytes = env->GetByteArrayElements(grayBytes, nullptr);
-    if (!bytes) {
-        return nullptr;
-    }
-
-    msi::DecodeResult r = msi::decode(
-        reinterpret_cast<const uint8_t*>(bytes),
-        static_cast<int>(width),
-        static_cast<int>(height),
-        toRequiredPolicy(requiredPolicy));
-
-    env->ReleaseByteArrayElements(grayBytes, bytes, JNI_ABORT);
-
-    if (!r.ok) {
-        return nullptr;
-    }
-    std::string out = r.digits + "|" + msi::policyName(r.policy)
-                    + "|" + std::to_string(r.votes);
-    return env->NewStringUTF(out.c_str());
-}
 
 // One pass per camera frame: crops [left,right) x [top,bottom) out of a luma
 // plane (direct buffer, `srcRowStride` bytes per row), optionally contrast
@@ -98,14 +46,14 @@ Java_com_barcodescanner_sdk_data_frame_NativeFrame_nativePrepare(
     // Camera planes may end at the last pixel instead of a full final stride.
     const int64_t srcNeed =
         static_cast<int64_t>(srcRowStride) * (srcHeight - 1) + static_cast<int64_t>(srcWidth);
-    const uint8_t* plane = directBytes(env, src, srcNeed);
+    const uint8_t* plane = msi_jni::directBytes(env, src, srcNeed);
     if (plane == nullptr) return JNI_FALSE;
     const msi::LumaView view{plane, srcWidth, srcHeight, srcRowStride};
     const msi::Region region{left, top, right, bottom};
     if (region.width() <= 0 || region.height() <= 0) return JNI_FALSE;
     const int64_t dstNeed =
         static_cast<int64_t>(region.width()) * static_cast<int64_t>(region.height());
-    uint8_t* out = directBytes(env, dst, dstNeed);
+    uint8_t* out = msi_jni::directBytes(env, dst, dstNeed);
     if (out == nullptr) return JNI_FALSE;
     return msi::prepareRegion(view, region, rotationDegrees, stretch == JNI_TRUE, out)
                ? JNI_TRUE
@@ -123,18 +71,25 @@ Java_com_barcodescanner_sdk_data_msi_MsiNativeDecoder_nativeDecodeLuma(
 
     if (width <= 0 || height <= 0) return nullptr;
     const uint8_t* px =
-        directBytes(env, gray, static_cast<int64_t>(width) * static_cast<int64_t>(height));
+        msi_jni::directBytes(env, gray, static_cast<int64_t>(width) * static_cast<int64_t>(height));
     if (px == nullptr) return nullptr;
     msi::FrameOptions options;
     options.required = toRequiredPolicy(requiredPolicy);
     options.rotationDegrees = 0;  // prepared buffers are already upright
     options.maxOrientations = maxOrientations;
     options.scanTopFraction = scanTopFraction;
-    const msi::FrameResult r = msi::decodeFrame(px, width, height, options);
-    if (!r.decode.ok) return nullptr;
-    const std::string out = r.decode.digits + "|" + msi::policyName(r.decode.policy) + "|" +
-                            std::to_string(r.decode.votes) + "|" +
-                            std::to_string(r.relativeRotation);
+    // decodeFrame allocates (a full-resolution still needs a ~12 MB rotation
+    // scratch); bad_alloc unwinding across JNI would abort the process, so a
+    // failed allocation is reported as no read.
+    std::string out;
+    try {
+        const msi::FrameResult r = msi::decodeFrame(px, width, height, options);
+        if (!r.decode.ok) return nullptr;
+        out = r.decode.digits + "|" + msi::policyName(r.decode.policy) + "|" +
+              std::to_string(r.decode.votes) + "|" + std::to_string(r.relativeRotation);
+    } catch (const std::bad_alloc&) {
+        return nullptr;
+    }
     return env->NewStringUTF(out.c_str());
 }
 

@@ -7,6 +7,8 @@ import androidx.camera.view.PreviewView
 import androidx.lifecycle.LifecycleOwner
 import com.barcodescanner.sdk.camera.CameraScanManager
 import com.barcodescanner.sdk.data.frame.LumaFrame
+import com.barcodescanner.sdk.data.frame.NativeFrame
+import com.barcodescanner.sdk.data.msi.MsiNativeDecoder
 import com.barcodescanner.sdk.di.ScannerContainer
 import com.barcodescanner.sdk.domain.decoder.DecodeOutcome
 import com.barcodescanner.sdk.domain.model.ScanFrame
@@ -23,6 +25,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -33,9 +36,10 @@ import java.util.concurrent.atomic.AtomicBoolean
  * decode work. Camera frames are single-flight conflated in [CameraScanManager]
  * so a slow decode can never pile up frames.
  *
- * Two decode paths: live camera frames arrive as one natively prepared aim-box
- * [LumaFrame] and go through [ScannerContainer.liveFusion]; one-shot
- * [scanBitmap]/[scanFrame] go through [ScannerContainer.fusedDecoder].
+ * One decode path: every scan is ONE natively prepared upright [LumaFrame]
+ * read in place by every engine through [ScannerContainer.lumaFusion] — the
+ * camera's aim-box crop (prepared in [CameraScanManager]) or a one-shot still
+ * converted by [NativeFrame.prepareStill]. No Kotlin code touches pixels.
  *
  * Emission contract (fixed per review):
  *  - [scanBitmap]/[scanFrame] are pure one-shots: they NEVER touch [results].
@@ -84,9 +88,38 @@ internal class DefaultBarcodeScanner(
             ),
         )
 
+    /**
+     * One-shot still: converted once natively (gray, upright per
+     * [ScanFrame.effectiveRotation], no contrast stretch), then decoded like
+     * a live frame but with [ScannerConfig.maxOrientationsTried] MSI orientations
+     * (gallery photos arrive in any orientation) and the full-frame band
+     * window. Conversion runs on [Dispatchers.Default] outside the decode
+     * timeout. Without the native library (32-bit x86) the result is a
+     * [ScanResult.Failure].
+     */
     override suspend fun scanFrame(frame: ScanFrame): ScanResult {
         check(!closed.get()) { "Scanner is closed" }
-        return container.fusedDecoder.decode(frame)
+        if (!NativeFrame.available) {
+            return ScanResult.Failure("still scanning unavailable: native frame library not loaded on this ABI")
+        }
+        val still = try {
+            withContext(Dispatchers.Default) {
+                NativeFrame.prepareStill(
+                    frame.bitmap,
+                    rotationDegrees = frame.effectiveRotation,
+                    maxOrientations = config.maxOrientationsTried,
+                    scanTopFraction = MsiNativeDecoder.FULL_FRAME_SCAN_TOP,
+                )
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (t: Throwable) {
+            // Recycled bitmap, failed copy/lock, OOM on a huge still.
+            return ScanResult.Failure("still conversion failed: ${t.message}", cause = t)
+        } ?: return ScanResult.NotFound(frame.timestampMillis)
+        // The buffer is per-scan (never pooled), so a timed-out engine still
+        // reading it is harmless: bufferReusable does not matter here.
+        return container.lumaFusion.decode(still).outcome
             .toScanResult(frame.timestampMillis, frame.isRotatedCandidate)
     }
 
@@ -159,7 +192,7 @@ internal class DefaultBarcodeScanner(
 
     /**
      * Live-camera frame body; internal for tests. Decodes the one prepared
-     * aim-box frame through [ScannerContainer.liveFusion] — engines read
+     * aim-box frame through [ScannerContainer.lumaFusion] — engines read
      * [frame] in place; nothing here touches pixels. Returns true when
      * [LumaFrame.buffer] may be rewritten (the camera pool's contract): false
      * after a timed-out decode, whose ML Kit task may still be reading it.
@@ -175,7 +208,7 @@ internal class DefaultBarcodeScanner(
         if (closed.get()) return true
         var reusable = false
         try {
-            val live = container.liveFusion.decode(frame)
+            val live = container.lumaFusion.decode(frame)
             reusable = live.bufferReusable
             // Upright by construction (native rotate): no rotated candidates.
             val result = live.outcome.toScanResult(SystemClock.elapsedRealtime(), rotatedCandidate = false)

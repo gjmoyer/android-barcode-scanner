@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <new>
 #include <vector>
 
 namespace msi {
@@ -66,7 +67,130 @@ int normalizeRotation(int degrees) {
     return r % 90 == 0 ? r : -1;
 }
 
+int bytesPerPixel(PixelFormat format) {
+    switch (format) {
+        case PixelFormat::RGBA_8888: return 4;
+        case PixelFormat::RGB_565: return 2;
+        case PixelFormat::A_8: return 1;
+    }
+    return 0;
+}
+
+// SDK luma weights (sum 256) applied to 8-bit channels.
+inline uint32_t weigh(uint32_t r, uint32_t g, uint32_t b) {
+    return (77u * r + 150u * g + 29u * b) >> 8;
+}
+
+// Pixel readers: luma of pixel x in one row. RgbaPremul is a separate reader
+// so the opaque fast path stays branch-light for the common non-alpha photo.
+struct Rgba {
+    static uint32_t at(const uint8_t* row, int x) {
+        const uint8_t* p = row + static_cast<size_t>(x) * 4;
+        return weigh(p[0], p[1], p[2]);
+    }
+};
+
+struct RgbaPremul {
+    // Rounded c * 255 / a, as Skia unpremultiplies for getPixels.
+    static uint32_t unpremul(uint32_t c, uint32_t a) {
+        const uint32_t v = (c * 255u + a / 2u) / a;
+        return v > 255u ? 255u : v;
+    }
+    static uint32_t at(const uint8_t* row, int x) {
+        const uint8_t* p = row + static_cast<size_t>(x) * 4;
+        const uint32_t a = p[3];
+        if (a == 255u) return weigh(p[0], p[1], p[2]);
+        if (a == 0u) return 0u;
+        return weigh(unpremul(p[0], a), unpremul(p[1], a), unpremul(p[2], a));
+    }
+};
+
+struct Rgb565 {
+    static uint32_t at(const uint8_t* row, int x) {
+        const uint8_t* p = row + static_cast<size_t>(x) * 2;
+        const uint32_t v = static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8);
+        const uint32_t r5 = (v >> 11) & 0x1F;
+        const uint32_t g6 = (v >> 5) & 0x3F;
+        const uint32_t b5 = v & 0x1F;
+        // Bit replication, as Skia expands 565 to 8888 (what getPixels returned).
+        return weigh((r5 << 3) | (r5 >> 2), (g6 << 2) | (g6 >> 4), (b5 << 3) | (b5 >> 2));
+    }
+};
+
+struct Alpha8 {
+    static uint32_t at(const uint8_t* row, int x) { return row[x]; }
+};
+
+template <typename Reader>
+void grayInto(const PixelView& src, int scale, int outW, int outH, uint8_t* out) {
+    const size_t stride = static_cast<size_t>(src.rowStride);
+    if (scale == 1) {
+        for (int y = 0; y < outH; ++y) {
+            const uint8_t* row = src.data + static_cast<size_t>(y) * stride;
+            uint8_t* o = out + static_cast<size_t>(y) * static_cast<size_t>(outW);
+            for (int x = 0; x < outW; ++x) o[x] = static_cast<uint8_t>(Reader::at(row, x));
+        }
+        return;
+    }
+    // Box filter: the mean of each scale x scale block, accumulated a source
+    // row at a time so the image is still read strictly top to bottom.
+    const uint32_t area = static_cast<uint32_t>(scale) * static_cast<uint32_t>(scale);
+    std::vector<uint32_t> acc(static_cast<size_t>(outW));
+    for (int oy = 0; oy < outH; ++oy) {
+        std::fill(acc.begin(), acc.end(), 0u);
+        for (int dy = 0; dy < scale; ++dy) {
+            const uint8_t* row = src.data + static_cast<size_t>(oy * scale + dy) * stride;
+            for (int ox = 0; ox < outW; ++ox) {
+                const int base = ox * scale;
+                uint32_t sum = 0;
+                for (int dx = 0; dx < scale; ++dx) sum += Reader::at(row, base + dx);
+                acc[static_cast<size_t>(ox)] += sum;
+            }
+        }
+        uint8_t* o = out + static_cast<size_t>(oy) * static_cast<size_t>(outW);
+        for (int ox = 0; ox < outW; ++ox) {
+            o[ox] = static_cast<uint8_t>((acc[static_cast<size_t>(ox)] + area / 2) / area);
+        }
+    }
+}
+
 } // namespace
+
+int stillGrayDim(int dim, int scale) {
+    if (dim <= 0 || scale < 1) return 0;
+    return (dim / scale) & ~1;
+}
+
+bool grayFromPixels(const PixelView& src, int scale, uint8_t* out) {
+    const int bpp = bytesPerPixel(src.format);
+    if (out == nullptr || src.data == nullptr || bpp == 0 || src.width <= 0 || src.height <= 0 ||
+        static_cast<int64_t>(src.rowStride) < static_cast<int64_t>(src.width) * bpp) {
+        return false;
+    }
+    const int outW = stillGrayDim(src.width, scale);
+    const int outH = stillGrayDim(src.height, scale);
+    if (outW <= 0 || outH <= 0) return false;
+    try {
+        switch (src.format) {
+            case PixelFormat::RGBA_8888:
+                if (src.premultiplied) {
+                    grayInto<RgbaPremul>(src, scale, outW, outH, out);
+                } else {
+                    grayInto<Rgba>(src, scale, outW, outH, out);
+                }
+                break;
+            case PixelFormat::RGB_565:
+                grayInto<Rgb565>(src, scale, outW, outH, out);
+                break;
+            case PixelFormat::A_8:
+                grayInto<Alpha8>(src, scale, outW, outH, out);
+                break;
+        }
+    } catch (const std::bad_alloc&) {
+        return false;  // the downscale accumulator
+    }
+    return true;
+}
 
 bool clampRegion(const LumaView& src, Region& region) {
     if (src.data == nullptr || src.width <= 0 || src.height <= 0 ||
@@ -134,8 +258,8 @@ FrameResult decodeFrame(const uint8_t* gray, int width, int height, const FrameO
     const int sensor = normalizeRotation(options.rotationDegrees);
     if (sensor < 0) return result;
 
-    // Same priority as the Kotlin OrientationCandidates: upright, upside-down,
-    // then sideways.
+    // Same priority as the retired Kotlin OrientationCandidates: upright,
+    // upside-down, then sideways.
     static constexpr int kOrder[4] = {0, 180, 90, 270};
     const int attempts = std::min(std::max(options.maxOrientations, 1), 4);
 

@@ -7,6 +7,7 @@ add_library(msi_decoder SHARED
     msi_decoder.cpp
     msi_frame.cpp
     msi_jni.cpp
+    msi_bitmap_jni.cpp
 )
 
 # C++17, optimize for speed, all warnings.
@@ -17,6 +18,7 @@ target_compile_options(msi_decoder PRIVATE
     -Wextra
 )
 
-# Android log for diagnostics (optional; decoder itself doesn't log).
+# Android log for diagnostics (optional; decoder itself doesn't log);
+# jnigraphics for AndroidBitmap_* (native still conversion).
 find_library(log-lib log)
-target_link_libraries(msi_decoder ${log-lib})
+target_link_libraries(msi_decoder ${log-lib} jnigraphics)

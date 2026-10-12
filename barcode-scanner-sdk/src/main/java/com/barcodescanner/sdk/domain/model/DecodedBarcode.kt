@@ -9,14 +9,16 @@ import android.graphics.Rect
  * Plain data class with structural equality (cornerPoints is a List so content
  * equality holds; the old Array<Point> broke data-class equals semantics).
  * Fusion voting dedups explicitly on (rawValue, symbology) keeping max
- * confidence — see FusedDecoder.mergeIntoPool.
+ * confidence — see LumaFusion.mergeIntoPool.
  *
  * @param rawValue Decoded payload, exactly as encoded (no checksum stripping
  *   unless [checksumStripped] is true — see checksum policy).
  * @param symbology Canonical symbology.
  * @param confidence 0..1 engine confidence. 1.0 = checksum-verified.
- * @param boundingBox Bounding box in frame coordinates, if known (null for rotated candidates).
- * @param cornerPoints Corner points in frame coordinates, if known.
+ * @param boundingBox Bounding box, if known, in the coordinates of the prepared
+ *   upright frame the engines read: the aim-box crop for live scans, the
+ *   upright (downscaled only above 16 MP) still for one-shots.
+ * @param cornerPoints Corner points in the same coordinates, if known.
  * @param engineName Which decoder produced this ("MLKit", "ZXingCpp", "MsiPlessey", ...).
  * @param checksumStripped True if a trailing check digit was validated and removed.
  * @param isUpsideDown True if the barcode was decoded after 180° re-orientation.

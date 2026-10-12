@@ -10,11 +10,11 @@ package com.barcodescanner.sdk.domain.model
 data class ScannerConfig(
     val enabledSymbologies: Set<Symbology>,
     /**
-     * Max orientations attempted per frame: 1..4 (see OrientationCandidates).
-     * Default 4: the pipeline is cheap-first (upright first, confident
-     * early-exit, lazy rotations), so easy frames never pay for the rotations
-     * they don't try — there is no fast/degraded mode, only this bound for
-     * fixed-geometry hosts that know their aim. Applies to one-shot scans
+     * Max MSI orientations attempted per one-shot still: 1..4, tried
+     * natively in the order upright, upside-down, 90, 270 on the one
+     * converted frame (no rotated copies), first read wins — easy stills
+     * never pay for the rotations they don't try. ML Kit and zxing resolve
+     * rotation themselves and are unaffected. Applies to one-shot scans
      * (`scanBitmap`/`scanFrame`). Live camera aim-box frames
      * always try MSI upright only: the user holds the box on the tag, and
      * reversed reads of upright tags were all false MOD 10 passes in the

@@ -29,7 +29,7 @@ import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
-class LiveFusionTest {
+class LumaFusionTest {
 
     /** Routing identity only: the live path must never touch the bitmap entry. */
     private class RoutingOnly(
@@ -47,7 +47,7 @@ class LiveFusionTest {
         private val delayMillis: Long = 0,
     ) {
         val seen = mutableListOf<LumaFrame>()
-        val engine = LiveEngine(RoutingOnly(name, symbologies)) { frame ->
+        val engine = LumaEngine(RoutingOnly(name, symbologies)) { frame ->
             seen += frame
             if (delayMillis > 0) delay(delayMillis)
             outcome
@@ -76,7 +76,7 @@ class LiveFusionTest {
     private fun frame() = LumaFrame(NativeFrame.allocate(64, 32), 64, 32)
 
     private fun fusion(config: ScannerConfig, vararg engines: FakeEngine) =
-        LiveFusion(engines.map { it.engine }, config)
+        LumaFusion(engines.map { it.engine }, config)
 
     private fun values(out: DecodeOutcome) = (out as DecodeOutcome.Success).barcodes.map { it.rawValue }
 
@@ -180,14 +180,14 @@ class LiveFusionTest {
         try {
             assertEquals(
                 listOf(MLKitDecoder.NAME, MsiNativeDecoder.NAME, ZXingCppDecoder.NAME),
-                container.liveFusion.engines.map { it.name },
+                container.lumaFusion.engines.map { it.name },
             )
         } finally {
             container.close()
         }
         val qrOnly = ScannerContainer(RuntimeEnvironment.getApplication(), config())
         try {
-            assertEquals(listOf(MLKitDecoder.NAME), qrOnly.liveFusion.engines.map { it.name })
+            assertEquals(listOf(MLKitDecoder.NAME), qrOnly.lumaFusion.engines.map { it.name })
         } finally {
             qrOnly.close()
         }

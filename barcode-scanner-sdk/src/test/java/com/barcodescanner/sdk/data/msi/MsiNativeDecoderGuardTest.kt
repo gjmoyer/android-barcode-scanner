@@ -80,26 +80,29 @@ class MsiNativeDecoderGuardTest {
     )
 
     @Test
-    fun accept_lumaRead_stripsChecksAndReportsUpright() {
-        val out = shelfDecoder().acceptNativeRead("011578333|mod1010|3|0", upsideDown = true)
+    fun accept_uprightRead_stripsChecksAndReportsUpright() {
+        val out = shelfDecoder().acceptNativeRead("011578333|mod1010|3|0", upsideDown = false)
         val hit = (out as DecodeOutcome.Success).barcodes.single()
         assertEquals("0115783", hit.rawValue)
         assertEquals(Symbology.MSI_PLESSEY, hit.symbology)
         assertTrue(hit.checksumStripped)
-        // 4-field luma reads report their own rotation: 0 overrides the hint.
         assertFalse(hit.isUpsideDown)
     }
 
     @Test
-    fun accept_lumaRead_relativeRotation180_isUpsideDown() {
+    fun accept_relativeRotation180_isUpsideDown() {
         val out = shelfDecoder().acceptNativeRead("011578333|mod1010|3|180", upsideDown = false)
         assertTrue((out as DecodeOutcome.Success).barcodes.single().isUpsideDown)
     }
 
     @Test
-    fun accept_bitmapRead_keepsCandidateOrientation() {
-        val out = shelfDecoder().acceptNativeRead("011578333|mod1010|3", upsideDown = true)
-        assertTrue((out as DecodeOutcome.Success).barcodes.single().isUpsideDown)
+    fun accept_upsideDownBuffer_keepsOrFlipsOrientation() {
+        // Standalone decode(ScanFrame) of an upside-down candidate: a forward
+        // read is upside down, a 180 read of it is upright.
+        val forward = shelfDecoder().acceptNativeRead("011578333|mod1010|3|0", upsideDown = true)
+        assertTrue((forward as DecodeOutcome.Success).barcodes.single().isUpsideDown)
+        val flipped = shelfDecoder().acceptNativeRead("011578333|mod1010|3|180", upsideDown = true)
+        assertFalse((flipped as DecodeOutcome.Success).barcodes.single().isUpsideDown)
     }
 
     @Test
@@ -107,6 +110,8 @@ class MsiNativeDecoderGuardTest {
         val d = shelfDecoder()
         assertTrue(d.acceptNativeRead(null, false) is DecodeOutcome.NotFound)
         assertTrue(d.acceptNativeRead("011578333", false) is DecodeOutcome.NotFound)
+        // The retired 3-field bitmap format is malformed now.
+        assertTrue(d.acceptNativeRead("011578333|mod1010|3", false) is DecodeOutcome.NotFound)
         assertTrue(d.acceptNativeRead("011578333|mod1010|3|0|x", false) is DecodeOutcome.NotFound)
         // Mod10-valid 8-digit truncation of the tag: not Mod1010.
         assertTrue(d.acceptNativeRead("01157833|mod10|3|0", false) is DecodeOutcome.NotFound)

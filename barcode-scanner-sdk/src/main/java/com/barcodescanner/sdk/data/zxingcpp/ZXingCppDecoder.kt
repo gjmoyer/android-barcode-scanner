@@ -52,9 +52,6 @@ class ZXingCppDecoder(
 
     override val name: String = NAME
 
-    /** Native TryRotate already sweeps 0/90/180/270 inside one call. */
-    override val resolvesOrientationInternally: Boolean = true
-
     override val supportedSymbologies: Set<Symbology> = buildSet {
         if (Symbology.DATA_BAR in enabledSymbologies) add(Symbology.DATA_BAR)
         if (Symbology.DATA_BAR_EXPANDED in enabledSymbologies) add(Symbology.DATA_BAR_EXPANDED)

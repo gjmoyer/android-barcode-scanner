@@ -1,7 +1,7 @@
 package com.barcodescanner.sdk.data.msi
 
-import android.graphics.Bitmap
 import com.barcodescanner.sdk.data.frame.LumaFrame
+import com.barcodescanner.sdk.data.frame.NativeFrame
 import com.barcodescanner.sdk.domain.decoder.BarcodeDecoder
 import com.barcodescanner.sdk.domain.decoder.DecodeOutcome
 import com.barcodescanner.sdk.domain.decoder.DecoderException
@@ -66,13 +66,6 @@ class MsiNativeDecoder(
     override val name: String = NAME
     override val supportedSymbologies: Set<Symbology> = setOf(Symbology.MSI_PLESSEY)
 
-    private external fun nativeDecode(
-        gray: ByteArray,
-        width: Int,
-        height: Int,
-        requiredPolicy: Int,
-    ): String?
-
     private external fun nativeDecodeLuma(
         gray: ByteBuffer,
         width: Int,
@@ -87,78 +80,49 @@ class MsiNativeDecoder(
     // Single-path temporal voting state (see [MsiVoteGate]; synchronized).
     private val voteGate = MsiVoteGate(requireConsecutiveFrames)
 
+    /**
+     * Standalone bitmap decode (hosts using the engine directly; the facade
+     * never calls this). The bitmap is converted to gray natively
+     * ([NativeFrame.prepareStill]: no rotation — the pixel layout
+     * as given, as this entry point always decoded) and read with one
+     * orientation and the full-frame band window. A read is reported upside
+     * down when [ScanFrame.isUpsideDownCandidate].
+     */
     override suspend fun decode(frame: ScanFrame): DecodeOutcome = withContext(dispatcher) {
         try {
-            if (!nativeAvailable) {
+            if (!nativeAvailable || !NativeFrame.available) {
                 return@withContext DecodeOutcome.NotFound("MSI native library not loaded")
             }
-            val bitmap = frame.bitmap
-            val w = bitmap.width
-            val h = bitmap.height
-            if (w <= 0 || h <= 0) {
-                return@withContext DecodeOutcome.NotFound("MSI native: empty frame")
-            }
-            // Bitmap -> grayscale bytes (0=black, 255=white, row-major).
-            val px = IntArray(w * h)
-            bitmap.getPixels(px, 0, w, 0, 0, w, h)
-            val gray = ByteArray(w * h)
-            for (i in px.indices) {
-                val c = px[i]
-                val r = (c shr 16) and 0xFF
-                val g = (c shr 8) and 0xFF
-                val b = c and 0xFF
-                gray[i] = ((77 * r + 150 * g + 29 * b) shr 8).toByte()
-            }
-            // Native call is synchronous and fast (single-digit ms); no need
-            // to chunk it, but respect cancellation before paying for pixels.
-            ensureActiveCompat()
-            val raw = try {
-                nativeDecode(gray, w, h, requiredNativePolicy)
-            } catch (e: UnsatisfiedLinkError) {
-                return@withContext DecodeOutcome.Error(
-                    DecoderException("MSI native library not loaded", e),
-                    recoverable = false,
-                )
-            }
-            acceptNativeRead(raw, upsideDown = frame.isUpsideDownCandidate)
+            val luma = NativeFrame.prepareStill(
+                frame.bitmap,
+                rotationDegrees = 0,
+                maxOrientations = 1,
+                scanTopFraction = FULL_FRAME_SCAN_TOP,
+            ) ?: return@withContext DecodeOutcome.NotFound("MSI native: image too small")
+            decodeLumaRaw(luma, upsideDown = frame.isUpsideDownCandidate)
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
-            // Rare path (already counted as Error below): log the class so
-            // on-device forensics can tell OOM/recycled-bitmap/JNI apart.
+            // Rare path: log the class so on-device forensics can tell
+            // OOM/recycled-bitmap/JNI apart.
             android.util.Log.w(NAME, "decode failed: ${t.javaClass.simpleName}: ${t.message}")
             DecodeOutcome.Error(DecoderException("MSI native decode failed", t), recoverable = true)
         }
     }
 
     /**
-     * Live/still fast path: decodes the shared prepared [LumaFrame] in place
-     * (no pixel copy, no Kotlin conversion). Orientation attempts and the
-     * band-search window come from the frame; the winning relative rotation
-     * reports 180 as [DecodedBarcode.isUpsideDown]. Same validation, vote
-     * gate and payload contract as [decode].
+     * Facade path (live and still): decodes the shared prepared [LumaFrame]
+     * in place (no pixel copy, no Kotlin conversion). Orientation attempts
+     * and the band-search window come from the frame; the winning relative
+     * rotation reports 180 as [DecodedBarcode.isUpsideDown]. Same validation,
+     * vote gate and payload contract as [decode].
      */
     internal suspend fun decodeLuma(frame: LumaFrame): DecodeOutcome = withContext(dispatcher) {
         try {
             if (!nativeAvailable) {
                 return@withContext DecodeOutcome.NotFound("MSI native library not loaded")
             }
-            val raw = try {
-                nativeDecodeLuma(
-                    frame.buffer,
-                    frame.width,
-                    frame.height,
-                    frame.maxOrientations,
-                    frame.scanTopFraction,
-                    requiredNativePolicy,
-                )
-            } catch (e: UnsatisfiedLinkError) {
-                return@withContext DecodeOutcome.Error(
-                    DecoderException("MSI native library not loaded", e),
-                    recoverable = false,
-                )
-            }
-            acceptNativeRead(raw, upsideDown = false)
+            decodeLumaRaw(frame, upsideDown = false)
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
@@ -167,10 +131,30 @@ class MsiNativeDecoder(
         }
     }
 
+    /** One native read of [frame] in place, then [acceptNativeRead]. */
+    private fun decodeLumaRaw(frame: LumaFrame, upsideDown: Boolean): DecodeOutcome {
+        val raw = try {
+            nativeDecodeLuma(
+                frame.buffer,
+                frame.width,
+                frame.height,
+                frame.maxOrientations,
+                frame.scanTopFraction,
+                requiredNativePolicy,
+            )
+        } catch (e: UnsatisfiedLinkError) {
+            return DecodeOutcome.Error(
+                DecoderException("MSI native library not loaded", e),
+                recoverable = false,
+            )
+        }
+        return acceptNativeRead(raw, upsideDown)
+    }
+
     /**
-     * Shared acceptance tail for both native entry points. [raw] is
-     * `digits|policy|votes` (bitmap path) or `digits|policy|votes|relRot`
-     * (luma path; relRot 180 overrides [upsideDown]); null is a native miss.
+     * Shared acceptance tail. [raw] is `digits|policy|votes|relRot`; null is
+     * a native miss. [upsideDown] is the orientation of the buffer handed to
+     * native (false for upright luma frames); a relRot 180 read flips it.
      * Every rejection resets the vote gate.
      */
     internal fun acceptNativeRead(raw: String?, upsideDown: Boolean): DecodeOutcome {
@@ -180,13 +164,13 @@ class MsiNativeDecoder(
             return DecodeOutcome.NotFound("MSI native: no decode")
         }
         val parts = raw.split("|")
-        if (parts.size !in 3..4) {
+        if (parts.size != 4) {
             voteGate.reset()
             return DecodeOutcome.NotFound("MSI native: bad result format")
         }
         val full = parts[0]
         val nativePolicy = parts[1]
-        val isUpsideDown = if (parts.size == 4) parts[3] == "180" else upsideDown
+        val isUpsideDown = upsideDown != (parts[3] == "180")
         if (full.length < minPayloadDigits) {
             voteGate.reset()
             return DecodeOutcome.NotFound("MSI native: payload too short")
@@ -252,12 +236,11 @@ class MsiNativeDecoder(
         )
     }
 
-    // withContext(dispatcher) already checks cancellation on entry; this is a
-    // no-op hook for symmetry with the old decoder's cooperative checks.
-    private fun ensureActiveCompat() = Unit
-
     companion object {
         const val NAME = "MsiNative"
+
+        /** Band-search skip for whole images (see `msi::DecodeOptions`). */
+        internal const val FULL_FRAME_SCAN_TOP = 0.25f
 
         /**
          * Stable JNI code for the required scheme; must mirror
@@ -273,8 +256,8 @@ class MsiNativeDecoder(
 
         /**
          * True when the native library loaded. False on ABIs we don't ship
-         * (x86/x86_64 — ARM-only packaging, see the SDK/sample build files)
-         * yields NotFound instead of crashing. The load is guarded (a bare
+         * (32-bit x86, see the SDK/sample abiFilters) yields NotFound instead
+         * of crashing. The load is guarded (a bare
          * `System.loadLibrary` in class init throws
          * `ExceptionInInitializerError`, an Error that fusion's
          * `catch (Exception)` cannot contain and that would crash the first
