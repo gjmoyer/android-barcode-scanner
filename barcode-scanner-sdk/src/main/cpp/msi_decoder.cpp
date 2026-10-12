@@ -136,6 +136,11 @@ int checksumStrength(const std::string& full) {
     return single ? 1 : 0;
 }
 
+// Caller-required checksum scheme for the decode() call in progress on this
+// thread (NONE = accept any supported scheme). Thread-local so concurrent
+// decodes stay independent; only decode() sets and restores it.
+thread_local ChecksumPolicy t_required = ChecksumPolicy::NONE;
+
 // Returns payload-without-check on success, empty on failure.
 std::string validateChecksum(const std::string& full, ChecksumPolicy& outPolicy) {
     for (char c : full) if (c < '0' || c > '9') return {};
@@ -149,14 +154,26 @@ std::string validateChecksum(const std::string& full, ChecksumPolicy& outPolicy)
             if (full[i] != full[0]) { uniform = false; break; }
         if (uniform) return {};
     }
-    const ChecksumPolicy order[] = {
+    const ChecksumPolicy anyOrder[] = {
         ChecksumPolicy::MOD10, ChecksumPolicy::MOD11,
         ChecksumPolicy::MOD1010, ChecksumPolicy::MOD1110
         // NONE disabled: too many false positives on blurry images.
         // If a truly checksum-less barcode is needed, re-enable with
         // a much higher vote threshold.
     };
-    for (ChecksumPolicy p : order) {
+    // A caller-required scheme restricts candidates BEFORE ranking and
+    // voting. Filtering only the final winner (host re-validation) let a
+    // Mod10-valid truncation of a Mod1010 tag outvote the true read and
+    // then be rejected (or accepted under a looser host policy). Real
+    // photos, MOD1010 required: 378 -> 392/755 ok, wrong 55 -> 20.
+    const ChecksumPolicy* order = anyOrder;
+    size_t norder = sizeof(anyOrder) / sizeof(anyOrder[0]);
+    if (t_required != ChecksumPolicy::NONE) {
+        order = &t_required;
+        norder = 1;
+    }
+    for (size_t k = 0; k < norder; ++k) {
+        const ChecksumPolicy p = order[k];
         bool ok = false;
         switch (p) {
             case ChecksumPolicy::MOD10:
@@ -878,7 +895,13 @@ void decodeProfile(const float* p, int n,
 // Forward: decode() wraps decodeImpl() with the upscale retry enabled.
 DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUpscale);
 
-DecodeResult decode(const uint8_t* gray, int width, int height) {
+DecodeResult decode(const uint8_t* gray, int width, int height, ChecksumPolicy required) {
+    // Scope the requirement to this call, restoring on every exit path.
+    struct RequiredScope {
+        ChecksumPolicy prev;
+        ~RequiredScope() { t_required = prev; }
+    } scope{t_required};
+    t_required = required;
     return decodeImpl(gray, width, height, /*allowUpscale=*/true);
 }
 

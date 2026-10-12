@@ -22,9 +22,11 @@ import kotlinx.coroutines.withContext
  * survives the blur that defeats width-based classification. Validated 6/6
  * on the shelf-tag benchmark set (3–7ms per frame).
  *
- * Checksum contract matches [MsiPlesseyDecoder]: the native engine tries
- * MOD10/MOD11/MOD1010/MOD1110 and reports which validated; [stripChecksum]
- * (default true) strips the check digit(s) from the emitted payload.
+ * Checksum contract matches [MsiPlesseyDecoder]: [checksumPolicy] is pushed
+ * into the native engine (only strings valid under it compete for the
+ * frame's winner; NONE lets it try MOD10/MOD11/MOD1010/MOD1110), then
+ * re-validated here; [stripChecksum] (default true) strips the check
+ * digit(s) from the emitted payload.
  */
 class MsiNativeDecoder(
     private val stripChecksum: Boolean = true,
@@ -33,13 +35,16 @@ class MsiNativeDecoder(
     /**
      * Checksum scheme the host requires (wired from
      * [ScannerConfig.msiChecksumPolicy] by [ScannerContainer][com.barcodescanner.sdk.di.ScannerContainer]).
-     * The native engine detects digit strings under whichever scheme
-     * validates; the reported digits are then re-validated strictly under
+     * Pushed into native candidate selection (see [nativePolicyCode]): a
+     * post-hoc filter alone let a Mod10-valid truncation of a Mod1010 tag
+     * outvote the true read and then be rejected or, under a looser policy,
+     * emitted. The reported digits are still re-validated strictly under
      * this policy via [MsiChecksumValidator] — the exact contract the
      * pre-native Kotlin decoder enforced. Revalidation (not the reported
      * scheme name) decides: every Mod1010/Mod1110 codeword also validates as
      * Mod10 by construction, so name-matching would mis-route double-check
-     * labels. NONE accepts anything.
+     * labels. NONE accepts anything. grocery shelf tags are 9-digit Mod1010
+     * (7-digit item + two check digits): use MOD_10_10 for them.
      */
     private val checksumPolicy: ScannerConfig.MsiChecksumPolicy =
         ScannerConfig.MsiChecksumPolicy.MOD_10,
@@ -59,7 +64,14 @@ class MsiNativeDecoder(
     override val name: String = NAME
     override val supportedSymbologies: Set<Symbology> = setOf(Symbology.MSI_PLESSEY)
 
-    private external fun nativeDecode(gray: ByteArray, width: Int, height: Int): String?
+    private external fun nativeDecode(
+        gray: ByteArray,
+        width: Int,
+        height: Int,
+        requiredPolicy: Int,
+    ): String?
+
+    private val requiredNativePolicy: Int = nativePolicyCode(checksumPolicy)
 
     // Single-path temporal voting state (see [MsiVoteGate]; synchronized).
     private val voteGate = MsiVoteGate(requireConsecutiveFrames)
@@ -90,7 +102,7 @@ class MsiNativeDecoder(
             // to chunk it, but respect cancellation before paying for pixels.
             ensureActiveCompat()
             val raw = try {
-                nativeDecode(gray, w, h)
+                nativeDecode(gray, w, h, requiredNativePolicy)
             } catch (e: UnsatisfiedLinkError) {
                 return@withContext DecodeOutcome.Error(
                     DecoderException("MSI native library not loaded", e),
@@ -188,6 +200,18 @@ class MsiNativeDecoder(
 
     companion object {
         const val NAME = "MsiNative"
+
+        /**
+         * Stable JNI code for the required scheme; must mirror
+         * `toRequiredPolicy` in `msi_jni.cpp`. -1 = no requirement (NONE).
+         */
+        internal fun nativePolicyCode(policy: ScannerConfig.MsiChecksumPolicy): Int = when (policy) {
+            ScannerConfig.MsiChecksumPolicy.MOD_10 -> 0
+            ScannerConfig.MsiChecksumPolicy.MOD_11 -> 1
+            ScannerConfig.MsiChecksumPolicy.MOD_10_10 -> 2
+            ScannerConfig.MsiChecksumPolicy.MOD_10_11 -> 3
+            ScannerConfig.MsiChecksumPolicy.NONE -> -1
+        }
 
         /**
          * True when the native library loaded. False on ABIs we don't ship

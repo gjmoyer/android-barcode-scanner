@@ -21,7 +21,12 @@ data class ScannerConfig(
     val decodeTimeoutMillis: Long,
     /** Suppress identical results within this window (live mode dedup). */
     val duplicateSuppressionMillis: Long,
-    /** MSI Plessey checksum policy (Mod10 default per spec). */
+    /**
+     * MSI Plessey checksum policy (Mod10 default per spec). Enforced inside
+     * native candidate selection, not just on the final read. grocery shelf
+     * tags are 9-digit Mod1010 (item + 2 checks): use MOD_10_10 to emit the
+     * item number and stop Mod10-valid 8-digit truncations from winning.
+     */
     val msiChecksumPolicy: MsiChecksumPolicy,
     /**
      * Minimum MSI payload (checksum-stripped) length to emit. The spec floor is

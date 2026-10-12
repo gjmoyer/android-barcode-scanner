@@ -2,7 +2,9 @@ package com.barcodescanner.sdk.data.msi
 
 import com.barcodescanner.sdk.domain.decoder.DecodeOutcome
 import com.barcodescanner.sdk.domain.model.ScanFrame
+import com.barcodescanner.sdk.domain.model.ScannerConfig
 import kotlinx.coroutines.runBlocking
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -40,6 +42,23 @@ class MsiNativeDecoderGuardTest {
             assertTrue("expected NotFound, got $out", out is DecodeOutcome.NotFound)
         } finally {
             bmp.recycle()
+        }
+    }
+
+    @Test
+    fun nativePolicyCode_pinsJniContract() {
+        // Must mirror toRequiredPolicy() in msi_jni.cpp; a drift silently
+        // pushes the wrong scheme into native candidate selection.
+        val expected = mapOf(
+            ScannerConfig.MsiChecksumPolicy.MOD_10 to 0,
+            ScannerConfig.MsiChecksumPolicy.MOD_11 to 1,
+            ScannerConfig.MsiChecksumPolicy.MOD_10_10 to 2,
+            ScannerConfig.MsiChecksumPolicy.MOD_10_11 to 3,
+            ScannerConfig.MsiChecksumPolicy.NONE to -1,
+        )
+        assertEquals(ScannerConfig.MsiChecksumPolicy.entries.toSet(), expected.keys)
+        expected.forEach { (policy, code) ->
+            assertEquals(policy.name, code, MsiNativeDecoder.nativePolicyCode(policy))
         }
     }
 }

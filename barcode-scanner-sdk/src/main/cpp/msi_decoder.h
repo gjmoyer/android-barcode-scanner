@@ -35,7 +35,13 @@ const char* policyName(ChecksumPolicy p);
 void setDebug(int v);
 
 // Main entry point. gray: row-major grayscale, 0=black, 255=white.
-// Does not retain the buffer. Thread-safe (no shared mutable state).
-DecodeResult decode(const uint8_t* gray, int width, int height);
+// `required`: checksum scheme the caller will enforce. When not NONE, only
+// digit strings validating under it compete in candidate ranking and
+// scanline voting, and `policy` in the result equals it. NONE (default)
+// accepts any supported scheme (MOD10 -> MOD11 -> MOD1010 -> MOD1110,
+// first match reported; every MOD1010/MOD1110 codeword also passes MOD10).
+// Does not retain the buffer. Thread-safe (per-call state is thread-local).
+DecodeResult decode(const uint8_t* gray, int width, int height,
+                    ChecksumPolicy required = ChecksumPolicy::NONE);
 
 } // namespace msi
