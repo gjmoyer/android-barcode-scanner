@@ -975,7 +975,7 @@ bool decodeByDirectSearch(const float* p, int n, std::string& outDigits, float& 
 }
 
 void decodeProfile(const float* p, int n,
-                   std::vector<Candidate>& cands) {
+                   std::vector<Candidate>& cands, float* moduleOut = nullptr) {
     Bar bars[kMaxBars];
     // Use sensitive bar detection in relaxed mode (for faint images).
     int nb = findBars(p, n, bars, kMaxBars, g_relaxedBars);
@@ -983,6 +983,9 @@ void decodeProfile(const float* p, int n,
     float module = 0;
     nb = filterBars(bars, nb, module);
     if (g_debug) printf("[dbg] bars filtered: %d module=%.2f\n", nb, module);
+    if (moduleOut && nb >= 8) {
+        if (*moduleOut <= 0 || module < *moduleOut) *moduleOut = module;
+    }
     if (nb < 1 + 4 * kMinDigits + 2) return;
 
     // Primary: digit-template correlation.
@@ -1022,6 +1025,7 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
     // Try ROI candidates in order (best first by band score).
     // Return the first successful decode; do NOT vote across ROIs
     // (avoids text false positives outvoting the true barcode).
+    float minModuleSeen = 0;  // for the small-module upscale trigger below
     for (int ri = 0; ri < nrois; ++ri) {
         const Rect& roi = rois[ri];
         if (g_debug) printf("[dbg] trying ROI %d x=[%d,%d] y=[%d,%d]\n",
@@ -1046,9 +1050,14 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
         // Key: (digits, policy). Value: (vote count, score sum, module sum).
         struct Votes { int n = 0; float score = 0; float mod = 0; };
         std::map<std::pair<std::string, ChecksumPolicy>, Votes> votes;
+        float roiMinModule = 0;  // smallest plausible module seen in this ROI
         for (auto& pr : profiles) {
             std::vector<Candidate> cands;
-            decodeProfile(pr.data(), (int)pr.size(), cands);
+            float profModule = 0;
+            decodeProfile(pr.data(), (int)pr.size(), cands, &profModule);
+            if (profModule > 0.5f &&
+                (roiMinModule <= 0 || profModule < roiMinModule))
+                roiMinModule = profModule;
             // De-dup within this profile: keep highest score per (digits,policy).
             std::sort(cands.begin(), cands.end(),
                       [](const Candidate& a, const Candidate& b) {
@@ -1094,6 +1103,9 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
                 best = kv.first;
             }
         }
+        if (roiMinModule > 0.5f &&
+            (minModuleSeen <= 0 || roiMinModule < minModuleSeen))
+            minModuleSeen = roiMinModule;
         if (bestV > 0) {
             res.ok = true;
             res.digits = best.first;
@@ -1158,8 +1170,17 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
     // back. Runs ONLY on the failure path, so passing inputs never pay for
     // it and can never change outcome; recursion is single-depth by flag.
     // NN (not bilinear) keeps edges crisp for template correlation.
-    if (allowUpscale && width > 0 && height > 0 &&
-        std::max(width, height) < kUpscaleMaxLongEdge) {
+    // Trigger: either a small frame (original far-field case) OR observed
+    // small modules at any frame size (verified 0299692: 839px-wide crop
+    // with 3px modules, 10 disagreeing rows, zero consensus).
+    bool smallFrame = std::max(width, height) < kUpscaleMaxLongEdge;
+    // Threshold 3.5px (not 3.0): module estimates skew high when false bars
+    // join the median, so a true ~2.5px barcode can report 3.0 (verified
+    // 0299692: six rows at exactly 3.00, zero consensus, no retry fired).
+    bool smallModule =
+        minModuleSeen > 0.5f && minModuleSeen < 3.5f &&
+        std::max(width, height) < 2 * kUpscaleMaxLongEdge;
+    if (allowUpscale && width > 0 && height > 0 && (smallFrame || smallModule)) {
         if (g_debug) printf("[dbg] all ROIs missed, trying 2x upscale\n");
         // NN 2x with a +1px source shift: plain 2x duplicates every pixel, so
         // even-parity adjacent pairs are identical and the xstep=2 row sampler
