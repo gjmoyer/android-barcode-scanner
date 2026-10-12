@@ -710,6 +710,14 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
         // Start-guard prefilter (see above). Skip only when clearly narrow;
         // keep borderline cases for the checksum/score machinery.
         if (module > 0.5f && bars[sIdx].width < 1.2f * module) continue;
+        // Quiet-zone gate: inside a symbol, adjacent bar centres are at most
+        // 3.5 modules apart (<= 7 with one missed bar), so a Start hypothesis
+        // whose predecessor bar sits closer than 7 modules is inside the
+        // digit field. Those shifted hypotheses were the dominant source of
+        // confident wrong reads (real photos: wrong 168 -> 55/755; synthetic
+        // sweep 568 -> 139/1440). Noise in a genuine quiet zone fails safe:
+        // NotFound, never a wrong value.
+        if (sIdx > 0 && bars[sIdx].center - bars[sIdx - 1].center < 7.0f * module) continue;
         // Try all plausible nd. Filter by bar count with moderate tolerance.
         // The template score + checksum will filter bad hypotheses.
         // If g_relaxedBars, allow more missing bars (faint images).
