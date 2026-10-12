@@ -578,11 +578,13 @@ void classifyBarsByCorrelation(const float* p, int n, Bar* bars, int nb,
 // 12-module signal window against all 10 digit templates. Uses bar positions
 // only for start alignment and module estimation; no per-bar width labels.
 //
-// Template cache: the blurred templates are a pure function of `module`, and
-// this runs once per scanline profile (up to 10 per ROI) with adjacent
-// profiles usually agreeing bit-exactly on the estimate. An exact float-bit
-// match reuses the previous build bit-identically; anything else rebuilds
-// exactly as before. Thread-local: decode() runs on shared worker threads.
+// Template cache: the blurred templates are a pure function of
+// (`module`, sigma), and this runs once per scanline profile (up to 10 per
+// ROI) with adjacent profiles usually agreeing bit-exactly on the estimate.
+// One slot per sigma hypothesis: a single shared slot was overwritten by
+// each of the three sigmas in turn and never hit. An exact float-bit match
+// reuses the previous build bit-identically; anything else rebuilds exactly
+// as before. Thread-local: decode() runs on shared worker threads.
 struct DigitTemplateCache {
     uint32_t moduleBits = 0;
     uint32_t sigmaBits = 0;
@@ -590,7 +592,8 @@ struct DigitTemplateCache {
     int tmplLen = 0;
     bool valid = false;
 };
-thread_local DigitTemplateCache t_digitCache;
+constexpr int kNumSigmas = 3;
+thread_local DigitTemplateCache t_digitCache[kNumSigmas];
 
 // Guard-pattern check: MSI Start is "110" modules (dark,dark,bright)
 // immediately before the first digit; Stop is "1001" (dark,bright,
@@ -637,7 +640,7 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
     // hypotheses; selection below picks across the pooled set. Template
     // build is ~0.5% of correlation cost, so rebuilds are cheap; the
     // (module, sigma) cache still hits across adjacent agreeing profiles.
-    static const float kSigmaMul[3] = {0.35f, 0.6f, 0.95f};
+    static const float kSigmaMul[kNumSigmas] = {0.35f, 0.6f, 0.95f};
     struct Valid {
         std::string digits;
         float score;
@@ -647,9 +650,10 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
         int sIdx;  // start-bar hypothesis index
         float guard;  // Start/Stop guard margin (larger = better fit)
     };
-    Valid all[4 * 3 * 5 * (kMaxDigits - kMinDigits + 1)];
+    Valid all[4 * kNumSigmas * 5 * (kMaxDigits - kMinDigits + 1)];
     int nall = 0;
-    for (int sgi = 0; sgi < 3; ++sgi) {
+    for (int sgi = 0; sgi < kNumSigmas; ++sgi) {
+    DigitTemplateCache& cache = t_digitCache[sgi];
     uint32_t bits = 0;
     static_assert(sizeof(bits) == sizeof(module), "float bits");
     memcpy(&bits, &module, sizeof(bits));
@@ -657,11 +661,10 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
     float sigmaMul = kSigmaMul[sgi];
     static_assert(sizeof(sbits) == sizeof(sigmaMul), "float bits");
     memcpy(&sbits, &sigmaMul, sizeof(sbits));
-    float (*tmpl)[96] = t_digitCache.tmpl;
+    float (*tmpl)[96] = cache.tmpl;
     int tmplLen = 0;
-    if (t_digitCache.valid && t_digitCache.moduleBits == bits &&
-        t_digitCache.sigmaBits == sbits) {
-        tmplLen = t_digitCache.tmplLen;
+    if (cache.valid && cache.moduleBits == bits && cache.sigmaBits == sbits) {
+        tmplLen = cache.tmplLen;
     } else {
         float sigma = sigmaMul * module;
         // Precompute templates at this module size.
@@ -704,10 +707,10 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
         }  // for (int d...) — one blurred template per digit
     }  // else — cache miss: rebuilt above
     // Publish the build for the next profile with an identical estimate.
-    t_digitCache.moduleBits = bits;
-    t_digitCache.sigmaBits = sbits;
-    t_digitCache.tmplLen = tmplLen;
-    t_digitCache.valid = true;
+    cache.moduleBits = bits;
+    cache.sigmaBits = sbits;
+    cache.tmplLen = tmplLen;
+    cache.valid = true;
 
     // Try each of the first few bars as the start candidate, and plausible n.
     // The checksum gate identifies the correct alignment.
@@ -919,6 +922,7 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
     // Return the first successful decode; do NOT vote across ROIs
     // (avoids text false positives outvoting the true barcode).
     float minModuleSeen = 0;  // for the small-module upscale trigger below
+    bool sawCandidate = false;  // any checksum-valid scanline read, any ROI
     for (int ri = 0; ri < nrois; ++ri) {
         const Rect& roi = rois[ri];
         if (g_debug) printf("[dbg] trying ROI %d x=[%d,%d] y=[%d,%d]\n",
@@ -996,6 +1000,7 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
                 best = kv.first;
             }
         }
+        if (!votes.empty()) sawCandidate = true;
         if (roiMinModule > 0.5f &&
             (minModuleSeen <= 0 || roiMinModule < minModuleSeen))
             minModuleSeen = roiMinModule;
@@ -1023,7 +1028,15 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
     // Threshold 3.5px (not 3.0): module estimates skew high when false bars
     // join the median, so a true ~2.5px barcode can report 3.0 (verified
     // 0299692: six rows at exactly 3.00, zero consensus, no retry fired).
+    // Also requires MSI evidence: at least one scanline produced a
+    // checksum-valid read that then failed the vote gate. Text and texture
+    // clutter also yields small module estimates, so without this every
+    // 1280x720 miss frame paid a 4x-pixel retry (3.1ms vs 0.4ms) for no
+    // reads; real-photo regression keeps every rescued read (755 crops, 0
+    // rows changed) because a genuine small-module tag always leaves
+    // disagreeing candidates behind (0299692: 10 rows, zero consensus).
     bool smallModule =
+        sawCandidate &&
         minModuleSeen > 0.5f && minModuleSeen < 3.5f &&
         std::max(width, height) < 2 * kUpscaleMaxLongEdge;
     if (allowUpscale && width > 0 && height > 0 && (smallFrame || smallModule)) {
