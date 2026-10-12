@@ -813,13 +813,14 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
         }
     }
     if (nall == 0) return false;
-    // Drop truncated duplicates (commercial truth 2026-10-11): shorter is
-    // a strict PREFIX of longer. Drop the shorter only when the longer
-    // BOTH verifies more checks AND fits the observed bar count at least
-    // as well — a phantom extension (truth + mod10(truth), which validates
-    // double-check legs whenever its lucky digit matches, e.g. true
-    // 08281479 /mod10 vs 082814799) otherwise outranks truth on strength
-    // alone despite exceeding the real bar count.
+    // Prefix duplicates: shorter is a strict PREFIX of longer. Every prefix
+    // of a Mod1010 code passes Mod10 (grocery shelf tags are 7-digit item +
+    // Mod10 + Mod10: 39 bars on 101/126 measured real tags), so a tie in
+    // strength must NOT drop the longer — that discarded the true 9-digit
+    // read for its 8-digit truncation (real photos: 237 -> 298/755 ok).
+    // Hard-drop only when strength strictly differs in the longer's favour;
+    // the bar-count fit then decides whether it is a true extension or a
+    // phantom trailing digit. Ties fall through to the fit-first ranking.
     // Phantom LEADING digits (quiet zone as "0") are NOT hard-dropped:
     // real shelf SKUs often start with 0 — bar-fit ranking below tells
     // them apart (phantoms exceed the observed bar count).
@@ -840,7 +841,7 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
             if (fitS < 0) fitS = -fitS;
             if (all[j].strength > all[i].strength && fitL <= fitS)
                 drop[i] = true;  // true extension
-            else if (all[j].strength <= all[i].strength || fitL > fitS)
+            else if (all[j].strength > all[i].strength && fitL > fitS)
                 drop[j] = true;  // phantom trailing digit(s)
         }
     // Rank survivors: closest bar-count fit first (a true hypothesis
