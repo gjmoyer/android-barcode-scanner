@@ -34,11 +34,19 @@ Exit code = number of asserted failures (0 = green).
    (4px → 12px close-up, the `tmplLen` clamp regression), blur/contrast/
    brightness ladder, off-center bands, and negatives (blank/black/noise must
    be honest NotFound, never crash).
-2. **Shelf-photo sweeps**: each of the 6 committed shelf photos decoded
+2. **Shelf-format vectors** (`shelfFormatSuite`, ASSERTED): the real shelf-tag format — 9-digit Mod1010 (7-digit item + two check digits, 39 bars),
+   leading-zero SKUs at 5/4/3 px modules, blurred, clean and with
+   glyph-height text around the symbol, decoded with no required policy and
+   with `ChecksumPolicy::MOD1010` pushed down. Every prefix of these
+   codewords is Mod10-valid and Luhn ignores leading zeros, so they catch
+   8-digit truncations and dropped leading zeros (base 4c9be3b failed 9 of
+   15). Also pins the required-policy contract (unsatisfied scheme =
+   NotFound, satisfied scheme reported as required).
+3. **Shelf-photo sweeps**: each of the 6 committed shelf photos decoded
    across scales {1.0, 0.75, 0.5} × photometric variants × 3 repeats.
    Pristine + mild variants are ASSERTED; harsh scale+photometric combos are
    reported as recall signal (not gates).
-3. **Bench**: 20 timed iterations on a 1280×720 synthetic + the largest
+4. **Bench**: 20 timed iterations on a 1280×720 synthetic + the largest
    photo; fails over a 500 ms mean (devices do this in single-digit ms).
 
 ## A/B behavior checks

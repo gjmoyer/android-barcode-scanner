@@ -5,14 +5,17 @@
 //   1. synthetic vectors rendered from the SPEC (not from the decoder's own
 //      tables): every checksum policy, multiple scales incl. close-up wide
 //      modules, blur/contrast/brightness ladder, negatives;
-//   2. real shelf-photo sweeps (barcode-scanner-sdk/src/test/resources/
+//   2. shelf-tag format vectors (9-digit Mod1010, leading zeros,
+//      text clutter) with and without a required checksum policy;
+//   3. real shelf-photo sweeps (barcode-scanner-sdk/src/test/resources/
 //      msi-shelf/*.png): each photo decoded across scales x photometric
 //      variants x repeats; mild variants are ASSERTED, harsh combos reported;
-//   3. timing bench with a pass/fail budget.
+//   4. timing bench with a pass/fail budget.
 //
 // Exit code = number of asserted failures (0 = all green).
 // Usage: ./build.sh [path/to/cpp/dir]
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -343,12 +346,14 @@ static std::string kValidate(const std::string& full, int policy) {
     return ((full.back() - '0') == c2) ? pay : "";
 }
 
+// `required` is passed straight to msi::decode (host policy pushdown).
 static std::string check(const std::string& name, const Gray& g,
                          const char* wantDigits, const char* wantPolicy,
-                         bool asserted) {
+                         bool asserted,
+                         msi::ChecksumPolicy required = msi::ChecksumPolicy::NONE) {
     if (getenv("MSI_DEBUG")) msi::setDebug(1);
     auto t0 = std::chrono::steady_clock::now();
-    msi::DecodeResult r = msi::decode(g.px.data(), g.w, g.h);
+    msi::DecodeResult r = msi::decode(g.px.data(), g.w, g.h, required);
     if (getenv("MSI_DEBUG")) msi::setDebug(0);
     auto t1 = std::chrono::steady_clock::now();
     long us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
@@ -477,6 +482,66 @@ static void syntheticSuite() {
         noise.px[i] = (uint8_t)(s >> 24);
     }
     check("neg noise", noise, nullptr, nullptr, true);
+}
+
+// Text-like clutter (glyph stems): dark strokes 1-3px wide, 2-9px apart.
+static void addStrokes(Gray& g, int x0, int x1, int y0, int y1, uint32_t seed) {
+    auto rnd = [&seed]() {
+        seed = seed * 1664525u + 1013904223u;
+        return seed >> 16;
+    };
+    for (int x = std::max(0, x0); x < std::min(g.w, x1);) {
+        int w = 1 + (int)(rnd() % 3);
+        for (int y = std::max(0, y0); y < std::min(g.h, y1); ++y)
+            for (int k = 0; k < w && x + k < g.w; ++k) g.px[(size_t)y * g.w + x + k] = 40;
+        x += w + 2 + (int)(rnd() % 8);
+    }
+}
+
+// shelf-tag format, rendered from the spec: 7-digit item + Mod10 +
+// Mod10 over (item + first check) = 9 digits, 39 bars (real-photo truth:
+// 101 of 126 measurable tags; e.g. item 0115783 -> 011578333). Every prefix
+// of such a codeword is itself Mod10-valid, and Luhn ignores leading zeros,
+// so these cases guard the truncation / dropped-leading-0 failures
+// (prefix-drop tie rule, quiet-zone gate) and the required-policy pushdown.
+// Base decoder 4c9be3b read 011578333 as 11578333. Blurred like real
+// captures (crisp renders sit outside the template model, see
+// syntheticSuite); text clutter is glyph-height, at a 10-module quiet zone.
+// Robustness: 108/108 over blur 1-2 x band y 200-240 x bar height 90-130.
+static void shelfFormatSuite() {
+    printf("--- shelf format (spec-rendered 9-digit mod1010) ---\n");
+    using P = msi::ChecksumPolicy;
+    struct Tag { const char* full; int modulePx; };
+    const Tag tags[] = {{"011578333", 5}, {"024307670", 4}, {"082814799", 3}};
+    for (const Tag& t : tags) {
+        const int barsW = (int)modulesFor(t.full).size() * t.modulePx;
+        const int w = barsW + 60 * t.modulePx, h = 400, top = 220, barH = 110;
+        const int bx0 = (w - barsW) / 2, bx1 = bx0 + barsW;
+        std::string tag = std::string(t.full) + " " + std::to_string(t.modulePx) + "px";
+        Gray g = renderMsi(t.full, t.modulePx, w, h, top, barH);
+        boxBlur(g, 1);
+        check("fmt " + tag + " any", g, t.full, nullptr, true);
+        check("fmt " + tag + " req1010", g, t.full, "mod1010", true, P::MOD1010);
+        // Item text line above the bars, words on both sides of the symbol.
+        Gray c = renderMsi(t.full, t.modulePx, w, h, top, barH);
+        addStrokes(c, bx0, bx1, top - 70, top - 30, 7);
+        addStrokes(c, bx1 + 10 * t.modulePx, bx1 + 25 * t.modulePx, top + 20, top + 60, 11);
+        addStrokes(c, bx0 - 25 * t.modulePx, bx0 - 10 * t.modulePx, top + 20, top + 60, 13);
+        boxBlur(c, 1);
+        check("fmt " + tag + " text any", c, t.full, nullptr, true);
+        check("fmt " + tag + " text req1010", c, t.full, "mod1010", true, P::MOD1010);
+    }
+    // Required-policy contract: an unsatisfied scheme is NotFound (no
+    // fallback to another scheme); a satisfied one is reported as required.
+    // (No "MOD11 on a Mod1010 tag" negative: 01157833 is a genuinely
+    // Mod11-valid prefix of 011578333, so a misconfigured host CAN read it.)
+    Gray m10 = renderMsi("12345674", 5, 800, 400, 200, 120);  // Mod10 only
+    boxBlur(m10, 1);
+    check("req mod1010 on mod10-only", m10, nullptr, nullptr, true, P::MOD1010);
+    check("req mod10 on mod10-only", m10, "12345674", "mod10", true, P::MOD10);
+    Gray d = renderMsi("011578333", 5, 900, 400, 200, 120);
+    boxBlur(d, 1);
+    check("req mod10 on mod1010", d, "011578333", "mod10", true, P::MOD10);
 }
 
 struct ShelfCase {
@@ -694,6 +759,7 @@ int main(int argc, char** argv) {
     std::string shelfDir = (argc > 1) ? argv[1]
                                       : "../../barcode-scanner-sdk/src/test/resources/msi-shelf";
     syntheticSuite();
+    shelfFormatSuite();
     shelfSuite(shelfDir);
     benchSuite(shelfDir);
     printf("ASSERTS pass=%d fail=%d (info-only misses=%d)\n", g_assertPass, g_assertFails,
