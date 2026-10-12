@@ -630,7 +630,7 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
         int sIdx;  // start-bar hypothesis index
         float guard;  // Start/Stop guard margin (larger = better fit)
     };
-    Valid all[3 * 5 * (kMaxDigits - kMinDigits + 1)];
+    Valid all[4 * 3 * 5 * (kMaxDigits - kMinDigits + 1)];
     int nall = 0;
     for (int sgi = 0; sgi < 3; ++sgi) {
     uint32_t bits = 0;
@@ -774,6 +774,40 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
         }
     }  // for sIdx — end start-candidate hypotheses for this sigma
     }  // for sgi — end sigma hypotheses; selection pools across sigmas
+    // Path B (parallel logic flow): derivation variants. Shifted reads are
+    // the dominant miss class (truth 02990356 read as 29903564: leading 0
+    // dropped, phantom digit appended). For each direct candidate, also try
+    // strip-first / strip-last / prepend-0; keep whichever validate, at a
+    // small score epsilon so direct reads win ties. Geometry follows the
+    // edit (strip-first starts 4 bars later, prepend starts 4 earlier).
+    // This ADDS candidates — it never removes; existing winners keep their
+    // scores and can only lose to a strictly better-fitting variant.
+    {
+        int ndir = nall;
+        const int cap = (int)(sizeof(all) / sizeof(all[0]));
+        for (int i = 0; i < ndir && nall < cap; ++i) {
+            const std::string& ds = all[i].digits;
+            if (ds.size() < 7) continue;
+            struct Var { std::string t; int sIdx; int need; };
+            Var vars[3] = {{ds.substr(1), all[i].sIdx + 4, all[i].need - 4},
+                           {ds.substr(0, ds.size() - 1), all[i].sIdx, all[i].need - 4},
+                           {"0" + ds, all[i].sIdx - 4, all[i].need + 4}};
+            for (auto& v : vars) {
+                if (v.t.size() < 7 || v.sIdx < 0 || v.need < 1) continue;
+                ChecksumPolicy pv;
+                if (validateChecksum(v.t, pv).empty()) continue;
+                int ndv = (int)v.t.size();
+                float fs = bars[v.sIdx + 1].center - 0.75f * module;
+                float gm = (v.sIdx + 1 < nb)
+                               ? guardMargin(p, n, fs, ndv, module)
+                               : 0;
+                if (nall < cap) {
+                    all[nall++] = {v.t, all[i].score - 0.01f, pv,
+                                   checksumStrength(v.t), v.need, v.sIdx, gm};
+                }
+            }
+        }
+    }
     if (nall == 0) return false;
     // Drop truncated duplicates (commercial truth 2026-10-11): shorter is
     // a strict PREFIX of longer. Drop the shorter only when the longer
@@ -785,7 +819,7 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
     // Phantom LEADING digits (quiet zone as "0") are NOT hard-dropped:
     // real shelf SKUs often start with 0 — bar-fit ranking below tells
     // them apart (phantoms exceed the observed bar count).
-    bool drop[3 * 5 * (kMaxDigits - kMinDigits + 1)] = {};
+    bool drop[4 * 3 * 5 * (kMaxDigits - kMinDigits + 1)] = {};
     for (int i = 0; i < nall; ++i)
         for (int j = 0; j < nall; ++j) {
             if (i == j || all[j].digits.size() <= all[i].digits.size()) continue;
