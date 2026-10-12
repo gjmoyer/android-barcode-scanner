@@ -62,12 +62,13 @@ Java_com_barcodescanner_sdk_data_frame_NativeFrame_nativePrepare(
 
 // MSI decode of a prepared upright luma buffer (direct, stride = width), read
 // in place. Returns "digits|policy|votes|relativeRotation" on success, null
-// on failure. maxOrientations / scanTopFraction: see msi::FrameOptions.
+// on failure. maxOrientations / scanTopFraction / minDigits / maxDigits: see
+// msi::FrameOptions (digit bounds count check digits; 0 = open).
 JNIEXPORT jstring JNICALL
 Java_com_barcodescanner_sdk_data_msi_MsiNativeDecoder_nativeDecodeLuma(
     JNIEnv* env, jobject /*thiz*/,
     jobject gray, jint width, jint height, jint maxOrientations,
-    jfloat scanTopFraction, jint requiredPolicy) {
+    jfloat scanTopFraction, jint requiredPolicy, jint minDigits, jint maxDigits) {
 
     if (width <= 0 || height <= 0) return nullptr;
     const uint8_t* px =
@@ -78,6 +79,8 @@ Java_com_barcodescanner_sdk_data_msi_MsiNativeDecoder_nativeDecodeLuma(
     options.rotationDegrees = 0;  // prepared buffers are already upright
     options.maxOrientations = maxOrientations;
     options.scanTopFraction = scanTopFraction;
+    options.minDigits = minDigits;
+    options.maxDigits = maxDigits;
     // decodeFrame allocates (a full-resolution still needs a ~12 MB rotation
     // scratch); bad_alloc unwinding across JNI would abort the process, so a
     // failed allocation is reported as no read.

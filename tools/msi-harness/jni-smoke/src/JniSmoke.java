@@ -23,23 +23,27 @@ public class JniSmoke {
         int L = 10, T0 = 20, R = SW - 10, B = SH - 20; int cw = R - L, ch = B - T0; int ow = ch, oh = cw;
         ByteBuffer dst = ByteBuffer.allocateDirect(ow * oh * 3 / 2);
         check("prepare ok (stride, unpadded last row, rot 90)", nf.nativePrepare(plane, SW, SH, stride, L, T0, R, B, 90, true, dst));
-        String r = md.nativeDecodeLuma(dst, ow, oh, 1, 0f, 0);
+        String r = md.nativeDecodeLuma(dst, ow, oh, 1, 0f, 0, 0, 0);
         check("decodeLuma -> 12345674|mod10|v|0 (got " + r + ")", r != null && r.startsWith("12345674|mod10|") && r.endsWith("|0"));
-        check("decodeLuma MOD1010 required -> null", md.nativeDecodeLuma(dst, ow, oh, 1, 0f, 2) == null);
+        check("decodeLuma MOD1010 required -> null", md.nativeDecodeLuma(dst, ow, oh, 1, 0f, 2, 0, 0) == null);
+        // Symbol-length bounds (checks included) reach native: 8-digit symbol.
+        check("decodeLuma lengths 8..8 -> read", r != null && r.equals(md.nativeDecodeLuma(dst, ow, oh, 1, 0f, 0, 8, 8)));
+        check("decodeLuma lengths 9..10 -> null", md.nativeDecodeLuma(dst, ow, oh, 1, 0f, 0, 9, 10) == null);
+        check("decodeLuma max 7 -> null", md.nativeDecodeLuma(dst, ow, oh, 1, 0f, 0, 0, 7) == null);
         check("prepare rejects heap src", !nf.nativePrepare(ByteBuffer.allocate(stride * SH), SW, SH, stride, L, T0, R, B, 90, true, dst));
         check("prepare rejects small dst", !nf.nativePrepare(plane, SW, SH, stride, L, T0, R, B, 90, true, ByteBuffer.allocateDirect(ow * oh - 1)));
         check("prepare rejects short src", !nf.nativePrepare(ByteBuffer.allocateDirect(stride * (SH - 1)), SW, SH, stride, L, T0, R, B, 90, true, dst));
         check("prepare rejects out-of-plane box", !nf.nativePrepare(plane, SW, SH, stride, -2, T0, R, B, 90, true, dst));
         check("prepare rejects stride < width", !nf.nativePrepare(plane, SW, SH, SW - 1, L, T0, R, B, 90, true, dst));
         check("prepare rejects null dst", !nf.nativePrepare(plane, SW, SH, stride, L, T0, R, B, 90, true, null));
-        check("decodeLuma rejects small buffer", md.nativeDecodeLuma(ByteBuffer.allocateDirect(10), ow, oh, 1, 0f, 0) == null);
-        check("decodeLuma rejects heap buffer", md.nativeDecodeLuma(ByteBuffer.allocate(ow * oh), ow, oh, 1, 0f, 0) == null);
-        check("decodeLuma rejects overflow dims", md.nativeDecodeLuma(dst, 1 << 20, 1 << 20, 1, 0f, 0) == null);
+        check("decodeLuma rejects small buffer", md.nativeDecodeLuma(ByteBuffer.allocateDirect(10), ow, oh, 1, 0f, 0, 0, 0) == null);
+        check("decodeLuma rejects heap buffer", md.nativeDecodeLuma(ByteBuffer.allocate(ow * oh), ow, oh, 1, 0f, 0, 0, 0) == null);
+        check("decodeLuma rejects overflow dims", md.nativeDecodeLuma(dst, 1 << 20, 1 << 20, 1, 0f, 0, 0, 0) == null);
         // Upside-down prepared view: 1 orientation misses, 2 reads with relRot 180.
         ByteBuffer flip = ByteBuffer.allocateDirect(ow * oh * 3 / 2);
         check("prepare rot 270 (upside-down view)", nf.nativePrepare(plane, SW, SH, stride, L, T0, R, B, 270, true, flip));
-        check("upside-down, 1 orientation -> null", md.nativeDecodeLuma(flip, ow, oh, 1, 0f, 0) == null);
-        String f = md.nativeDecodeLuma(flip, ow, oh, 2, 0f, 0);
+        check("upside-down, 1 orientation -> null", md.nativeDecodeLuma(flip, ow, oh, 1, 0f, 0, 0, 0) == null);
+        String f = md.nativeDecodeLuma(flip, ow, oh, 2, 0f, 0, 0, 0);
         check("upside-down, 2 orientations -> relRot 180 (got " + f + ")", f != null && f.startsWith("12345674|") && f.endsWith("|180"));
         System.out.println(fails == 0 ? "JNI OK" : "JNI FAILURES=" + fails); System.exit(fails);
     }

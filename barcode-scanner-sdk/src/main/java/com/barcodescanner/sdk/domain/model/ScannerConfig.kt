@@ -94,6 +94,21 @@ data class ScannerConfig(
      * generous.
      */
     val scanRegion: ScanRegion? = null,
+    /**
+     * Accepted MSI symbol lengths in digits, check digits included — the whole
+     * codeword in the bars, independent of [msiChecksumPolicy] and
+     * [msiStripChecksum] (commercial SDKs call this the symbol count). Null
+     * (default) accepts any length the engine reads (7..10 digits). grocery
+     * shelf tags are 9 (7-digit item + two checks): `msiSymbolLength(9)`.
+     *
+     * Enforced inside native candidate selection, before scanline voting, and
+     * again on the final read: MSI's weak checksums let phantoms of other
+     * lengths pass by chance (a 7-digit Mod1010 string validates 1 time in
+     * 100), and a filter applied only to the winner would let one of them
+     * outvote the true read and then be withheld. [msiMinPayloadDigits] still
+     * applies to the emitted payload.
+     */
+    val msiSymbolLengths: IntRange? = null,
 ) {
     init {
         require(enabledSymbologies.isNotEmpty()) { "At least one symbology must be enabled" }
@@ -104,6 +119,11 @@ data class ScannerConfig(
         require(decodeTimeoutMillis in 100..10_000L) { "decodeTimeoutMillis out of range" }
         require(duplicateSuppressionMillis >= 0) { "duplicateSuppressionMillis must be >= 0" }
         require(msiMinPayloadDigits in 3..32) { "msiMinPayloadDigits must be 3..32" }
+        msiSymbolLengths?.let {
+            require(!it.isEmpty() && it.first >= 3 && it.last <= 32) {
+                "msiSymbolLengths must be a non-empty range within 3..32, was $it"
+            }
+        }
         require(minConfidence in 0f..1f) { "minConfidence must be 0..1" }
         // Silent footgun guard: fixed engine confidences are ML Kit 0.95 /
         // ZXing 0.9 / MSI 1.0 / OCR 0.5-0.7, so a high floor silently disables
@@ -154,6 +174,7 @@ data class ScannerConfig(
         private var dedup = 1_500L
         private var msi = MsiChecksumPolicy.MOD_10
         private var msiMinDigits = 3
+        private var msiSymbolLengths: IntRange? = null
         private var msiStripCheck = true
         private var msiOcrChecksum = false
         private var minConf = 0.5f
@@ -178,6 +199,10 @@ data class ScannerConfig(
         fun duplicateSuppressionMillis(v: Long) = apply { dedup = v }
         fun msiChecksumPolicy(v: MsiChecksumPolicy) = apply { msi = v }
         fun msiMinPayloadDigits(v: Int) = apply { msiMinDigits = v }
+        /** Accept only MSI symbols of exactly [digits] digits, checks included (see [ScannerConfig.msiSymbolLengths]). */
+        fun msiSymbolLength(digits: Int) = apply { msiSymbolLengths = digits..digits }
+        /** Accepted MSI symbol lengths, checks included; null accepts any (see [ScannerConfig.msiSymbolLengths]). */
+        fun msiSymbolLengths(range: IntRange?) = apply { msiSymbolLengths = range }
         /** Emit full MSI codewords with checks (see [ScannerConfig.msiStripChecksum]). */
         fun msiStripChecksum(v: Boolean) = apply { msiStripCheck = v }
         fun msiOcrRequireChecksum(v: Boolean) = apply { msiOcrChecksum = v }
@@ -211,6 +236,7 @@ data class ScannerConfig(
                 zxingTryHarder = zxingHarder,
                 debugOcrFrameDump = ocrDump,
                 scanRegion = region,
+                msiSymbolLengths = msiSymbolLengths,
             )
         }
     }

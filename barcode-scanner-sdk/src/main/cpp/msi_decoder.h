@@ -53,6 +53,14 @@ struct DecodeOptions {
     // competing print live up there); aim-box crops pass 0 because the box
     // itself is the target area.
     float scanTopFraction = 0.25f;
+    // Accepted symbol lengths in digits, check digits included (the whole
+    // codeword in the bars, e.g. 9 for a 7-digit SKU + 2 checks). 0 leaves a
+    // side unbounded; the engine itself reads 7..10 digits. Applied before
+    // candidate ranking and scanline voting, like `required`: out-of-range
+    // reads never outvote or displace an in-range one. They still count as
+    // MSI evidence for the small-module retry.
+    int minDigits = 0;
+    int maxDigits = 0;
 };
 
 DecodeResult decode(const uint8_t* gray, int width, int height,

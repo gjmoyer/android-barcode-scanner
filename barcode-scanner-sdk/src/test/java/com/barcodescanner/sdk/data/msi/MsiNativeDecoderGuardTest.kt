@@ -120,6 +120,35 @@ class MsiNativeDecoderGuardTest {
     }
 
     @Test
+    fun accept_symbolLengthsBoundTheCodewordUnderAnyPolicy() {
+        val nine = MsiNativeDecoder(
+            checksumPolicy = ScannerConfig.MsiChecksumPolicy.MOD_10_10,
+            requireConsecutiveFrames = 1,
+            symbolLengths = 9..9,
+        )
+        assertEquals(
+            "0115783",
+            (nine.acceptNativeRead("011578333|mod1010|3|0", false) as DecodeOutcome.Success).barcodes.single().rawValue,
+        )
+        // Mod1010-valid phantoms of other lengths are withheld.
+        assertTrue(nine.acceptNativeRead("0115783334|mod1010|3|0", false) is DecodeOutcome.NotFound)
+        assertTrue(nine.acceptNativeRead("0115774|mod1010|3|0", false) is DecodeOutcome.NotFound)
+        // The bound counts the whole codeword, not the stripped payload: the
+        // same 9-digit tag read under Mod10 emits its 8-digit item + check.
+        val nineMod10 = MsiNativeDecoder(
+            checksumPolicy = ScannerConfig.MsiChecksumPolicy.MOD_10,
+            requireConsecutiveFrames = 1,
+            symbolLengths = 9..9,
+        )
+        assertEquals(
+            "01157833",
+            (nineMod10.acceptNativeRead("011578333|mod10|3|0", false) as DecodeOutcome.Success).barcodes.single().rawValue,
+        )
+        // Unbounded by default.
+        assertTrue(shelfDecoder().acceptNativeRead("0115783334|mod1010|3|0", false) is DecodeOutcome.Success)
+    }
+
+    @Test
     fun accept_voteGateNeedsTwoAgreeingReads() {
         val d = shelfDecoder(required = 2)
         assertTrue(d.acceptNativeRead("011578333|mod1010|3|0", false) is DecodeOutcome.NotFound)

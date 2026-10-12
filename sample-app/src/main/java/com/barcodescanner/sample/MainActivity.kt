@@ -249,6 +249,10 @@ class MainActivity : ComponentActivity() {
             // Shelf SKUs are 6+ digits; a lower floor lets blurry live frames
             // emit short false positives (e.g. "0128") with 2 correlated votes.
             .msiMinPayloadDigits(6)
+            // grocery shelf tags are 9-digit symbols (7-digit item + two
+            // checks) under every policy the cycler picks: other lengths are
+            // phantoms, rejected before they can outvote a true read.
+            .msiSymbolLength(9)
             // Default decode timeout (1.5s): live aim-box frames finish in tens
             // of ms; the budget only bounds a stalled frame.
             // Viewfinder ROI: decode only the aimed box (faster frames, less

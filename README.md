@@ -105,6 +105,7 @@ val config = ScannerConfigBuilder()
     .only(Symbology.QR_CODE, Symbology.DATA_BAR_EXPANDED, Symbology.MSI_PLESSEY)
     .msiChecksumPolicy(MsiChecksumPolicy.MOD_10)
     .msiMinPayloadDigits(6)                  // reject short lucky MSI parses (shelf SKUs)
+    .msiSymbolLength(9)                      // grocery shelf tags: 7-digit item + 2 checks
     .decodeTimeoutMillis(1500)               // whole frame budget (preprocessing + orientations + engines)
     .duplicateSuppressionMillis(1500)        // live-mode repeat suppression
     .minConfidence(0.5f)
@@ -125,6 +126,11 @@ val config = ScannerConfigBuilder()
   `item + check` and lose truncation protection.
 - `msiMinPayloadDigits` (default 3, spec floor): raise to ~6 for shelf SKUs;
   short MSI parses validate by luck and can win blurry live frames.
+- `msiSymbolLength(n)` / `msiSymbolLengths(range)` (default null = any):
+  accepted MSI symbol lengths, check digits included, independent of the
+  checksum policy. Enforced in native candidate selection before voting, so a
+  phantom of another length can't outvote the true read. grocery shelf tags are
+  9 digits; set it whenever your labels have a fixed length.
 - Duplicate suppression only affects the live `results` flow; one-shot
   `scanBitmap`/`scanFrame` always return the decode result.
 

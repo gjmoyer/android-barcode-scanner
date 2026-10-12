@@ -142,6 +142,16 @@ int checksumStrength(const std::string& full) {
 // thread (NONE = accept any supported scheme). Thread-local so concurrent
 // decodes stay independent; only decode() sets and restores it.
 thread_local ChecksumPolicy t_required = ChecksumPolicy::NONE;
+// Caller symbol-length bounds for the decode() call in progress (0 = open),
+// and a running count of checksum-valid hypotheses they rejected (compared
+// before/after a ROI pass, so it never needs resetting).
+thread_local int t_minDigits = 0;
+thread_local int t_maxDigits = 0;
+thread_local int t_lengthRejected = 0;
+
+bool lengthAllowed(int nd) {
+    return (t_minDigits <= 0 || nd >= t_minDigits) && (t_maxDigits <= 0 || nd <= t_maxDigits);
+}
 
 // Returns payload-without-check on success, empty on failure.
 std::string validateChecksum(const std::string& full, ChecksumPolicy& outPolicy) {
@@ -788,6 +798,14 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
             if (!ok) continue;
             ChecksumPolicy pol;
             if (validateChecksum(digits, pol).empty()) continue;
+            // Host length bounds (DecodeOptions::minDigits/maxDigits) drop
+            // the hypothesis before ranking, so a lucky phantom of a foreign
+            // length can neither win nor displace the in-range read (shelf
+            // barcode set, MOD1010 + 9 digits: two far-field 7-digit phantoms
+            // became true reads, a 10-digit one a miss; no read lost). Still
+            // counted as MSI evidence for the small-module retry trigger:
+            // without that, bounds cost 17 far-field / 2 near / 3 still reads.
+            if (!lengthAllowed(nd)) { ++t_lengthRejected; continue; }
             // Sigma parsimony: heavier-blur templates match noise more
             // easily, so they must win decisively (>0.03/0.06) to outrank
             // the native 0.35 hypothesis. Without this, 0.95-sigma
@@ -912,9 +930,16 @@ DecodeResult decode(const uint8_t* gray, int width, int height, const DecodeOpti
     // Scope the requirement to this call, restoring on every exit path.
     struct RequiredScope {
         ChecksumPolicy prev;
-        ~RequiredScope() { t_required = prev; }
-    } scope{t_required};
+        int prevMin, prevMax;
+        ~RequiredScope() {
+            t_required = prev;
+            t_minDigits = prevMin;
+            t_maxDigits = prevMax;
+        }
+    } scope{t_required, t_minDigits, t_maxDigits};
     t_required = options.required;
+    t_minDigits = std::max(options.minDigits, 0);
+    t_maxDigits = std::max(options.maxDigits, 0);
     const float top = std::min(std::max(options.scanTopFraction, 0.0f), 0.9f);
     return decodeImpl(gray, width, height, /*allowUpscale=*/true, top);
 }
@@ -959,6 +984,7 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
         // Key: (digits, policy). Value: (vote count, score sum, module sum).
         struct Votes { int n = 0; float score = 0; float mod = 0; };
         std::map<std::pair<std::string, ChecksumPolicy>, Votes> votes;
+        const int lengthRejectedBefore = t_lengthRejected;
         float roiMinModule = 0;  // smallest plausible module seen in this ROI
         for (auto& pr : profiles) {
             std::vector<Candidate> cands;
@@ -1012,7 +1038,7 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
                 best = kv.first;
             }
         }
-        if (!votes.empty()) sawCandidate = true;
+        if (!votes.empty() || t_lengthRejected != lengthRejectedBefore) sawCandidate = true;
         if (roiMinModule > 0.5f &&
             (minModuleSeen <= 0 || roiMinModule < minModuleSeen))
             minModuleSeen = roiMinModule;

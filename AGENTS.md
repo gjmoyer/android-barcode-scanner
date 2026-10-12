@@ -53,6 +53,12 @@ emulator image and local fixture photos.
   `MsiNativeDecoder.nativePolicyCode`). The JNI codes are pinned by
   `MsiNativeDecoderGuardTest`; change both sides together. Kotlin still
   re-validates under the policy — keep both layers.
+- `ScannerConfig.msiSymbolLengths` (codeword length, checks included,
+  policy-independent; grocery shelf tags = 9) follows the same path:
+  `DecodeOptions::minDigits/maxDigits` drop foreign-length hypotheses in
+  `decodeByDigitTemplates` *before* voting, and `acceptNativeRead`
+  re-checks. Rejected hypotheses still count as MSI evidence for the
+  small-module retry trigger — dropping that cost far-field reads.
 - With 1-digit checksums, any mechanism that multiplies validation
   lotteries (more hypotheses, derived variants, single-vote acceptance)
   must be gated by independent multi-scanline agreement.

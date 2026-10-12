@@ -105,6 +105,10 @@ struct FrameOptions {
     // See DecodeOptions::scanTopFraction: 0 for aim-box crops, 0.25 for
     // full frames.
     float scanTopFraction = 0.0f;
+    // Symbol length bounds (check digits included; 0 = open). See
+    // DecodeOptions::minDigits.
+    int minDigits = 0;
+    int maxDigits = 0;
 };
 
 // Orientation-aware decode of a contiguous gray buffer (stride = width).

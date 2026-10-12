@@ -61,6 +61,13 @@ class MsiNativeDecoder(
      * must not reset the count the other path is building.
      */
     requireConsecutiveFrames: Int = 2,
+    /**
+     * Accepted symbol lengths, check digits included; null accepts any
+     * (wired from [ScannerConfig.msiSymbolLengths]). Pushed into native
+     * candidate selection before scanline voting, then re-checked on the
+     * reported codeword here.
+     */
+    private val symbolLengths: IntRange? = null,
 ) : BarcodeDecoder {
 
     override val name: String = NAME
@@ -73,9 +80,15 @@ class MsiNativeDecoder(
         maxOrientations: Int,
         scanTopFraction: Float,
         requiredPolicy: Int,
+        minDigits: Int,
+        maxDigits: Int,
     ): String?
 
     private val requiredNativePolicy: Int = nativePolicyCode(checksumPolicy)
+
+    // Native digit bounds; 0 leaves a side open (JNI contract, msi_jni.cpp).
+    private val nativeMinDigits: Int = symbolLengths?.first ?: 0
+    private val nativeMaxDigits: Int = symbolLengths?.last ?: 0
 
     // Single-path temporal voting state (see [MsiVoteGate]; synchronized).
     private val voteGate = MsiVoteGate(requireConsecutiveFrames)
@@ -141,6 +154,8 @@ class MsiNativeDecoder(
                 frame.maxOrientations,
                 frame.scanTopFraction,
                 requiredNativePolicy,
+                nativeMinDigits,
+                nativeMaxDigits,
             )
         } catch (e: UnsatisfiedLinkError) {
             return DecodeOutcome.Error(
@@ -174,6 +189,10 @@ class MsiNativeDecoder(
         if (full.length < minPayloadDigits) {
             voteGate.reset()
             return DecodeOutcome.NotFound("MSI native: payload too short")
+        }
+        if (symbolLengths != null && full.length !in symbolLengths) {
+            voteGate.reset()
+            return DecodeOutcome.NotFound("MSI native: symbol length ${full.length} outside $symbolLengths")
         }
         // Host-policy enforcement: re-validate the reported digits under
         // the configured scheme (see [checksumPolicy]). Rejects foreign

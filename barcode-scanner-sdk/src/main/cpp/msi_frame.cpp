@@ -266,6 +266,8 @@ FrameResult decodeFrame(const uint8_t* gray, int width, int height, const FrameO
     DecodeOptions decodeOptions;
     decodeOptions.required = options.required;
     decodeOptions.scanTopFraction = options.scanTopFraction;
+    decodeOptions.minDigits = options.minDigits;
+    decodeOptions.maxDigits = options.maxDigits;
 
     // One scratch buffer per call (not thread-local): full-resolution stills
     // would otherwise pin ~12 MB per decode thread for the process lifetime.

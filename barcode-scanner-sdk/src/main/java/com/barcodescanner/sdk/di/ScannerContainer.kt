@@ -59,6 +59,7 @@ internal class ScannerContainer(
             // stability gate (2 sightings) + dedup. Every hit still carries
             // the native >=2-vote checksum gate + policy gate.
             requireConsecutiveFrames = 1,
+            symbolLengths = config.msiSymbolLengths,
         )
     }
 
