@@ -261,6 +261,15 @@ outvote it. Superseded by §8.3 before ever shipping. Leave it dead.
    and drops leading digits). A shorter read only drops a longer one that
    extends it when strictly stronger AND better bar-fitting — on ties the
    longer read stays (every prefix of a Mod1010 codeword is Mod10-valid).
+   Each digit window anchors to its own bar, so a dropped or extra bar can
+   push one window off the symbol's uniform pitch onto a lucky template
+   match that still closes the checksum. Checksum-valid hypotheses whose
+   window starts deviate more than `kMaxDigitGridResidual`=1.5 modules from
+   their least-squares line are dropped. True reads stay within 0.63 modules
+   (window/alignment search jitter); a one-bar slip moves ≥2.5. Shelf set,
+   bctest MOD10: scored wrong 16 → 4; NONE: about 26 → 7; MOD1010: phantom
+   on unreadable `0471-4` (near) removed, one far read lost that had
+   matched its check digit two digit-pitches past the symbol.
 5. `validateChecksum`: with a required policy (`decode(..., required)`,
    pushed from `msiChecksumPolicy` via JNI) only that scheme validates, so
    it constrains ranking and voting rather than filtering the winner;

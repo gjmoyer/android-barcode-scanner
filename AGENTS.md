@@ -67,6 +67,12 @@ emulator image and local fixture photos.
 - With 1-digit checksums, any mechanism that multiplies validation
   lotteries (more hypotheses, derived variants, single-vote acceptance)
   must be gated by independent multi-scanline agreement.
+- Digit windows anchor per-bar, so `decodeByDigitTemplates` drops
+  checksum-valid hypotheses whose windows leave the uniform digit grid
+  (`kMaxDigitGridResidual`, 1.5 modules). It runs after the checksum on
+  purpose so off-grid MSI-shaped hypotheses still feed the retry trigger.
+  Vote-dominance, template-margin, source-module vote rules and retry vote
+  floors were measured and rejected: none separated phantoms from true reads.
 - Fixture truth labels in `shelfSuite`/`DeviceMsiTest` that are 8-digit
   `MOD_10` may be truncations of 9-digit tags (research doc §6 caveat).
 

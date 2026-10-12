@@ -83,6 +83,8 @@ Grayscale frame (row-major bytes via JNI)
   → per ROI: averaged profile + up to 9 individual scanline rows
     → bar centers as prominent luminance minima; module = median spacing / 3
     → digit windows correlated against blurred 12-module templates
+    → digit-grid gate: window starts must lie within 1.5 modules of a line
+      (uniform pitch); off-grid checksum-valid hypotheses are dropped
     → checksum gate: host policy pushed down (only that scheme competes);
       NONE = MOD10/MOD11/MOD1010/MOD1110 in order; + ≥2-vote agreement
   → winner = most votes, ties by average score

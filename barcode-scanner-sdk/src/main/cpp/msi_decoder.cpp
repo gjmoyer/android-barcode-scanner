@@ -71,6 +71,12 @@ constexpr int kUpscaleMaxLongEdge = 800;
 // open: identical to 4.5): module estimates on failed ROIs skew high when
 // false bars join the median, so the cap sits well above the true ~2-3px.
 constexpr float kProfileRetryMaxModule = 4.5f;
+// Digit-grid residual ceiling (modules) for decodeByDigitTemplates. MSI digits
+// sit on a uniform 12-module pitch, so the chosen digit windows must fall on a
+// line. Window/alignment search leaves true reads within ~1 module (shelf set:
+// max 0.63); one slipped anchor bar moves a window >=2.5 modules, and
+// checksum-valid phantoms that ride dropped/extra bars sat at 6-52 modules.
+constexpr float kMaxDigitGridResidual = 1.5f;
 
 struct Candidate {
     std::string digits;
@@ -646,6 +652,21 @@ float guardMargin(const float* p, int n, float firstStart, int nd, float module)
     return bright / nbn - dark / ndn;
 }
 
+// Largest distance (px) of any digit window start from the least-squares line
+// through all of them (index -> position).
+float maxDigitGridResidual(const float* pos, int nd) {
+    float sx = 0, sy = 0, sxx = 0, sxy = 0;
+    for (int d = 0; d < nd; ++d) {
+        sx += d; sy += pos[d]; sxx += (float)d * d; sxy += d * pos[d];
+    }
+    float den = nd * sxx - sx * sx;
+    float slope = den != 0 ? (nd * sxy - sx * sy) / den : 0;
+    float icp = (sy - slope * sx) / nd;
+    float mr = 0;
+    for (int d = 0; d < nd; ++d) mr = std::max(mr, fabsf(pos[d] - (icp + slope * d)));
+    return mr;
+}
+
 bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
                             float module, std::string& outDigits, float& outScore) {
     // Build 10 digit templates (12 modules each), blurred.
@@ -778,13 +799,14 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
             if (sIdx + need < nb - loTol) continue;
             std::string digits;
             float totalScore = 0;
+            float winPos[kMaxDigits];
             bool ok = true;
             for (int d = 0; d < nd; ++d) {
                 int barIdx = sIdx + 1 + d * 4;
                 if (barIdx >= nb) { ok = false; break; }
                 float bc = bars[barIdx].center;
                 // Try two alignments: bar is narrow (center 0.5 mod in) or wide (1.0 mod).
-                int bestD = -1; float bestC = -2;
+                int bestD = -1; float bestC = -2; int bestI0 = 0;
                 for (int w = 0; w < 2; ++w) {
                     float dStart = bc - (w == 0 ? 0.5f : 1.0f) * module;
                     // Small offset search ±0.5 module.
@@ -804,12 +826,13 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
                         for (int dig = 0; dig < 10; ++dig) {
                             float c = 0;
                             for (int i = 0; i < tmplLen; ++i) c += seg[i] * tmpl[dig][i];
-                            if (c > bestC) { bestC = c; bestD = dig; }
+                            if (c > bestC) { bestC = c; bestD = dig; bestI0 = i0; }
                         }
                     }
                 }
                 if (bestD < 0) { ok = false; break; }
                 digits.push_back('0' + bestD);
+                winPos[d] = (float)bestI0;
                 totalScore += bestC;
             }
             if (!ok) continue;
@@ -824,6 +847,17 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
                     ++t_policyRejected;
                 continue;
             }
+            // Digit-grid consistency: each digit window is anchored to its
+            // own bar (sIdx+1+4d), so dropped or extra bars can push one
+            // window off the symbol's uniform pitch onto a lucky match that
+            // still closes the checksum (shelf set: MOD10 scored wrong 16 ->
+            // 4, a MOD1010 phantom on an unreadable tag gone; the one true
+            // read lost read its check digit two digit-pitches past the
+            // symbol by chance). Applied after the checksum so off-grid
+            // MSI-shaped hypotheses still count as retry evidence above.
+            if (module > 0.5f &&
+                maxDigitGridResidual(winPos, nd) > kMaxDigitGridResidual * module)
+                continue;
             // Sigma parsimony: heavier-blur templates match noise more
             // easily, so they must win decisively (>0.03/0.06) to outrank
             // the native 0.35 hypothesis. Without this, 0.95-sigma
