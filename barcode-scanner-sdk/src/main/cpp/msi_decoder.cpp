@@ -553,8 +553,9 @@ inline float sampleX(const uint8_t* g, int W, int y, float x) {
 
 // Scanline along the symbol axis at height yc on the ROI centre column, with
 // a verification tail (appendVerifyTail's length) along the same line.
-// Smoothing matches extractProfile + appendVerifyTail: (l + 2c + r) / 4,
-// end samples of the decode part and of the tail raw.
+// Smoothing (l + 2c + r) / 4 matches extractProfile + appendVerifyTail: the
+// decode part's end samples stay raw, the first tail sample reaches back
+// into the ROI, and the last tail sample (no right neighbour here) is raw.
 void extractSkewProfile(const uint8_t* g, int W, int H, const Rect& roi, float yc,
                         float slope, std::vector<float>& out) {
     const float xm = 0.5f * (roi.x0 + roi.x1);
@@ -573,7 +574,7 @@ void extractSkewProfile(const uint8_t* g, int W, int H, const Rect& roi, float y
 }
 
 // Band average with each row shifted along the bars (sub-pixel), plus its
-// verification tail; decode part and tail smoothed separately.
+// verification tail, smoothed like extractSkewProfile.
 void averageSkewProfile(const uint8_t* g, int W, const Rect& roi, float slope,
                         std::vector<float>& out) {
     const int n = roi.x1 - roi.x0;
@@ -588,7 +589,7 @@ void averageSkewProfile(const uint8_t* g, int W, const Rect& roi, float slope,
     for (auto& v : raw) v *= inv;
     out.resize(n + ext);
     for (int i = 0; i < n + ext; ++i) {
-        const bool raw1 = i == 0 || i == n - 1 || i == n || i == n + ext - 1;
+        const bool raw1 = i == 0 || i == n - 1 || i == n + ext - 1;
         out[i] = raw1 ? raw[i] : (raw[i - 1] + 2 * raw[i] + raw[i + 1]) * 0.25f;
     }
 }
