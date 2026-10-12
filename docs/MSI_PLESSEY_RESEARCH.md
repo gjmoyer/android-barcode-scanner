@@ -256,7 +256,10 @@ outvote it. Superseded by §8.3 before ever shipping. Leave it dead.
    correlate against Gaussian-blurred digit templates (two width hypotheses
    × ±0.5-module search) at three blur sigmas (0.35/0.6/0.95 × module),
    pooled. Blurred templates are cached thread-locally per sigma on exact
-   float match of the module estimate (bit-identical). Start hypotheses
+   float match of the module estimate (bit-identical). Each bar's best
+   digit match is memoized per sigma (Starts s and s+4 share windows, and
+   every length repeats the shorter ones). It is bit-identical, and halves
+   open-length clutter cost (mean 6.2 → 3.4 ms, max 54 → 22 ms). Start hypotheses
    must sit on a wide bar and have a ≥7-module quiet zone before them (a
    bar closer than that means the hypothesis starts inside the digit field
    and drops leading digits). A shorter read only drops a longer one that

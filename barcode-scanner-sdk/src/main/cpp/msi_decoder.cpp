@@ -853,6 +853,48 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
     cache.tmplLen = tmplLen;
     cache.valid = true;
 
+    // Best digit match of the 12-module window anchored at one bar, memoized
+    // per sigma: Start s and s+4 share windows, and every length repeats the
+    // shorter lengths' windows, so recomputing per hypothesis multiplied the
+    // dominant cost by (Starts x lengths). Depends only on the bar, module and
+    // templates, so results are bit-identical to recomputing.
+    struct BarMatch { int digit; float corr; int i0; };
+    BarMatch match[kMaxBars];
+    bool matched[kMaxBars];
+    std::fill(matched, matched + nb, false);
+    auto matchAt = [&](int barIdx) -> const BarMatch& {
+        BarMatch& mt = match[barIdx];
+        if (matched[barIdx]) return mt;
+        matched[barIdx] = true;
+        const float bc = bars[barIdx].center;
+        mt = {-1, -2.0f, 0};
+        // Try two alignments: bar is narrow (center 0.5 mod in) or wide (1.0 mod).
+        for (int w = 0; w < 2; ++w) {
+            float dStart = bc - (w == 0 ? 0.5f : 1.0f) * module;
+            // Small offset search ±0.5 module.
+            for (int so = -1; so <= 1; ++so) {
+                float ds = dStart + so * 0.5f * module;
+                int i0 = (int)(ds + 0.5f);
+                if (i0 < 0 || i0 + tmplLen > n) continue;
+                float seg[96];
+                float m = 0;
+                for (int i = 0; i < tmplLen; ++i) { seg[i] = p[i0 + i]; m += seg[i]; }
+                m /= tmplLen;
+                float v = 0;
+                for (int i = 0; i < tmplLen; ++i) { seg[i] -= m; v += seg[i]*seg[i]; }
+                v = sqrtf(v);
+                if (v < 1e-6f) continue;
+                for (int i = 0; i < tmplLen; ++i) seg[i] /= v;
+                for (int dig = 0; dig < 10; ++dig) {
+                    float c = 0;
+                    for (int i = 0; i < tmplLen; ++i) c += seg[i] * tmpl[dig][i];
+                    if (c > mt.corr) { mt.corr = c; mt.digit = dig; mt.i0 = i0; }
+                }
+            }
+        }
+        return mt;
+    };
+
     // Try every bar as the start candidate, and plausible n.
     // The checksum gate identifies the correct alignment. Shelf tags often
     // carry printed clutter left of the symbol (price text, rules), pushing
@@ -910,36 +952,11 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
             for (int d = 0; d < nd; ++d) {
                 int barIdx = sIdx + 1 + d * 4;
                 if (barIdx >= nb) { ok = false; break; }
-                float bc = bars[barIdx].center;
-                // Try two alignments: bar is narrow (center 0.5 mod in) or wide (1.0 mod).
-                int bestD = -1; float bestC = -2; int bestI0 = 0;
-                for (int w = 0; w < 2; ++w) {
-                    float dStart = bc - (w == 0 ? 0.5f : 1.0f) * module;
-                    // Small offset search ±0.5 module.
-                    for (int so = -1; so <= 1; ++so) {
-                        float ds = dStart + so * 0.5f * module;
-                        int i0 = (int)(ds + 0.5f);
-                        if (i0 < 0 || i0 + tmplLen > n) continue;
-                        float seg[96];
-                        float m = 0;
-                        for (int i = 0; i < tmplLen; ++i) { seg[i] = p[i0 + i]; m += seg[i]; }
-                        m /= tmplLen;
-                        float v = 0;
-                        for (int i = 0; i < tmplLen; ++i) { seg[i] -= m; v += seg[i]*seg[i]; }
-                        v = sqrtf(v);
-                        if (v < 1e-6f) continue;
-                        for (int i = 0; i < tmplLen; ++i) seg[i] /= v;
-                        for (int dig = 0; dig < 10; ++dig) {
-                            float c = 0;
-                            for (int i = 0; i < tmplLen; ++i) c += seg[i] * tmpl[dig][i];
-                            if (c > bestC) { bestC = c; bestD = dig; bestI0 = i0; }
-                        }
-                    }
-                }
-                if (bestD < 0) { ok = false; break; }
-                digits.push_back('0' + bestD);
-                winPos[d] = (float)bestI0;
-                totalScore += bestC;
+                const BarMatch& mt = matchAt(barIdx);
+                if (mt.digit < 0) { ok = false; break; }
+                digits.push_back('0' + mt.digit);
+                winPos[d] = (float)mt.i0;
+                totalScore += mt.corr;
             }
             if (!ok) continue;
             ChecksumPolicy pol;
