@@ -116,6 +116,10 @@ constexpr float kMinQuietContrast = 0.3f;
 // Six modules always reach the next bar after a fake Stop (a truncated digit
 // continues within 3 modules) with slack for the +/-0.5-module placement.
 constexpr int kQuietModules = 6;
+// Fewest visible modules for a leading quiet-zone measurement (lead in
+// GuardEvidence), read from the verification head (prependVerifyHead) since
+// findRoiCandidates keeps only 20px before the first strong column.
+constexpr int kMinLeadModules = 3;
 constexpr float kGuardUnseen = -1e9f;
 
 // Guard evidence of one decoded hypothesis; kGuardUnseen marks an element
@@ -124,10 +128,12 @@ struct GuardEvidence {
     float start = kGuardUnseen;
     float stop = kGuardUnseen;
     float quiet = kGuardUnseen;
+    float lead = kGuardUnseen;  // quiet zone before the Start; not gated
     void keepBest(const GuardEvidence& o) {
         start = std::max(start, o.start);
         stop = std::max(stop, o.stop);
         quiet = std::max(quiet, o.quiet);
+        lead = std::max(lead, o.lead);
     }
 };
 
@@ -452,6 +458,36 @@ void appendVerifyTail(const uint8_t* g, int W, const Rect& roi, int y,
     }
 }
 
+// Verification head: the image columns before roi.x0, the tail's mirror, for
+// the leading quiet-zone measurement (GuardEvidence::lead) only. The ROI keeps
+// just 20px before its first strong column, under 3 modules of a large-module
+// symbol. Same length rule as the tail; the frame edge shortens it.
+int verifyHeadLength(const Rect& roi) {
+    return std::min(std::max(48, (roi.x1 - roi.x0) / 6), roi.x0);
+}
+
+// Prepends the verification head to a scanline (y >= 0) or band-average
+// (y < 0) profile, smoothed like appendVerifyTail.
+void prependVerifyHead(const uint8_t* g, int W, const Rect& roi, int y,
+                       std::vector<float>& pr) {
+    const int ext = verifyHeadLength(roi);
+    if (ext <= 0) return;
+    auto at = [&](int x) {
+        if (y >= 0) return (float)g[y * W + x];
+        float m = 0;
+        for (int r = roi.y0; r < roi.y1; ++r) m += g[r * W + x];
+        return m / (roi.y1 - roi.y0);
+    };
+    std::vector<float> head;
+    head.reserve(ext + pr.size());
+    for (int x = roi.x0 - ext; x < roi.x0; ++x) {
+        const float c = at(x);
+        head.push_back(x - 1 >= 0 ? (at(x - 1) + 2 * c + at(x + 1)) * 0.25f : c);
+    }
+    head.insert(head.end(), pr.begin(), pr.end());
+    pr.swap(head);
+}
+
 // ------------------------------------------------------- skew (tilted bars)
 // A tilted symbol defeats horizontal scanlines: at 7 degrees a 310px symbol
 // drifts 38px vertically, off a 50px-tall bar field, and row averaging smears
@@ -551,47 +587,56 @@ inline float sampleX(const uint8_t* g, int W, int y, float x) {
     return r[xi] * (1 - f) + r[xi + 1] * f;
 }
 
+// Smooths raw samples [verification head | n decode | ext tail] like
+// prependVerifyHead + extractProfile + appendVerifyTail: (l + 2c + r) / 4,
+// with the decode part's end samples, the first head sample and the last
+// tail sample raw, and the tail's first sample reaching back into the ROI.
+void smoothSkewProfile(const std::vector<float>& raw, int head, int n, int ext,
+                       std::vector<float>& out) {
+    out.resize(raw.size());
+    for (int j = 0; j < head; ++j)
+        out[j] = j == 0 ? raw[j] : (raw[j - 1] + 2 * raw[j] + raw[j + 1]) * 0.25f;
+    for (int i = 0; i < n + ext; ++i) {
+        const int j = head + i;
+        const bool raw1 = i == 0 || i == n - 1 || i == n + ext - 1;
+        out[j] = raw1 ? raw[j] : (raw[j - 1] + 2 * raw[j] + raw[j + 1]) * 0.25f;
+    }
+}
+
 // Scanline along the symbol axis at height yc on the ROI centre column, with
-// a verification tail (appendVerifyTail's length) along the same line.
-// Smoothing (l + 2c + r) / 4 matches extractProfile + appendVerifyTail: the
-// decode part's end samples stay raw, the first tail sample reaches back
-// into the ROI, and the last tail sample (no right neighbour here) is raw.
+// the verification head and tail (verifyHeadLength / appendVerifyTail's
+// length) along the same line.
 void extractSkewProfile(const uint8_t* g, int W, int H, const Rect& roi, float yc,
                         float slope, std::vector<float>& out) {
     const float xm = 0.5f * (roi.x0 + roi.x1);
     const int n = roi.x1 - roi.x0;
     const int ext = std::max(0, std::min(std::max(48, n / 6), W - roi.x1));
-    std::vector<float> raw(n + ext);
-    for (int i = 0; i < n + ext; ++i) {
-        const int x = roi.x0 + i;
-        raw[i] = sampleY(g, W, H, x, yc + (x - xm) * slope);
+    const int head = verifyHeadLength(roi);
+    std::vector<float> raw(head + n + ext);
+    for (int j = 0; j < head + n + ext; ++j) {
+        const int x = roi.x0 - head + j;
+        raw[j] = sampleY(g, W, H, x, yc + (x - xm) * slope);
     }
-    out.resize(n + ext);
-    for (int i = 0; i < n + ext; ++i) {
-        const bool raw1 = i == 0 || i == n - 1 || i == n + ext - 1;
-        out[i] = raw1 ? raw[i] : (raw[i - 1] + 2 * raw[i] + raw[i + 1]) * 0.25f;
-    }
+    smoothSkewProfile(raw, head, n, ext, out);
 }
 
 // Band average with each row shifted along the bars (sub-pixel), plus its
-// verification tail, smoothed like extractSkewProfile.
+// verification head and tail, smoothed like extractSkewProfile.
 void averageSkewProfile(const uint8_t* g, int W, const Rect& roi, float slope,
                         std::vector<float>& out) {
     const int n = roi.x1 - roi.x0;
     const int ext = std::max(0, std::min(std::max(48, n / 6), W - roi.x1));
+    const int head = verifyHeadLength(roi);
     const float yc = 0.5f * (roi.y0 + roi.y1);
-    std::vector<float> raw(n + ext, 0.0f);
+    std::vector<float> raw(head + n + ext, 0.0f);
     for (int y = roi.y0; y < roi.y1; ++y) {
         const float dx = -slope * (y - yc);
-        for (int i = 0; i < n + ext; ++i) raw[i] += sampleX(g, W, y, roi.x0 + i + dx);
+        for (int j = 0; j < head + n + ext; ++j)
+            raw[j] += sampleX(g, W, y, roi.x0 - head + j + dx);
     }
     const float inv = 1.0f / std::max(1, roi.y1 - roi.y0);
     for (auto& v : raw) v *= inv;
-    out.resize(n + ext);
-    for (int i = 0; i < n + ext; ++i) {
-        const bool raw1 = i == 0 || i == n - 1 || i == n + ext - 1;
-        out[i] = raw1 ? raw[i] : (raw[i - 1] + 2 * raw[i] + raw[i + 1]) * 0.25f;
-    }
+    smoothSkewProfile(raw, head, n, ext, out);
 }
 
 // ------------------------------------------------------- bar detection
@@ -854,15 +899,17 @@ thread_local DigitTemplateCache t_digitCache[kNumSigmas];
 // units of the digit field's intensity standard deviation. MSI Start is "110"
 // (2-module bar, 1-module space) ending where the first digit window starts;
 // Stop is "1001" (bar, 2-module space, bar) starting where the last digit
-// window ends, then kQuietModules of quiet zone. Positions come from the
+// window ends, then kQuietModules of quiet zone (lead: the same before the
+// Start, reported but not gated). Positions come from the
 // fitted digit windows, not from bar centres (a bar-based estimate biased an
 // earlier guard ranking toward shifted grids). Each element takes the best of
 // three +/-0.5-module placements, matching the window search slack.
 // p[0, n) is the decoded profile; p[n, nVerify) is its verification tail
-// (appendVerifyTail), so a Stop cut tight by the ROI is still measured.
+// (appendVerifyTail), so a Stop cut tight by the ROI is still measured, and
+// p[-nHead, 0) its verification head (prependVerifyHead), read for lead only.
 // Elements past nVerify (the frame edge) stay kGuardUnseen.
-GuardEvidence guardEvidence(const float* p, int n, int nVerify, float firstStart,
-                            float lastEnd, float module) {
+GuardEvidence guardEvidence(const float* p, int n, int nVerify, int nHead,
+                            float firstStart, float lastEnd, float module) {
     GuardEvidence g;
     const int a = std::max(0, (int)firstStart), b = std::min(n, (int)lastEnd);
     if (b - a < 2 || module < 0.5f) return g;
@@ -879,13 +926,35 @@ GuardEvidence guardEvidence(const float* p, int n, int nVerify, float firstStart
         m /= (i1 - i0);
         return true;
     };
+    // mean() that may also read the nHead verification samples before p[0]
+    // (the leading quiet zone only; every other element keeps mean()).
+    auto meanLead = [&](float x0, float x1, float& m) {
+        const int i0 = (int)std::floor(x0 + 0.5f), i1 = (int)std::floor(x1 + 0.5f);
+        if (i0 < -nHead || i1 > nVerify || i1 <= i0) return false;
+        m = 0;
+        for (int i = i0; i < i1; ++i) m += p[i];
+        m /= (i1 - i0);
+        return true;
+    };
     for (int sh = -1; sh <= 1; ++sh) {
         const float s = firstStart + sh * 0.5f * module, e = lastEnd + sh * 0.5f * module;
         // module k after the Stop's leading edge
         auto stopModule = [&](int k, float& m) { return mean(e + k * module, e + (k + 1) * module, m); };
         float bar, space;
-        if (mean(s - 3 * module, s - module, bar) && mean(s - module, s, space))
+        if (mean(s - 3 * module, s - module, bar) && mean(s - module, s, space)) {
             g.start = std::max(g.start, (space - bar) / sd);
+            // Leading quiet zone, measured like the trailing one: darkest
+            // visible module of kQuietModules before the Start bar.
+            float darkestLead = 1e9f, lm;
+            int seenLead = 0;
+            while (seenLead < kQuietModules &&
+                   meanLead(s - (4 + seenLead) * module, s - (3 + seenLead) * module, lm)) {
+                darkestLead = std::min(darkestLead, lm);
+                ++seenLead;
+            }
+            if (seenLead >= kMinLeadModules)
+                g.lead = std::max(g.lead, (darkestLead - bar) / sd);
+        }
         float b0, s1, s2, b3;
         if (!stopModule(0, b0) || !stopModule(1, s1) || !stopModule(2, s2) || !stopModule(3, b3))
             continue;
@@ -1222,9 +1291,9 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
     return true;
 }
 
-// Decodes p[0, n); p[n, nVerify) is the verification tail read only by
-// guardEvidence().
-void decodeProfile(const float* p, int n, int nVerify,
+// Decodes p[0, n); p[n, nVerify) and p[-nHead, 0) are the verification tail
+// and head, read only by guardEvidence().
+void decodeProfile(const float* p, int n, int nVerify, int nHead,
                    std::vector<Candidate>& cands, float* moduleOut = nullptr) {
     Bar bars[kMaxBars];
     // Use sensitive bar detection in relaxed mode (for faint images).
@@ -1242,7 +1311,7 @@ void decodeProfile(const float* p, int n, int nVerify,
     std::string digits;
     float score = 0, firstStart = 0, lastEnd = 0;
     if (decodeByDigitTemplates(p, n, bars, nb, module, digits, score, firstStart, lastEnd)) {
-        const GuardEvidence guard = guardEvidence(p, n, nVerify, firstStart, lastEnd, module);
+        const GuardEvidence guard = guardEvidence(p, n, nVerify, nHead, firstStart, lastEnd, module);
         if (g_debug)
             printf("[dbg] template digits: %s (score=%.3f start=%.2f stop=%.2f quiet=%.2f)\n",
                    digits.c_str(), score, guard.start, guard.stop, guard.quiet);
@@ -1263,13 +1332,16 @@ struct RoiVote {
     std::pair<std::string, ChecksumPolicy> best;
     bool anyCandidate = false;  // any scanline produced a checksum-valid read
     float minModule = 0;        // smallest plausible module seen (px)
+    GuardEvidence guard;        // winner's best guard evidence
 };
 
-// One ROI's scanline profiles. Every line holds n decode samples followed by
-// its verification tail (appendVerifyTail).
+// One ROI's scanline profiles. Every line holds `head` verification samples
+// (prependVerifyHead), n decode samples, then its verification tail
+// (appendVerifyTail).
 struct RoiScanlines {
     std::vector<std::vector<float>> lines;
     int n = 0;
+    int head = 0;
 };
 
 // Why a voted read's best guard evidence fails, or nullptr if it passes.
@@ -1294,7 +1366,8 @@ RoiVote voteScanlines(const RoiScanlines& scan) {
     for (const auto& pr : scan.lines) {
         std::vector<Candidate> cands;
         float profModule = 0;
-        decodeProfile(pr.data(), scan.n, (int)pr.size(), cands, &profModule);
+        decodeProfile(pr.data() + scan.head, scan.n, (int)pr.size() - scan.head, scan.head, cands,
+                      &profModule);
         if (profModule > 0.5f &&
             (out.minModule <= 0 || profModule < out.minModule))
             out.minModule = profModule;
@@ -1358,6 +1431,7 @@ RoiVote voteScanlines(const RoiScanlines& scan) {
             out.votes = kv.second.n;
             out.avgScore = avg;
             out.best = kv.first;
+            out.guard = kv.second.guard;
         }
     }
     out.anyCandidate = !votes.empty();
@@ -1367,10 +1441,10 @@ RoiVote voteScanlines(const RoiScanlines& scan) {
 // 2x linear upsample of a scanline profile at quarter-sample phase
 // (outputs at i-0.25 and i+0.25). No output duplicates an input, so every
 // output pair straddles a true source edge — the 1D analogue of the +1px
-// shift that keeps the 2D NN retry from phase-locking. The decode samples
-// [0, n) and the verification tail are upsampled separately, so the decode
-// part is identical to upsampling it alone.
-void upsampleProfile2x(std::vector<float>& pr, int n) {
+// shift that keeps the 2D NN retry from phase-locking. The verification
+// head, the decode samples and the verification tail are upsampled
+// separately, so the decode part is identical to upsampling it alone.
+void upsampleProfile2x(std::vector<float>& pr, int head, int n) {
     std::vector<float> up(pr.size() * 2);
     auto run = [&](int a, int b) {
         for (int i = a; i < b; ++i) {
@@ -1379,8 +1453,9 @@ void upsampleProfile2x(std::vector<float>& pr, int n) {
             up[2 * i + 1] = 0.75f * c + 0.25f * r;
         }
     };
-    run(0, n);
-    run(n, (int)pr.size());
+    run(0, head);
+    run(head, head + n);
+    run(head + n, (int)pr.size());
     pr.swap(up);
 }
 
@@ -1440,9 +1515,11 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
         // Collect profiles: averaged + several rows, each with its tail.
         RoiScanlines scan;
         scan.n = roi.x1 - roi.x0;
+        scan.head = verifyHeadLength(roi);
         std::vector<float> avg;
         averageProfile(gray, width, roi, avg);
         appendVerifyTail(gray, width, roi, -1, avg);
+        prependVerifyHead(gray, width, roi, -1, avg);
         int bandH = roi.y1 - roi.y0;
         int nLines = std::min(kMaxScanlines, 1 + bandH / 8);
         scan.lines.reserve(nLines + 1);
@@ -1452,6 +1529,7 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
             std::vector<float> pr;
             extractProfile(gray, width, roi, y, pr);
             appendVerifyTail(gray, width, roi, y, pr);
+            prependVerifyHead(gray, width, roi, y, pr);
             scan.lines.push_back(std::move(pr));
         }
 
@@ -1466,6 +1544,7 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
             res.digits = v.best.first;
             res.policy = v.best.second;
             res.votes = v.votes;
+            res.leadingQuiet = v.guard.lead;
             if (g_debug) printf("[dbg] ROI %d succeeded: %s (avg score %.3f)\n",
                                 ri, res.digits.c_str(), v.avgScore);
             return res;
@@ -1489,14 +1568,16 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
     // evidence above): near 118 -> 124, far 88 -> 126, still 116 -> 123 of
     // 141, zero new wrong reads; barcode-free clutter mean 1.5 -> 2.5ms.
     for (auto& scan : retryScans) {
-        for (auto& pr : scan.lines) upsampleProfile2x(pr, scan.n);
+        for (auto& pr : scan.lines) upsampleProfile2x(pr, scan.head, scan.n);
         scan.n *= 2;
+        scan.head *= 2;
         const RoiVote v = voteScanlines(scan);
         if (v.votes > 0) {
             res.ok = true;
             res.digits = v.best.first;
             res.policy = v.best.second;
             res.votes = v.votes;
+            res.leadingQuiet = v.guard.lead;
             if (g_debug) printf("[dbg] 1D 2x retry succeeded: %s\n", res.digits.c_str());
             return res;
         }
@@ -1535,6 +1616,7 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
                 const Rect& sroi = (haveExt && pass == 0) ? ext : roi;
                 RoiScanlines scan;
                 scan.n = sroi.x1 - sroi.x0;
+                scan.head = verifyHeadLength(sroi);
                 std::vector<float> avg;
                 averageSkewProfile(gray, width, sroi, slope, avg);
                 scan.lines.push_back(std::move(avg));
@@ -1548,8 +1630,9 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
                 }
                 RoiVote v = voteScanlines(scan);
                 if (v.votes == 0 && v.minModule > 0.5f && v.minModule < kProfileRetryMaxModule) {
-                    for (auto& pr : scan.lines) upsampleProfile2x(pr, scan.n);
+                    for (auto& pr : scan.lines) upsampleProfile2x(pr, scan.head, scan.n);
                     scan.n *= 2;
+                    scan.head *= 2;
                     v = voteScanlines(scan);
                 }
                 if (v.votes > 0) {
@@ -1557,6 +1640,7 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
                     res.digits = v.best.first;
                     res.policy = v.best.second;
                     res.votes = v.votes;
+                    res.leadingQuiet = v.guard.lead;
                     if (g_debug) printf("[dbg] skew retry succeeded: %s (%.1f deg, pass %d)\n",
                                         res.digits.c_str(), deg, pass);
                     return res;

@@ -523,6 +523,35 @@ static void frameSuite() {
     msi::FrameResult f270 = msi::decodeFrame(side.px.data(), side.w, side.h, fo);
     assertTrue("frame sideways tag: 4 orientations -> relativeRotation 270",
                f270.decode.ok && f270.decode.digits == "12345674" && f270.relativeRotation == 270);
+    fo.maxOrientations = 2;
+    msi::FrameResult f0 = msi::decodeFrame(tag.px.data(), tag.w, tag.h, fo);
+    assertTrue("frame upright tag: 2 orientations (reverse confirmed) -> relativeRotation 0",
+               f0.decode.ok && f0.decode.digits == "12345674" && f0.relativeRotation == 0);
+
+    // 5b. Leading quiet zone (direction arbitration evidence). A 9px module
+    //     puts its 6 quiet modules (54px) past the 20px the ROI keeps before
+    //     its first column: without the verification head only a window
+    //     shifted into the blurred Start bar sees 3 of them, scoring well
+    //     under 1.5. A Start bar 1 module from the frame edge leaves it unseen.
+    msi::DecodeOptions lo;
+    Gray big = renderMsi("12345674", 9, 1600, 400, 100, 200);
+    boxBlur(big, 1);
+    boxBlur(big, 1);
+    msi::DecodeResult bl = msi::decode(big.px.data(), big.w, big.h, lo);
+    assertTrue("frame leadingQuiet measured through the verification head (9px module)",
+               bl.ok && bl.digits == "12345674" && bl.leadingQuiet > 1.5f);
+    Gray crisp = renderMsi("12345674", 7, 1100, 300, 90, 120);
+    const int symX0 = (crisp.w - (int)modulesFor("12345674").size() * 7) / 2;
+    const int cut = symX0 - 7;
+    Gray edge;
+    edge.w = crisp.w - cut;
+    edge.h = crisp.h;
+    edge.px.resize((size_t)edge.w * edge.h);
+    for (int y = 0; y < edge.h; ++y)
+        std::copy_n(crisp.px.data() + (size_t)y * crisp.w + cut, edge.w, edge.px.data() + (size_t)y * edge.w);
+    msi::DecodeResult el = msi::decode(edge.px.data(), edge.w, edge.h, lo);
+    assertTrue("frame leadingQuiet unseen when the Start bar touches the frame edge",
+               el.ok && el.digits == "12345674" && el.leadingQuiet < -1e8f);
 
     // 6. Aim-box crops put the tag anywhere, including the top quarter the
     //    full-frame band search skips (kScanTopFraction).

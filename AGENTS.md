@@ -109,6 +109,11 @@ emulator image and local fixture photos.
   quiet zone is unseen, and the read is rejected unless the length bounds
   forbid a longer symbol. Open lengths (the SDK default) therefore reject
   symbols touching the photo or aim-box edge, by design.
+- Reversed (180°) bars can decode to checksum-valid garbage that clears every
+  guard. `decodeFrame` confirms a read against the opposite view and keeps
+  the clearer leading quiet zone (`pickDirection`; `leadingQuiet` read from
+  the verification head, `prependVerifyHead`). Live frames try 2
+  orientations; never drop the confirm decode when raising orientations.
 - Fixture truth labels in `shelfSuite`/`DeviceMsiTest` that are 8-digit
   `MOD_10` may be truncations of 9-digit tags (research doc §6 caveat).
 

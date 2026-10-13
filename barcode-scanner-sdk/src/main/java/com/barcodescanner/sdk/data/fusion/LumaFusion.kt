@@ -44,7 +44,7 @@ internal class LumaDecode(val outcome: DecodeOutcome, val bufferReusable: Boolea
  * engine sees a second variant of the frame.
  *
  * No Kotlin orientation expansion: MSI tries orientations natively per
- * [LumaFrame.maxOrientations] (1 live, [ScannerConfig.maxOrientationsTried]
+ * [LumaFrame.maxOrientations] (2 live, [ScannerConfig.maxOrientationsTried]
  * for stills); ML Kit and zxing resolve rotation internally. Engines run in
  * the given order (ML Kit -> MSI -> zxing) under one
  * [ScannerConfig.decodeTimeoutMillis] budget with best-so-far on expiry — a

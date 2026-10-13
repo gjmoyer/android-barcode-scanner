@@ -301,11 +301,13 @@ internal class CameraScanManager(
         /** Shared by preview and analysis: one field of view for the box mapping. */
         private val STREAM_ASPECT = AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY
         /**
-         * MSI orientations tried per live frame: upright only. The aim box is
-         * held upright, and reversed reads of upright tags were all false
-         * MOD 10 passes in the aim-box regression (stills still try four).
+         * MSI orientations tried per live frame: upright and upside-down
+         * (sideways tags cannot fit the wide aim box; stills try all four).
+         * The native frame decoder arbitrates a read against the opposite
+         * direction, so reversed bars cannot yield a false read. Doubles the
+         * decode cost of frames without a read.
          */
-        const val LIVE_ORIENTATIONS = 1
+        const val LIVE_ORIENTATIONS = 2
         /** Smallest usable crop edge; anything below is degenerate geometry. */
         const val MIN_CROP_PX = 16
 

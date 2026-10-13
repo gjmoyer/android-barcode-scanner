@@ -96,11 +96,11 @@ struct FrameOptions {
     // camera's sensor rotation (ImageInfo.rotationDegrees).
     int rotationDegrees = 0;
     // Orientations to try (1..4, clamped) in the SDK priority order relative
-    // to upright: 0, 180, 90, 270. Live aim-box frames use 1: in the
-    // simulated aim-box regression every 180-degree read of an upright tag
-    // whose forward read failed was a false MOD 10 pass (reversed bars decode
-    // to garbage), and sideways tags cannot fit a wide box. Stills use 4
-    // (gallery photos arrive in any orientation).
+    // to upright: 0, 180, 90, 270. Live aim-box frames use 2 (a tag held
+    // upside-down reads; sideways tags cannot fit a wide box). Stills use 4
+    // (gallery photos arrive in any orientation). Reversed bars can decode
+    // to checksum-valid garbage, so a read whose reverse view is within
+    // maxOrientations is confirmed against it (see decodeFrame).
     int maxOrientations = 1;
     // See DecodeOptions::scanTopFraction: 0 for aim-box crops, 0.25 for
     // full frames.
@@ -120,9 +120,13 @@ struct FrameOptions {
 // Tries up to options.maxOrientations rotations relative to upright, in the
 // order 0, 180, 90, 270. Each attempt is one msi::decode() on a rotated view
 // (the upright attempt on an upright buffer reads `gray` in place; others
-// rotate into one per-call scratch buffer). First success wins; with
-// options.stretchRetry a second, contrast-stretched sweep follows a miss.
-// Does not retain `gray`. Thread-safe.
+// rotate into one per-call scratch buffer). The first read wins, except that
+// a read at 0 or 90 is confirmed against its reverse view (180 or 270) when
+// that view is within maxOrientations: a different read there is a reversed
+// phantom of one of them, and the one with the clearer leading quiet zone
+// is kept (a near tie rejects the frame). With options.stretchRetry a
+// second, contrast-stretched sweep follows a miss. Does not retain `gray`.
+// Thread-safe.
 FrameResult decodeFrame(const uint8_t* gray, int width, int height, const FrameOptions& options);
 
 } // namespace msi

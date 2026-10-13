@@ -87,6 +87,9 @@ Scandit checksum enum (Mod10/1010/11/1110 naming), tc-lib-barcode (family contex
 - The native engine reads horizontal scanlines per candidate; a 180°-relative
   candidate is flagged via `DecodedBarcode.isUpsideDown` (same convention as
   ML Kit/zxing-cpp), which feeds `ScanResult.fromRotatedFrame`.
+- Live aim-box frames try upright and upside-down. Reversed bars can decode to
+  checksum-valid garbage, so a read is confirmed against the opposite view
+  and the direction with the clearer leading quiet zone wins (§8.3 step 9).
 - Small tilt (up to ±15°) is handled natively by the skew retry (§8.3 step
   7b): scanlines along the measured bar angle. Before it, horizontal
   scanlines tolerated about ±5–7°.
@@ -312,7 +315,9 @@ outvote it. Superseded by §8.3 before ever shipping. Leave it dead.
    - Frame cut: the ROI has no right padding, so every scanline carries a
      verification tail of max(48 px, ROI/6) beyond it, clamped at the frame
      edge (`appendVerifyTail`). Decoding sees only `[0, n)`; the 1D retry
-     upsamples the two parts separately. If the tail is clamped before the
+     upsamples the parts separately. A mirrored verification head before the
+     ROI (`prependVerifyHead`) is read only for the leading quiet zone
+     (`DecodeResult::leadingQuiet`, step 9), which is never gated. If the tail is clamped before the
      quiet zone, the read is rejected unless the length bounds forbid a
      longer symbol. With open lengths (the SDK default), this is meant to
      keep a tag cut by the photo or aim-box edge silent rather than
@@ -379,7 +384,25 @@ outvote it. Superseded by §8.3 before ever shipping. Leave it dead.
    separate helped from unhelped photos (177–237 levels in both groups), so
    there is no skip threshold. Live aim-box crops are stretched up front
    and never retry.
-9. Kotlin (`MsiNativeDecoder`): re-validate strictly under
+9. Direction arbitration, outside `msi::decode`. `decodeFrame` pairs each
+   view with its reverse (0/180, 90/270). When the first view of a pair
+   reads and the reverse is within `maxOrientations`, the reverse is decoded
+   too. A different read there means one of the two is a reversed phantom:
+   MSI bars read backwards give zero-heavy strings (`901000000`,
+   `04210100`) that pass MOD10 about one time in ten and can clear every
+   guard (strict Stop 0.28–0.42). The read with the larger leading quiet
+   zone (darkest of the 6 modules before the Start bar vs the Start bar,
+   ≥3 visible) wins by a margin of 0.3; a near tie or an unseen zone
+   rejects the frame, skipping later views and the stretch retry. Shelf
+   still crops at 0/±6/±10°, MOD10 open lengths: 17 conflicts, all
+   resolved correctly; true reads 1.91–3.04 vs phantoms 0.85–1.66, each
+   pair by ≥0.61. Absolute lead does not separate (true reads from 1.43,
+   phantoms to 1.66), nor do votes or score, so it is not a gate. The ROI
+   keeps only 20 px before its first strong column, so the verification
+   head is required: without it one rotated true read (`0526-1` at +6°) was
+   undecidable. A frame with no read pays nothing extra; a read pays one
+   reverse decode.
+10. Kotlin (`MsiNativeDecoder`): re-validate strictly under
    `msiChecksumPolicy`, strip check digits, reject degenerate
    single-repeated-digit payloads (blank areas decode as validating zeros).
 
@@ -540,6 +563,16 @@ crop edge) and stay at 5 with the stretch retry. NONE goes from 6 to 7:
 `0481-2` at +10° reads a checksum-less 8-digit fragment. The host harness asserts the synthetic shelf
 format at ±3–12° with and without text clutter (`tiltSuite`; 2f5406b missed
 12 of those 48), plus tilted text strokes that must stay silent.
+
+Upside-down. Live frames try upright and upside-down
+(`CameraScanManager.LIVE_ORIENTATIONS` = 2). The aim-box crops rotated 180°
+read exactly as upright under every policy and length bound (MOD10 and
+MOD1010 148/140, NONE 147/137 with the same 2 far wrong reads). Before
+direction arbitration (§8.3 step 9), MOD10 at open lengths misread 5 near
+and 1 far upside-down tags: the reversed view read first. Upright results,
+full photos and the rotated sets are unchanged. The second orientation
+doubles the cost of a frame with no read: 9-digit MOD10 clutter latency
+went from 4.0/13.5/28.2 to 8.0/26.7/63.5 ms (mean/p95/max, host).
 
 Scored misses left at 9-digit bounds: far-only `0457-1` and `0504-4`. The
 still-only `0446-6`, `0481-2` and `0533-1` read with the still stretch

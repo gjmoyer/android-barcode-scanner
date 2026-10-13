@@ -27,6 +27,12 @@ struct DecodeResult {
     ChecksumPolicy policy = ChecksumPolicy::NONE;
     // Number of independent scanline observations that agreed on `digits`.
     int votes = 0;
+    // Contrast of the quiet zone before the read's Start bar (digit-field
+    // standard deviations; larger = cleaner), best agreeing scanline. Below
+    // -1e8 when fewer than 3 modules of it were visible. Not a gate: the
+    // frame decoder compares it between a read and a conflicting read of
+    // the 180-degree view (msi::decodeFrame).
+    float leadingQuiet = -1e9f;
 };
 
 const char* policyName(ChecksumPolicy p);

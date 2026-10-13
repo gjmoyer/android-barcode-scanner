@@ -20,8 +20,8 @@ import java.nio.ByteBuffer
  * included (see the camera buffer pool).
  *
  * @param maxOrientations MSI orientations tried natively (1..4, order 0, 180,
- *   90, 270). Live aim-box frames use 1: reversed reads of upright tags were
- *   all false MOD 10 passes in the aim-box regression.
+ *   90, 270). Live aim-box frames use 2 (upright and upside-down); a read is
+ *   confirmed against the opposite direction when that view is tried.
  * @param scanTopFraction Share of the height the MSI band search skips (see
  *   `msi::DecodeOptions`): 0 for aim-box crops, 0.25 for full frames.
  * @param stretchRetry When the MSI read fails, retry it once through the

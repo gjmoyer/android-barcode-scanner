@@ -184,6 +184,29 @@ void grayInto(const PixelView& src, int scale, int outW, int outH, uint8_t* out)
     }
 }
 
+// Direction arbitration (decodeFrame). MSI bars read backwards decode to
+// garbage that can still pass one check digit, and nothing in a single
+// direction exposes it: shelf set, aim-box crops shown upside-down, MOD10 at
+// open lengths gave 5 near + 1 far wrong reads, each accepted in the first
+// view before the right one was tried. A read and a different read of the
+// opposite (180-degree) view cannot both be true, and the true one has the
+// clearer quiet zone before its Start (DecodeResult::leadingQuiet): over the
+// shelf still crops at 0/+-6/+-10 degrees, MOD10 open lengths, all 17
+// conflicts had true reads at 1.91-3.04 vs reversed phantoms at 0.85-1.66,
+// each pair by >= 0.61. Votes and template score do not separate them. A
+// near tie or an unmeasured zone rejects the frame.
+constexpr float kMinReverseLeadMargin = 0.3f;
+
+// 1 keeps `first`, -1 keeps `reverse`, 0 is undecidable.
+int pickDirection(const DecodeResult& first, const DecodeResult& reverse) {
+    constexpr float kSeen = -1e8f;
+    if (first.leadingQuiet < kSeen || reverse.leadingQuiet < kSeen) return 0;
+    const float d = first.leadingQuiet - reverse.leadingQuiet;
+    if (d >= kMinReverseLeadMargin) return 1;
+    if (d <= -kMinReverseLeadMargin) return -1;
+    return 0;
+}
+
 } // namespace
 
 int stillGrayDim(int dim, int scale) {
@@ -275,26 +298,46 @@ FrameResult decodeFrame(const uint8_t* gray, int width, int height, const FrameO
     // One scratch buffer per call (not thread-local): full-resolution stills
     // would otherwise pin ~12 MB per decode thread for the process lifetime.
     std::vector<uint8_t> scratch;
-    // One sweep over the orientations; a non-null `lut` is applied in the
-    // same pass as the rotation (so even the upright view goes to scratch).
+    // Decodes the view kOrder[k] from upright; a non-null `lut` is applied in
+    // the same pass as the rotation (so even the upright view goes to scratch).
+    const auto decodeAt = [&](int k, const uint8_t* lut) {
+        const int deg = (sensor + kOrder[k]) % 360;
+        const uint8_t* view = gray;
+        int vw = width;
+        int vh = height;
+        if (deg != 0 || lut != nullptr) {
+            scratch.resize(static_cast<size_t>(width) * static_cast<size_t>(height));
+            rotateInto(gray, width, width, height, deg, lut, scratch.data());
+            view = scratch.data();
+            if (deg == 90 || deg == 270) std::swap(vw, vh);
+        }
+        return decode(view, vw, vh, decodeOptions);
+    };
+    // One sweep over the orientations. kOrder pairs each view with its
+    // reverse (0/180, 90/270): when the first of a pair reads and the reverse
+    // is within maxOrientations, the reverse is decoded too and a different
+    // read there is arbitrated (pickDirection). Returns true once the frame
+    // is settled: a read, or an undecidable conflict, which is no read
+    // (later views and the stretch retry would revisit the same symbol).
     const auto sweep = [&](const uint8_t* lut) {
         for (int k = 0; k < attempts; ++k) {
-            const int deg = (sensor + kOrder[k]) % 360;
-            const uint8_t* view = gray;
-            int vw = width;
-            int vh = height;
-            if (deg != 0 || lut != nullptr) {
-                scratch.resize(static_cast<size_t>(width) * static_cast<size_t>(height));
-                rotateInto(gray, width, width, height, deg, lut, scratch.data());
-                view = scratch.data();
-                if (deg == 90 || deg == 270) std::swap(vw, vh);
+            DecodeResult r = decodeAt(k, lut);
+            if (!r.ok) continue;
+            int relative = kOrder[k];
+            if (k % 2 == 0 && k + 1 < attempts) {
+                DecodeResult reverse = decodeAt(k + 1, lut);
+                if (reverse.ok && reverse.digits != r.digits) {
+                    const int pick = pickDirection(r, reverse);
+                    if (pick == 0) return true;
+                    if (pick < 0) {
+                        r = std::move(reverse);
+                        relative = kOrder[k + 1];
+                    }
+                }
             }
-            DecodeResult r = decode(view, vw, vh, decodeOptions);
-            if (r.ok) {
-                result.decode = std::move(r);
-                result.relativeRotation = kOrder[k];
-                return true;
-            }
+            result.decode = std::move(r);
+            result.relativeRotation = relative;
+            return true;
         }
         return false;
     };
