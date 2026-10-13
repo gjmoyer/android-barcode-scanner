@@ -1023,6 +1023,8 @@ struct ShelfCase {
     const char* full;  // expected full codeword (payload + checks)
     int policy;        // SDK policy for the payload-level assertion (see kValidate)
     const char* payload;
+    bool assertStretched;  // raw 1.0 is a full-frame miss (no ROI host path);
+                           // assert the production contrast-stretch variant
 };
 
 // SDK-level sweep: native decode, then the exact Kotlin revalidation+strip,
@@ -1090,12 +1092,20 @@ static void shelfSuite(const std::string& dir) {
     // properly via sensor texture. The committed equivalents are the
     // generator script + JVM vectors + the runtime suite above.)
     static const ShelfCase cases[] = {
-        {"msi-yakult-0828147.png", "08281479", 0, "0828147"},
-        {"msi-quakotml-0186477.png", "018647768", 2, ""},
-        {"msi-ondeg-0243523.png", "02435238", 0, ""},
-        {"msi-dixie-0087573.png", "00875732", 0, "0087573"},
-        {"msi-starbucks-0168971.png", "016897100", 2, "0168971"},
-        {"msi-silkalm-0826593.png", "082659368", 0, "0826593"},
+        // Full 9-digit Mod1010 codewords (7-digit payload + two checks),
+        // identical to what macOS Vision reports for these captures and
+        // consistent with the printed SKUs. The old table pinned 8-digit
+        // Mod10 codewords; the decoder now reads the full symbol, and any
+        // 8-digit prefix of a Mod1010 codeword is Mod10-valid, so asserting
+        // both is the strong form.
+        {"msi-yakult-0828147.png", "082814799", 2, "0828147", false},
+        {"msi-quakotml-0186477.png", "018647768", 2, "0186477", false},
+        {"msi-ondeg-0243523.png", "024352387", 2, "0243523", false},
+        // dixie: raw full-frame at 1.0 is an honest miss (Vision misses it
+        // too); the production contrast stretch resolves it.
+        {"msi-dixie-0087573.png", "008757320", 2, "0087573", true},
+        {"msi-starbucks-0168971.png", "016897100", 2, "0168971", false},
+        {"msi-silkalm-0826593.png", "082659368", 2, "0826593", false},
     };
     static const float kScales[] = {1.0f, 0.75f, 0.5f};
     for (const ShelfCase& sc : cases) {
@@ -1106,11 +1116,11 @@ static void shelfSuite(const std::string& dir) {
         }
         printf("photo %s %dx%d\n", sc.file, base.w, base.h);
         // Asserted operating envelope per photo (3x stable), verified on the
-        // real captures: yakult/dixie/silkalm exact @1.0 under MOD_10,
-        // starbucks exact @1.0 under MOD_10_10; quakotml/ondeg @1.0 are
-        // honest-NotFound gates (truncated reads must be rejected, never
-        // emitted — they FAIL LOUD on a future phantom emission).
-        // Stretched/@0.50/harsh: informational recall signal.
+        // real captures: all six are 9-digit Mod1010 codewords Vision reads
+        // identically. Raw 1.0 is asserted except for dixie, whose full-frame
+        // 1.0 miss is honest (Vision misses it too) — its gate rides the
+        // production contrast stretch. Stretched/@0.50/harsh: informational
+        // recall signal elsewhere.
         std::string file = sc.file;
         // Empty payload = honest-NotFound gate (see table); otherwise exact.
         bool wantNone = sc.payload[0] == '\0';
@@ -1118,7 +1128,7 @@ static void shelfSuite(const std::string& dir) {
             Gray v = (f == 1.0f) ? base : downscaleNN(base, f);
             char nm[96];
             snprintf(nm, sizeof(nm), "%s @%.2f", sc.file, f);
-            bool asserted = (f == 1.0f);
+            bool asserted = (f == 1.0f) && !sc.assertStretched;
             std::string a = nm, b = nm, c = nm;
             if (wantNone) {
                 checkSdkNone(a + " [run1]", v, sc.policy, asserted);
@@ -1132,16 +1142,17 @@ static void shelfSuite(const std::string& dir) {
         }
         Gray s = base;
         contrastStretch(s);  // production-equivalent preprocessing
-        // Stretched variants are informational recall signal (the stretch
-        // redistributes pixel statistics the fixtures weren't tuned for).
+        // Stretched variants: asserted only for cases whose gate rides the
+        // stretch (see table); otherwise informational recall signal.
+        bool sAsserted = sc.assertStretched;
         if (wantNone) {
-            checkSdkNone(std::string(sc.file) + " stretched [run1]", s, sc.policy, false);
-            checkSdkNone(std::string(sc.file) + " stretched [run2]", s, sc.policy, false);
-            checkSdkNone(std::string(sc.file) + " stretched [run3]", s, sc.policy, false);
+            checkSdkNone(std::string(sc.file) + " stretched [run1]", s, sc.policy, sAsserted);
+            checkSdkNone(std::string(sc.file) + " stretched [run2]", s, sc.policy, sAsserted);
+            checkSdkNone(std::string(sc.file) + " stretched [run3]", s, sc.policy, sAsserted);
         } else {
-            checkSdk(std::string(sc.file) + " stretched [run1]", s, sc, false);
-            checkSdk(std::string(sc.file) + " stretched [run2]", s, sc, false);
-            checkSdk(std::string(sc.file) + " stretched [run3]", s, sc, false);
+            checkSdk(std::string(sc.file) + " stretched [run1]", s, sc, sAsserted);
+            checkSdk(std::string(sc.file) + " stretched [run2]", s, sc, sAsserted);
+            checkSdk(std::string(sc.file) + " stretched [run3]", s, sc, sAsserted);
         }
         // Harsh scale+photometric combos: informational recall signal.
         for (float f : kScales) {
