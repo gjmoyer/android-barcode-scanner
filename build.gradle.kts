@@ -9,7 +9,7 @@ plugins {
 // (version from libs.versions.kotlin). Do NOT apply it in modules.
 buildscript {
     dependencies {
-        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:${libs.versions.kotlin.get()}")
+        classpath(libs.kotlin.gradle.plugin)
     }
 }
 
