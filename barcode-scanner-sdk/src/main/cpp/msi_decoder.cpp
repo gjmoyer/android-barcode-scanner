@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <iterator>
 #include <map>
 #include <string>
 #include <vector>
@@ -1129,7 +1130,7 @@ const char* guardFailure(const GuardEvidence& g, int nd);
 // window is placed one digit pitch (12 modules) after the previous window's
 // best match, with +/-0.5 module of slack, so the bars only seed the Start.
 // The bar-spacing module estimate is quantised (3.00 for a true 2.85), and
-// its error compounds over the digits, so kGridScales retries the pitch.
+// its error compounds over the digits, so several pitches are tried (below).
 // Each hypothesis must pass the checksum, the grid residual, the score floor
 // and its own Start/Stop/quiet-zone guards on this scanline (stricter than
 // voteScanlines, which only needs each guard on one agreeing line); the
@@ -1144,17 +1145,67 @@ const char* guardFailure(const GuardEvidence& g, int nd);
 // less work) kept 300 items, every grid-only read among them, and 0 wrong;
 // with the early track exit below, barcode-free clutter costs 8.1ms mean
 // against 8.0 without the grid (3430 aim views, desktop).
-constexpr float kGridScales[] = {0.94f, 1.0f, 1.06f};
+// At ~2px/module the bar-spacing estimate runs 10-14% high (2.33 for a true
+// 2.14 on 0444-4), outside the old 0.94/1.06 retries, so the pitch set is
+// the bar estimate plus the spectral estimate (spectralModule) at
+// kGridSpecScales: the spectral pitch is within -4.1%..+1.0% of the true
+// pitch (5th..95th percentile, all 162 near crops; median -0.2%). With the
+// 3-vote grid rule (voteScanlines), against bar x0.94/1/1.06 it reads 3-11
+// more items per shelf-set matrix row and 0 new wrong reads, for +1.1ms of
+// clutter (9.3 vs 8.2ms mean, 3430 aim views, desktop). Bar x1.0 keeps two
+// far tags (0444-4, 0506-4) that spectral pitches alone lose; bar
+// x0.94/1.06 on top added nothing and cost another 0.8ms.
+constexpr float kGridSpecScales[] = {0.97f, 1.0f, 1.03f};
 constexpr int kGridSigmas = 2;             // kSigmaMul[0..1]
 constexpr float kGridMinDigitCorr = 0.4f;  // tracking stops below this
 constexpr float kGridMinReadCorr = 0.6f;   // weakest digit of a read
 constexpr float kGridMinScore = 0.7f;      // mean digit correlation of a read
+// Module from the bit period: every MSI bit is 3 modules (bar+space = 1+2 or
+// 2+1), so the scanline's power spectrum peaks at period 3*module. Scans
+// candidate modules lo..hi in 1% steps (Hann window, mean removed, DFT bin
+// by rotation recurrence); returns the strongest, or 0 if the line is too
+// short. It uses every edge on the line rather than a few bar spacings, so
+// it is not quantised the way the bar estimate is.
+float spectralModule(const float* p, int n, float lo, float hi) {
+    if (n < 16 || lo <= 0) return 0;
+    constexpr float kTwoPi = 6.28318531f;
+    float mu = 0;
+    for (int i = 0; i < n; ++i) mu += p[i];
+    mu /= n;
+    std::vector<float> v(n);
+    const float wk = kTwoPi / (n - 1);
+    for (int i = 0; i < n; ++i) v[i] = (p[i] - mu) * (0.5f - 0.5f * std::cos(wk * i));
+    float best = -1, bestM = 0;
+    for (float m = lo; m <= hi; m *= 1.01f) {
+        const float w = kTwoPi / (3.0f * m);
+        const float c = std::cos(w), s = std::sin(w);
+        float re = 0, im = 0, cr = 1, ci = 0;
+        for (int i = 0; i < n; ++i) {
+            re += v[i] * cr;
+            im += v[i] * ci;
+            const float t = cr * c - ci * s;
+            ci = cr * s + ci * c;
+            cr = t;
+        }
+        const float pw = re * re + im * im;
+        if (pw > best) { best = pw; bestM = m; }
+    }
+    return bestM;
+}
 void decodeByDigitGrid(const float* p, int n, int nVerify, int nHead, const Bar* bars, int nb,
                        float module, std::vector<Candidate>& cands) {
     if (module < 0.5f) return;
     Candidate best{{}, ChecksumPolicy::NONE, -1e9f, 0, {}};
-    for (float scale : kGridScales) {
-        const float mod = module * scale;
+    float mods[1 + std::size(kGridSpecScales)];
+    int nMods = 0;
+    mods[nMods++] = module;
+    // The search window spans the bar estimate's observed bias (high at small
+    // modules) with margin; outside it the 3/2 and 3/4 harmonics compete.
+    const float sm = spectralModule(p, n, 0.75f * module, 1.10f * module);
+    if (sm > 0)
+        for (float scale : kGridSpecScales) mods[nMods++] = sm * scale;
+    for (int mi = 0; mi < nMods; ++mi) {
+        const float mod = mods[mi];
         for (int sgi = 0; sgi < kGridSigmas; ++sgi) {
             float tmpl[10][96];
             const int len = buildDigitTemplates(mod, kSigmaMul[sgi] * mod, tmpl);
@@ -1259,6 +1310,17 @@ void decodeByDigitGrid(const float* p, int n, int nVerify, int nHead, const Bar*
                         if (!why && isPrefix(nd)) why = "prefix";
                         if (!why && score < kGridMinScore) why = "score";
                         if (!why && minCorr < kGridMinReadCorr) why = "weak digit";
+                        // A track can substitute one digit on a weak window.
+                        // Mod10/1010/1110 reject every single substitution
+                        // (Luhn), and so does Mod11 on a Mod11 symbol, but a
+                        // Luhn symbol with one wrong digit is Mod11-valid
+                        // about 1 time in 11. So with no caller scheme a
+                        // grid read may not be Mod11-only. Synthetic 1.9-2.5px
+                        // bleed renders of 12 shelf tags (576): the spectral
+                        // pitch added 4 such reads (027996669 -> 027896669),
+                        // 0 under MOD10 or MOD1010; this rule removes them.
+                        if (!why && pol == ChecksumPolicy::MOD11 && t_required == ChecksumPolicy::NONE)
+                            why = "mod11 open";
                         if (g_debug) {
                             int pd = -1;
                             float prevCorr = -2.0f, pp = 0;
@@ -1396,9 +1458,18 @@ RoiVote voteScanlines(const RoiScanlines& scan, bool grid = false) {
     // Small-module reads (<2.5px) need 6 agreeing scanlines instead of
     // 2: at ~2px/module quantization noise dominates and confident
     // wrong values outvote truth 4-to-1 (verified 0115783-hand).
+    // Grid reads need 3: each one already passed its own per-line Start/
+    // Stop/quiet-zone guards and per-digit score gates (decodeByDigitGrid),
+    // which the template-path 0115783-hand reads did not. Shelf set, with
+    // the spectral grid pitch: 0444-4 and 0445-2 near and still, far
+    // 0444-4/0452-1/0457-1/0488-1/0506-4, 3 rotated crops and 2-3 photos
+    // read, with 0 new wrong reads (crops at 0/+-6/+-10 degrees, upright
+    // and upside down, every photo; MOD10, MOD1010, NONE, 9-digit and open
+    // lengths). 6 votes held these back: a small, blurred symbol gives the
+    // grid fewer than 6 clean lines.
     for (auto& kv : votes) {
         float avgMod = kv.second.mod / kv.second.n;
-        int need = (avgMod < 2.5f) ? 6 : kMinVotesCheck;
+        int need = (avgMod < 2.5f) ? (grid ? 3 : 6) : kMinVotesCheck;
         if (kv.second.n < need) continue;
         // Start/Stop/quiet-zone confirmation (see kMinStartContrast). Each
         // element is taken from its best agreeing scanline, not required on

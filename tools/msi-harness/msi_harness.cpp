@@ -945,6 +945,79 @@ static void bleedSuite() {
     }
 }
 
+// Area-average downscale by f (<1): fractional module widths with
+// camera-like grey edge pixels, unlike renderMsi's whole-pixel modules.
+static Gray downscaleArea(const Gray& g, float f) {
+    Gray o;
+    o.w = (int)(g.w * f);
+    o.h = (int)(g.h * f);
+    o.px.resize((size_t)o.w * o.h);
+    const float inv = 1.0f / f;
+    for (int y = 0; y < o.h; ++y)
+        for (int x = 0; x < o.w; ++x) {
+            const float sx0 = x * inv, sx1 = (x + 1) * inv, sy0 = y * inv, sy1 = (y + 1) * inv;
+            double acc = 0, wsum = 0;
+            for (int yy = (int)sy0; yy < (int)std::ceil(sy1) && yy < g.h; ++yy) {
+                const float wy = std::min<float>(yy + 1, sy1) - std::max<float>(yy, sy0);
+                for (int xx = (int)sx0; xx < (int)std::ceil(sx1) && xx < g.w; ++xx) {
+                    const float wx = std::min<float>(xx + 1, sx1) - std::max<float>(xx, sx0);
+                    acc += wx * wy * g.px[(size_t)yy * g.w + xx];
+                    wsum += wx * wy;
+                }
+            }
+            o.px[(size_t)y * o.w + x] = (uint8_t)(acc / wsum + 0.5);
+        }
+    return o;
+}
+
+// Small modules (1.9-2.5px, fractional) with and without ink bleed, MOD1010
+// required (the shelf-tag scheme). Near 2px/module the bar-spacing module
+// estimate runs high and the grid retry needs the spectral pitch; grid reads
+// there also need only 3 agreeing lines. Asserts 0 wrong reads and a read
+// floor: 59dc46a (bar pitches, 6 votes) reads 196 of these 240, D10 220.
+static void smallBleedSuite() {
+    printf("--- small-module bleed (fractional 1.9-2.5px, MOD1010) ---\n");
+    const char* tags[] = {"026416032", "029904224", "011578333", "024948473", "008010688"};
+    const struct { int a, b; } fills[] = {{-1, -1}, {2, -1}, {9, -1}, {5, 12}};
+    int reads = 0, wrong = 0, total = 0;
+    for (const char* t : tags)
+        for (float mpx : {1.9f, 2.0f, 2.1f, 2.2f, 2.35f, 2.5f})
+            for (auto& f : fills)
+                for (int blurR = 0; blurR < 2; ++blurR) {
+                    // Rendered at 10px/module, bled, then area-downscaled.
+                    const int M = 10;
+                    const std::string mods = modulesFor(t);
+                    const int barsW = (int)mods.size() * M;
+                    const int w = barsW + 60 * M, h = 600, top = 250, barH = 160;
+                    const int bx0 = (w - barsW) / 2;
+                    Gray g = renderMsi(t, M, w, h, top, barH);
+                    int k = 0;
+                    for (size_t i = 1; i + 1 < mods.size(); ++i) {
+                        if (mods[i] != '0' || mods[i - 1] != '1' || mods[i + 1] != '1') continue;
+                        if (k == f.a || k == f.b)
+                            for (int x = bx0 + (int)i * M; x < bx0 + (int)(i + 1) * M; ++x)
+                                for (int y = top; y < top + barH; ++y) g.px[(size_t)y * w + x] = 0;
+                        ++k;
+                    }
+                    Gray s = downscaleArea(g, mpx / M);
+                    if (blurR) boxBlur(s, blurR);
+                    const msi::DecodeResult r =
+                        msi::decode(s.px.data(), s.w, s.h, msi::ChecksumPolicy::MOD1010);
+                    ++total;
+                    if (r.ok && r.digits == t) {
+                        ++reads;
+                    } else {
+                        if (r.ok) ++wrong;
+                        printf("%s small %s %.2fpx fill %d,%d blur %d got=%s\n",
+                               r.ok ? "WRONG" : "miss(info)", t, mpx, f.a, f.b, blurR,
+                               r.ok ? r.digits.c_str() : "(none)");
+                    }
+                }
+    printf("small-module bleed: %d/%d read, %d wrong\n", reads, total, wrong);
+    assertTrue("small-module bleed: 0 wrong reads", wrong == 0);
+    assertTrue("small-module bleed: >= 220 reads", reads >= 220);
+}
+
 struct ShelfCase {
     const char* file;
     const char* full;  // expected full codeword (payload + checks)
@@ -1163,6 +1236,7 @@ int main(int argc, char** argv) {
     shelfFormatSuite();
     tiltSuite();
     bleedSuite();
+    smallBleedSuite();
     shelfSuite(shelfDir);
     frameSuite();
     benchSuite(shelfDir);

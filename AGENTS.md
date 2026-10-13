@@ -86,9 +86,15 @@ emulator image and local fixture photos.
   normal vote. The prefix rule must also drop an equal-strength prefix when
   the longer read closes: an 8-digit prefix of a Mod1010 tag is
   Mod1010-valid one time in ten. Moving it ahead of the skew retry lost
-  tilted reads; re-measure clutter latency (desktop 8.1 ms mean) and
-  wrong reads before widening its scales, sigmas or scope (the 2D
-  recursion, deskewed scanlines).
+  tilted reads. Pitches are the bar estimate ×1.0 plus `spectralModule`
+  (bit-period DFT peak) ×`kGridSpecScales`: the bar estimate runs 10–14%
+  high near 2px/module. Grid reads below 2.5px need 3 agreeing lines (the
+  template path keeps 6), and with no caller scheme may not be Mod11-only
+  (a one-digit substitution on a Luhn symbol passes Mod11 1 time in 11).
+  Re-measure clutter latency (desktop 9.3 ms mean)
+  and wrong reads before widening its pitches, sigmas, votes or scope (the
+  2D recursion, deskewed scanlines). A split-band ROI retry was rejected
+  (template prefix and Mod11 wrong reads).
 - Stills retry stretched (`FrameOptions.stretchRetry`, set only by
   `NativeFrame.prepareStill`): `decodeFrame` sweeps every orientation
   plain, then once more through the 2%/98% contrast stretch. Never stretch
@@ -133,7 +139,7 @@ emulator image and local fixture photos.
 ## Validating decoder changes
 
 Every change to `msi_decoder.cpp` needs, before commit:
-1. Host harness green (`ASSERTS ... fail=0`; `bleedSuite` covers the grid
+1. Host harness green (`ASSERTS ... fail=0`; `bleedSuite` and `smallBleedSuite` cover the grid
    retry), verdict lines diffed against
    the previous build (only `BENCH` timings may differ unless intended).
 2. Real-photo regression when a local photo set is available (research doc

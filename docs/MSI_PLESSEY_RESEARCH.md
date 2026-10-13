@@ -369,8 +369,8 @@ outvote it. Superseded by §8.3 before ever shipping. Leave it dead.
    ROI's own 1x scanlines and places each digit window one pitch (12
    modules) after the previous window's best match, ±0.5 module; the bars
    only seed the Start. The bar-spacing module estimate is quantised (3.00
-   for a true 2.85), so pitch scales 0.94/1.0/1.06 are tried, with 2 blur
-   sigmas. A line's read needs the checksum, the grid residual, a mean
+   for a true 2.85), so several pitches are tried (first bar ×0.94/1.0/1.06;
+   now see "Pitch and votes" below), with 2 blur sigmas. A line's read needs the checksum, the grid residual, a mean
    digit correlation ≥0.7, every digit ≥0.6 and its own Start, Stop and
    quiet-zone guards; then the normal vote. Tracking stops below 0.4, and a
    track whose first 7 digits include one below 0.6 is dropped at once (no
@@ -389,7 +389,38 @@ outvote it. Superseded by §8.3 before ever shipping. Leave it dead.
    photos and 2–3 crops at −6°, with 0 new wrong reads. Synthetic ink bleed
    (one or two 1-module spaces filled, `bleedSuite`): the previous build
    misses 256 of 864 renders, the grid retry none. Not run inside the 2D
-   recursion, so far views of the same tags still miss.
+   recursion; far views of `0452-1` and `0488-1` read only after the pitch
+   and vote change below.
+   Pitch and votes. At ~2px/module the bar-spacing estimate runs
+   10–14% high (2.33 for a true 2.14 on `0444-4`), outside the 0.94/1.06
+   retries, and the 6-vote small-module rule (<2.5px) held back far reads
+   that the grid reached on fewer than 6 lines. The grid now tries the bar
+   estimate ×1.0 plus the spectral estimate ×0.97/1.0/1.03:
+   `spectralModule` takes the strongest Hann-windowed DFT bin at period
+   3 modules (one MSI bit), scanning 0.75–1.10× the bar estimate in 1%
+   steps. On all 162 near crops it lands within −4.1%..+1.0% of the true
+   pitch (5th..95th percentile; median −0.2%). Grid reads need 3 agreeing
+   lines below 2.5px instead of 6; the template path keeps 6. Each grid
+   line already passes its own guards and digit gates, unlike the
+   template reads the 6-vote rule was set for. Spectral pitches alone
+   lost two far reads (`0444-4`, `0506-4`); keeping bar ×0.94/1.06
+   too read nothing more for +0.8 ms clutter. A split-band ROI retry
+   (text line merged into the barcode band, `0452-3`) was measured and
+   rejected: its template decode added 8-digit prefix and Mod11 wrong reads,
+   and a grid-only split still misread one rotated crop.
+   Synthetic check (`smallBleedSuite`: 5 tags at 1.9–2.5px fractional
+   modules, area-downscaled, with and without bleed, blur 0/1): MOD1010
+   reads 196 → 220 of 240 with 0 wrong. On 12 more shelf values (576
+   renders) MOD10 reads 464 → 521 and MOD1010 468 → 525, with the same 6
+   and 2 pre-existing wrong reads (none new). With no caller scheme the
+   spectral pitch at first added 4 Mod11-only wrong reads (`027996669` →
+   `027896669`): a track can substitute one digit, Luhn rejects every
+   single substitution, but a Luhn symbol with one wrong digit is
+   Mod11-valid about 1 time in 11. Grid reads may therefore not be
+   Mod11-only unless the caller requires MOD11; open-scheme wrong reads are
+   then 7 → 7 (463 → 520 ok). Open item: the pre-existing synthetic wrong
+   reads sit at 2.35–2.5px, half of them on clean renders (`001285790` →
+   `111395711` under MOD10, a template-path read, not the grid).
    (d) 2D: one NN 2x upscale retry, single depth, +1px source
    shift so the xstep=2 sampler sees true boundaries. Fires on small frames
    (`kUpscaleMaxLongEdge`=800) or on small observed modules (<3.5px, long
@@ -564,13 +595,15 @@ Ok / wrong per mode (near / far / still):
 | + no trailing-bar floor | 147/139/143, wrong 0 | 147/139/143, wrong 0 | 146/136/142, wrong 0/2/0 |
 | + skew retry | 148/140/144, wrong 0 | 148/140/144, wrong 0 | 147/137/143, wrong 0/2/0 |
 | + still stretch retry | 148/140/148, wrong 0 | 148/140/148, wrong 0 | 147/137/147, wrong 0/2/0 |
-| + grid retry | **150/140/150, wrong 0** | **150/140/150, wrong 0** | 149/137/149, wrong 0/2/0 |
+| + grid retry | 150/140/150, wrong 0 | 150/140/150, wrong 0 | 149/137/149, wrong 0/2/0 |
+| + spectral grid pitch, 3 grid votes | **152/145/152, wrong 0** | **152/146/152, wrong 0** | 151/142/151, wrong 0/2/0 |
 
 The two NONE far wrong reads are checksum-less digit errors with strong
 guards, inherent to `NONE`. At open lengths NONE adds a third
 (`0504-3` far, a MOD11-valid blur misread on the 2x-upscaled frame). Full
-photos with open lengths: MOD10 52 → 62 → 82 → 83 → 88 → 90 ok, MOD1010
-52 → 64 → 85 → 86 → 90 → 91 and NONE 62 → 78 → 79 → 85 → 88, all with 0 wrong. Unreadable tags give 0 false reads at
+photos with open lengths: MOD10 52 → 62 → 82 → 83 → 88 → 90 → 92 ok, MOD1010
+52 → 64 → 85 → 86 → 90 → 91 → 92 and NONE 62 → 78 → 79 → 85 → 88 → 90, all with 0 wrong
+(score photos against `barcodes.tsv`: the older OCR `truth.tsv` lacks `0444-1`). Unreadable tags give 0 false reads at
 9-digit bounds; at open lengths see §8.3 step 6 (cut-off tags, MOD10/NONE).
 There are 0 false reads on 3430 clutter frames. Removing the trailing-bar
 floor raised 9-digit MOD10 clutter latency from 2.5/8.0/18.3 to
@@ -595,11 +628,13 @@ build):
 | + still stretch retry | 128 | 126 | 128 | 125 |
 | still stretch retry, 162 crops | 129 | 129 | 130 | 129 |
 | + grid retry, 162 crops | 129 | 131 | 130 | 129 |
+| + spectral grid pitch, 162 crops | 129 | 133 | 131 | 129 |
 
 Every row has 0 wrong reads. At open lengths the rotated MOD10 wrong reads
 go from 6 to 5 over the four angles (mostly prefix truncations near the
-crop edge) and stay at 5 with the stretch retry and the grid retry. NONE
-goes from 6 to 7 (unchanged by the grid retry):
+crop edge) and stay at 5 with the stretch retry, the grid retry and the
+spectral grid pitch. NONE goes from 6 to 7 (unchanged by the grid retry
+and the spectral pitch):
 `0481-2` at +10° reads a checksum-less 8-digit fragment. The host harness asserts the synthetic shelf
 format at ±3–12° with and without text clutter (`tiltSuite`; 2f5406b missed
 12 of those 48), plus tilted text strokes that must stay silent.
@@ -613,13 +648,15 @@ and 1 far upside-down tags: the reversed view read first. Upright results,
 full photos and the rotated sets are unchanged. The second orientation
 doubles the cost of a frame with no read: 9-digit MOD10 clutter latency
 went from 4.0/13.5/28.2 to 8.0/26.7/63.5 ms (mean/p95/max, host). The grid
-retry (§8.3 step 7c) moves it to 8.1/27.4/63.1 ms.
+retry (§8.3 step 7c) moves it to 8.1/27.4/63.1 ms, and its spectral pitch
+to 9.3/31.6/70.2 ms.
 
 Scored misses left at 9-digit bounds (MOD1010): near and still, `0452-3`
-plus the 11 Vision-missed tags re-scored last (`0438-4`, `0444-3/4`,
-`0445-2/3`, `0446-2`, `0487-2`, `0505-2`, `0510-1`, `0526-2`, `0547-3`);
-far adds 10 more, including `0457-1`, `0504-4` and the grid-only reads
-`0452-1` and `0488-1`. The still-only `0446-6`, `0481-2` and `0533-1` read
+(its ROI band merges a text line with the bars) plus 9 of the 11
+Vision-missed tags re-scored last (`0438-4` at 1.4px/module, `0444-3`,
+`0445-3`, `0446-2`, `0487-2`, `0505-2`, `0510-1`, `0526-2`, `0547-3`; most
+are too blurred or faint for the ROI row score to find); far adds 6 more
+(`0445-2`, `0504-4`, `0507-1/3/4`, `0522-1`). The still-only `0446-6`, `0481-2` and `0533-1` read
 with the still stretch retry (§8.3 step 8): they were contrast problems,
 not angle problems.
 
