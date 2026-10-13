@@ -5,15 +5,21 @@
 //   1. synthetic vectors rendered from the SPEC (not from the decoder's own
 //      tables): every checksum policy, multiple scales incl. close-up wide
 //      modules, blur/contrast/brightness ladder, negatives;
-//   2. real shelf-photo sweeps (barcode-scanner-sdk/src/test/resources/
+//   2. shelf-tag format vectors (9-digit Mod1010, leading zeros,
+//      text clutter) with and without a required checksum policy;
+//   3. real shelf-photo sweeps (barcode-scanner-sdk/src/test/resources/
 //      msi-shelf/*.png): each photo decoded across scales x photometric
 //      variants x repeats; mild variants are ASSERTED, harsh combos reported;
-//   3. timing bench with a pass/fail budget.
+//   4. native frame path (msi_frame): one-pass crop/stretch/rotate parity,
+//      stride + offset handling, orientation attempts, scan-top override;
+//   5. timing bench with a pass/fail budget.
 //
 // Exit code = number of asserted failures (0 = all green).
 // Usage: ./build.sh [path/to/cpp/dir]
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -23,6 +29,7 @@
 #include <zlib.h>
 
 #include "msi_decoder.h"
+#include "msi_frame.h"
 
 // ------------------------------------------------------------ test context
 static int g_assertFails = 0;
@@ -343,12 +350,14 @@ static std::string kValidate(const std::string& full, int policy) {
     return ((full.back() - '0') == c2) ? pay : "";
 }
 
+// `required` is passed straight to msi::decode (host policy pushdown).
 static std::string check(const std::string& name, const Gray& g,
                          const char* wantDigits, const char* wantPolicy,
-                         bool asserted) {
+                         bool asserted,
+                         msi::ChecksumPolicy required = msi::ChecksumPolicy::NONE) {
     if (getenv("MSI_DEBUG")) msi::setDebug(1);
     auto t0 = std::chrono::steady_clock::now();
-    msi::DecodeResult r = msi::decode(g.px.data(), g.w, g.h);
+    msi::DecodeResult r = msi::decode(g.px.data(), g.w, g.h, required);
     if (getenv("MSI_DEBUG")) msi::setDebug(0);
     auto t1 = std::chrono::steady_clock::now();
     long us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
@@ -394,6 +403,307 @@ static void checkStable(const std::string& name, const Gray& g, const char* want
     if (!(a == b && b == c)) {
         printf("FAIL %-34s unstable across repeats\n", name.c_str());
         ++g_assertFails;
+    }
+}
+
+// ------------------------------------------------------------ frame path
+static void assertTrue(const char* name, bool ok) {
+    printf("%s %s\n", ok ? "PASS" : "FAIL", name);
+    if (ok)
+        ++g_assertPass;
+    else
+        ++g_assertFails;
+}
+
+// Upright image -> camera-like plane: the sensor buffer that
+// ImageInfo.rotationDegrees=`deg` (clockwise) turns upright, padded to
+// `stride` bytes per row with 0xEE junk the crop must never read.
+static Gray toSensor(const Gray& up, int deg, int pad, int& stride) {
+    Gray s;
+    const bool swap = deg == 90 || deg == 270;
+    s.w = swap ? up.h : up.w;
+    s.h = swap ? up.w : up.h;
+    stride = s.w + pad;
+    s.px.assign((size_t)stride * s.h, 0xEE);
+    for (int y = 0; y < up.h; ++y)
+        for (int x = 0; x < up.w; ++x) {
+            int sx = x, sy = y;  // sensor pixel that lands on upright (x, y)
+            if (deg == 90) { sx = y; sy = up.w - 1 - x; }
+            else if (deg == 180) { sx = up.w - 1 - x; sy = up.h - 1 - y; }
+            else if (deg == 270) { sx = up.h - 1 - y; sy = x; }
+            s.px[(size_t)sy * stride + sx] = up.px[(size_t)y * up.w + x];
+        }
+    return s;
+}
+
+// `g` rotated `deg` clockwise (toSensor(g, d) is g rotated 360-d clockwise).
+static Gray rotateCw(const Gray& g, int deg) {
+    int stride = 0;
+    return toSensor(g, (360 - deg) % 360, 0, stride);
+}
+
+static void frameSuite() {
+    printf("--- native frame path (msi_frame) ---\n");
+    // 1. Stretch parity with the Kotlin transform (mirrored by
+    //    contrastStretch above) on an offset region of a strided plane.
+    Gray up = renderMsi("12345674", 5, 800, 400, 200, 120);
+    photometric(up, 0.35f, 20);
+    boxBlur(up, 1);
+    const int pad = 64;
+    Gray plane;
+    plane.w = up.w + 40;
+    plane.h = up.h + 30;
+    int stride = plane.w + pad;
+    plane.px.assign((size_t)stride * plane.h, 0xEE);
+    for (int y = 0; y < up.h; ++y)
+        memcpy(&plane.px[(size_t)(y + 30) * stride + 40], &up.px[(size_t)y * up.w], up.w);
+    msi::LumaView view{plane.px.data(), plane.w, plane.h, stride};
+    msi::Region reg{40, 30, 40 + up.w, 30 + up.h};
+    assertTrue("frame clampRegion keeps in-bounds region", msi::clampRegion(view, reg) &&
+               reg.left == 40 && reg.top == 30 && reg.width() == up.w && reg.height() == up.h);
+    std::vector<uint8_t> out((size_t)up.w * up.h);
+    Gray want = up;
+    contrastStretch(want);
+    assertTrue("frame prepare stretch == Kotlin transform (strided, offset)",
+               msi::prepareRegion(view, reg, 0, true, out.data()) && out == want.px);
+    assertTrue("frame prepare no-stretch == raw crop",
+               msi::prepareRegion(view, reg, 0, false, out.data()) && out == up.px);
+
+    // 2. Rotation fused into the same pass == explicit rotation.
+    for (int deg : {90, 180, 270}) {
+        Gray rot = rotateCw(want, deg);
+        std::vector<uint8_t> o((size_t)up.w * up.h);
+        char name[96];
+        snprintf(name, sizeof name, "frame prepare rotate %d == explicit rotate", deg);
+        assertTrue(name, msi::prepareRegion(view, reg, deg, true, o.data()) && o == rot.px);
+    }
+
+    // 3. Invalid input is rejected, never read out of bounds.
+    msi::Region outside{plane.w + 5, 0, plane.w + 50, 10};
+    assertTrue("frame clampRegion rejects off-plane region", !msi::clampRegion(view, outside));
+    msi::Region over{0, 0, plane.w + 10, plane.h};
+    assertTrue("frame prepare rejects unclamped region",
+               !msi::prepareRegion(view, over, 0, true, out.data()));
+    assertTrue("frame prepare rejects non-right-angle rotation",
+               !msi::prepareRegion(view, reg, 45, true, out.data()));
+
+    // 4. Camera flow: portrait sensor plane (rotationDegrees=90) -> one
+    //    prepare upright -> one forward decode, read in place.
+    Gray tag = renderMsi("12345674", 5, 800, 300, 90, 120);
+    Gray sensor = toSensor(tag, 90, pad, stride);
+    msi::LumaView sv{sensor.px.data(), sensor.w, sensor.h, stride};
+    msi::Region full{0, 0, sensor.w, sensor.h};
+    std::vector<uint8_t> upright((size_t)tag.w * tag.h);
+    bool prepared = msi::prepareRegion(sv, full, 90, true, upright.data());
+    msi::FrameOptions fo;
+    fo.maxOrientations = 1;
+    msi::FrameResult fr = msi::decodeFrame(upright.data(), tag.w, tag.h, fo);
+    assertTrue("frame camera 90 -> prepare upright -> forward decode",
+               prepared && fr.decode.ok && fr.decode.digits == "12345674" && fr.relativeRotation == 0);
+    // Same plane, rotation left to decodeFrame: identical read.
+    std::vector<uint8_t> raw((size_t)tag.w * tag.h);
+    msi::prepareRegion(sv, full, 0, true, raw.data());
+    fo.rotationDegrees = 90;
+    msi::FrameResult late = msi::decodeFrame(raw.data(), sensor.w, sensor.h, fo);
+    assertTrue("frame decodeFrame(rotationDegrees=90) == prepare-rotated read",
+               late.decode.ok && late.decode.digits == fr.decode.digits && late.relativeRotation == 0);
+
+    // 5. Orientation attempts follow 0, 180, 90, 270 and honour the cap.
+    fo.rotationDegrees = 0;
+    Gray flipped = rotateCw(tag, 180);
+    fo.maxOrientations = 1;
+    assertTrue("frame upside-down tag: 1 orientation -> none",
+               !msi::decodeFrame(flipped.px.data(), flipped.w, flipped.h, fo).decode.ok);
+    fo.maxOrientations = 2;
+    msi::FrameResult f180 = msi::decodeFrame(flipped.px.data(), flipped.w, flipped.h, fo);
+    assertTrue("frame upside-down tag: 2 orientations -> relativeRotation 180",
+               f180.decode.ok && f180.decode.digits == "12345674" && f180.relativeRotation == 180);
+    Gray side = rotateCw(tag, 90);
+    fo.maxOrientations = 4;
+    msi::FrameResult f270 = msi::decodeFrame(side.px.data(), side.w, side.h, fo);
+    assertTrue("frame sideways tag: 4 orientations -> relativeRotation 270",
+               f270.decode.ok && f270.decode.digits == "12345674" && f270.relativeRotation == 270);
+    fo.maxOrientations = 2;
+    msi::FrameResult f0 = msi::decodeFrame(tag.px.data(), tag.w, tag.h, fo);
+    assertTrue("frame upright tag: 2 orientations (reverse confirmed) -> relativeRotation 0",
+               f0.decode.ok && f0.decode.digits == "12345674" && f0.relativeRotation == 0);
+
+    // 5b. Leading quiet zone (direction arbitration evidence). A 9px module
+    //     puts its 6 quiet modules (54px) past the 20px the ROI keeps before
+    //     its first column: without the verification head only a window
+    //     shifted into the blurred Start bar sees 3 of them, scoring well
+    //     under 1.5. A Start bar 1 module from the frame edge leaves it unseen.
+    msi::DecodeOptions lo;
+    Gray big = renderMsi("12345674", 9, 1600, 400, 100, 200);
+    boxBlur(big, 1);
+    boxBlur(big, 1);
+    msi::DecodeResult bl = msi::decode(big.px.data(), big.w, big.h, lo);
+    assertTrue("frame leadingQuiet measured through the verification head (9px module)",
+               bl.ok && bl.digits == "12345674" && bl.leadingQuiet > 1.5f);
+    Gray crisp = renderMsi("12345674", 7, 1100, 300, 90, 120);
+    const int symX0 = (crisp.w - (int)modulesFor("12345674").size() * 7) / 2;
+    const int cut = symX0 - 7;
+    Gray edge;
+    edge.w = crisp.w - cut;
+    edge.h = crisp.h;
+    edge.px.resize((size_t)edge.w * edge.h);
+    for (int y = 0; y < edge.h; ++y)
+        std::copy_n(crisp.px.data() + (size_t)y * crisp.w + cut, edge.w, edge.px.data() + (size_t)y * edge.w);
+    msi::DecodeResult el = msi::decode(edge.px.data(), edge.w, edge.h, lo);
+    assertTrue("frame leadingQuiet unseen when the Start bar touches the frame edge",
+               el.ok && el.digits == "12345674" && el.leadingQuiet < -1e8f);
+
+    // 6. Aim-box crops put the tag anywhere, including the top quarter the
+    //    full-frame band search skips (kScanTopFraction).
+    Gray high = renderMsi("12345674", 5, 800, 300, 8, 60);
+    fo.maxOrientations = 1;
+    msi::DecodeOptions legacy;
+    assertTrue("frame scanTop 0 reads a tag in the top quarter",
+               msi::decodeFrame(high.px.data(), high.w, high.h, fo).decode.ok &&
+               !msi::decode(high.px.data(), high.w, high.h, legacy).ok);
+
+    // 7. Still conversion (bitmap -> gray), the core of nativePrepareBitmap.
+    assertTrue("still gray dims: even trim, integer scale, invalid -> 0",
+               msi::stillGrayDim(4000, 1) == 4000 && msi::stillGrayDim(4001, 1) == 4000 &&
+               msi::stillGrayDim(8000, 2) == 4000 && msi::stillGrayDim(7, 2) == 2 &&
+               msi::stillGrayDim(1, 1) == 0 && msi::stillGrayDim(0, 1) == 0 &&
+               msi::stillGrayDim(100, 0) == 0);
+    {
+        // Neutral RGBA (R=G=B=v) round-trips exactly (weights sum to 256);
+        // row padding and alpha must be ignored.
+        const int rowBytes = tag.w * 4 + 12;
+        std::vector<uint8_t> rgba((size_t)rowBytes * tag.h, 0xEE);
+        for (int y = 0; y < tag.h; ++y)
+            for (int x = 0; x < tag.w; ++x) {
+                uint8_t* p = &rgba[(size_t)y * rowBytes + (size_t)x * 4];
+                p[0] = p[1] = p[2] = tag.px[(size_t)y * tag.w + x];
+                p[3] = 0x7F;
+            }
+        msi::PixelView pv{rgba.data(), tag.w, tag.h, rowBytes, msi::PixelFormat::RGBA_8888};
+        std::vector<uint8_t> g((size_t)tag.w * tag.h);
+        assertTrue("still RGBA_8888 neutral -> exact luma (strided)",
+                   msi::grayFromPixels(pv, 1, g.data()) && g == tag.px);
+        // Full still flow: convert, rotate upright (sensor 90), 4-way decode.
+        Gray side90 = rotateCw(tag, 270);  // a 90-degree still of the tag
+        std::vector<uint8_t> rgba90((size_t)side90.w * side90.h * 4);
+        for (size_t i = 0; i < side90.px.size(); ++i)
+            rgba90[i * 4] = rgba90[i * 4 + 1] = rgba90[i * 4 + 2] = side90.px[i];
+        msi::PixelView pv90{rgba90.data(), side90.w, side90.h, side90.w * 4,
+                            msi::PixelFormat::RGBA_8888};
+        std::vector<uint8_t> g90(side90.px.size()), up90(side90.px.size());
+        msi::LumaView lv{g90.data(), side90.w, side90.h, side90.w};
+        msi::Region all{0, 0, side90.w, side90.h};
+        msi::FrameOptions so;
+        so.maxOrientations = 4;
+        so.scanTopFraction = 0.25f;
+        const bool ok = msi::grayFromPixels(pv90, 1, g90.data()) &&
+                        msi::prepareRegion(lv, all, 90, true, up90.data());
+        msi::FrameResult sr = msi::decodeFrame(up90.data(), side90.h, side90.w, so);
+        assertTrue("still RGBA rotation 90 -> convert, prepare upright, decode upright",
+                   ok && sr.decode.ok && sr.decode.digits == "12345674" && sr.relativeRotation == 0);
+    }
+    {
+        uint8_t px[3 * 4] = {200, 100, 50, 255, 0, 0, 0, 0, 255, 255, 255, 0};
+        msi::PixelView pv{px, 2, 1, 12, msi::PixelFormat::RGBA_8888};
+        uint8_t g[2] = {0, 0};
+        assertTrue("still rejects image under 2 px after even trim", !msi::grayFromPixels(pv, 1, g));
+        msi::PixelView pv2{px, 2, 2, 4 * 2 - 4, msi::PixelFormat::RGBA_8888};
+        assertTrue("still rejects stride < width * 4", !msi::grayFromPixels(pv2, 1, g));
+    }
+    {
+        // 2x2 RGBA: weights (77R + 150G + 29B) >> 8, alpha ignored.
+        const uint8_t px[16] = {200, 100, 50, 0, 255, 255, 255, 255,
+                                0, 0, 0, 255, 255, 0, 0, 255};
+        msi::PixelView pv{px, 2, 2, 8, msi::PixelFormat::RGBA_8888};
+        uint8_t g[4] = {0, 0, 0, 0};
+        assertTrue("still RGBA weights 77/150/29",
+                   msi::grayFromPixels(pv, 1, g) && g[0] == 124 && g[1] == 255 && g[2] == 0 &&
+                   g[3] == 76);
+        // Premultiplied RGBA reads as unpremultiplied (what getPixels gave):
+        // opaque gray bar vs half-transparent white space stay distinct.
+        const uint8_t pm[16] = {128, 128, 128, 255, 128, 128, 128, 128,
+                                0, 0, 0, 0, 64, 32, 16, 128};
+        msi::PixelView ppm{pm, 2, 2, 8, msi::PixelFormat::RGBA_8888};
+        ppm.premultiplied = true;
+        assertTrue("still premultiplied RGBA is unpremultiplied (a=255, a=128, a=0)",
+                   msi::grayFromPixels(ppm, 1, g) && g[0] == 128 && g[1] == 255 && g[2] == 0 &&
+                   g[3] == 79);
+        ppm.premultiplied = false;
+        assertTrue("still straight RGBA ignores alpha",
+                   msi::grayFromPixels(ppm, 1, g) && g[0] == 128 && g[1] == 128 && g[2] == 0 &&
+                   g[3] == 39);
+        // RGB_565 little-endian: red 0xF800, white 0xFFFF, black, green 0x07E0.
+        const uint8_t p565[8] = {0x00, 0xF8, 0xFF, 0xFF, 0x00, 0x00, 0xE0, 0x07};
+        msi::PixelView pv565{p565, 2, 2, 4, msi::PixelFormat::RGB_565};
+        assertTrue("still RGB_565 bit-replicated expand",
+                   msi::grayFromPixels(pv565, 1, g) && g[0] == 76 && g[1] == 255 && g[2] == 0 &&
+                   g[3] == 149);
+        msi::PixelView pv565s{p565, 2, 2, 3, msi::PixelFormat::RGB_565};
+        assertTrue("still rejects RGB_565 stride < width * 2", !msi::grayFromPixels(pv565s, 1, g));
+    }
+    {
+        // A_8 is luma; odd 5x3 trims to 4x2 from the top-left.
+        uint8_t a8[15];
+        for (int i = 0; i < 15; ++i) a8[i] = (uint8_t)(i * 10);
+        msi::PixelView pv{a8, 5, 3, 5, msi::PixelFormat::A_8};
+        uint8_t g[8] = {0};
+        const uint8_t want[8] = {0, 10, 20, 30, 50, 60, 70, 80};
+        assertTrue("still A_8 identity, odd edge trimmed",
+                   msi::grayFromPixels(pv, 1, g) && memcmp(g, want, 8) == 0);
+        // Scale 2 box mean (rounded): 4x4 -> 2x2; 5x5 -> 2x2 (edge dropped).
+        const uint8_t b[16] = {10, 11, 0, 0,
+                               12, 13, 0, 1,
+                               255, 255, 7, 7,
+                               255, 254, 7, 8};
+        msi::PixelView pb{b, 4, 4, 4, msi::PixelFormat::A_8};
+        uint8_t m[4] = {0};
+        assertTrue("still box downscale 2: rounded block means",
+                   msi::grayFromPixels(pb, 2, m) && m[0] == 12 && m[1] == 0 && m[2] == 255 &&
+                   m[3] == 7);
+        assertTrue("still rejects scale 0", !msi::grayFromPixels(pb, 0, m));
+    }
+    {
+        // A tag rendered at 10 px modules survives a 2x box downscale.
+        Gray big = renderMsi("12345674", 10, 1600, 600, 180, 240);
+        msi::PixelView pv{big.px.data(), big.w, big.h, big.w, msi::PixelFormat::A_8};
+        const int dw = msi::stillGrayDim(big.w, 2), dh = msi::stillGrayDim(big.h, 2);
+        std::vector<uint8_t> small((size_t)dw * dh);
+        msi::FrameOptions so;
+        so.maxOrientations = 1;
+        assertTrue("still 2x box downscale keeps a 10px-module tag readable",
+                   msi::grayFromPixels(pv, 2, small.data()) &&
+                   msi::decodeFrame(small.data(), dw, dh, so).decode.digits == "12345674");
+    }
+    {
+        // 8. Still stretch retry: a soft, washed-out tag (~51 gray levels,
+        //    3x3 blur) misses plain and reads only through the 2%/98%
+        //    stretch, which decodeFrame applies after every plain
+        //    orientation failed — keeping the orientation it read under.
+        Gray soft = renderMsi("12345674", 5, 800, 300, 90, 120);
+        boxBlur(soft, 1);
+        photometric(soft, 0.2f, 0);
+        msi::FrameOptions so;
+        so.maxOrientations = 4;
+        so.scanTopFraction = 0.25f;
+        assertTrue("still soft low-contrast tag: no read without stretchRetry",
+                   !msi::decodeFrame(soft.px.data(), soft.w, soft.h, so).decode.ok);
+        so.stretchRetry = true;
+        msi::FrameResult sr = msi::decodeFrame(soft.px.data(), soft.w, soft.h, so);
+        assertTrue("still soft low-contrast tag: stretchRetry reads upright",
+                   sr.decode.ok && sr.decode.digits == "12345674" && sr.relativeRotation == 0);
+        Gray softFlip = rotateCw(soft, 180);
+        msi::FrameResult sf = msi::decodeFrame(softFlip.px.data(), softFlip.w, softFlip.h, so);
+        assertTrue("still soft low-contrast tag upside down: stretchRetry -> relativeRotation 180",
+                   sf.decode.ok && sf.decode.digits == "12345674" && sf.relativeRotation == 180);
+        // The stretched sweep never touches the caller's buffer.
+        Gray before = soft;
+        msi::decodeFrame(soft.px.data(), soft.w, soft.h, so);
+        assertTrue("still stretchRetry leaves the input buffer untouched", soft.px == before.px);
+        // A flat frame (range under 12 levels) has no stretch to retry.
+        Gray flat = soft;
+        photometric(flat, 0.04f, 0);
+        assertTrue("still flat frame: stretchRetry -> no read",
+                   !msi::decodeFrame(flat.px.data(), flat.w, flat.h, so).decode.ok);
     }
 }
 
@@ -479,11 +789,242 @@ static void syntheticSuite() {
     check("neg noise", noise, nullptr, nullptr, true);
 }
 
+// Text-like clutter (glyph stems): dark strokes 1-3px wide, 2-9px apart.
+static void addStrokes(Gray& g, int x0, int x1, int y0, int y1, uint32_t seed) {
+    auto rnd = [&seed]() {
+        seed = seed * 1664525u + 1013904223u;
+        return seed >> 16;
+    };
+    for (int x = std::max(0, x0); x < std::min(g.w, x1);) {
+        int w = 1 + (int)(rnd() % 3);
+        for (int y = std::max(0, y0); y < std::min(g.h, y1); ++y)
+            for (int k = 0; k < w && x + k < g.w; ++k) g.px[(size_t)y * g.w + x + k] = 40;
+        x += w + 2 + (int)(rnd() % 8);
+    }
+}
+
+// shelf-tag format, rendered from the spec: 7-digit item + Mod10 +
+// Mod10 over (item + first check) = 9 digits, 39 bars (real-photo truth:
+// 101 of 126 measurable tags; e.g. item 0115783 -> 011578333). Every prefix
+// of such a codeword is itself Mod10-valid, and Luhn ignores leading zeros,
+// so these cases guard the truncation / dropped-leading-0 failures
+// (prefix-drop tie rule, quiet-zone gate) and the required-policy pushdown.
+// Base decoder 4c9be3b read 011578333 as 11578333. Blurred like real
+// captures (crisp renders sit outside the template model, see
+// syntheticSuite); text clutter is glyph-height, at a 10-module quiet zone.
+// Robustness: 108/108 over blur 1-2 x band y 200-240 x bar height 90-130.
+static void shelfFormatSuite() {
+    printf("--- shelf format (spec-rendered 9-digit mod1010) ---\n");
+    using P = msi::ChecksumPolicy;
+    struct Tag { const char* full; int modulePx; };
+    const Tag tags[] = {{"011578333", 5}, {"024307670", 4}, {"082814799", 3}};
+    for (const Tag& t : tags) {
+        const int barsW = (int)modulesFor(t.full).size() * t.modulePx;
+        const int w = barsW + 60 * t.modulePx, h = 400, top = 220, barH = 110;
+        const int bx0 = (w - barsW) / 2, bx1 = bx0 + barsW;
+        std::string tag = std::string(t.full) + " " + std::to_string(t.modulePx) + "px";
+        Gray g = renderMsi(t.full, t.modulePx, w, h, top, barH);
+        boxBlur(g, 1);
+        check("fmt " + tag + " any", g, t.full, nullptr, true);
+        check("fmt " + tag + " req1010", g, t.full, "mod1010", true, P::MOD1010);
+        // Item text line above the bars, words on both sides of the symbol.
+        Gray c = renderMsi(t.full, t.modulePx, w, h, top, barH);
+        addStrokes(c, bx0, bx1, top - 70, top - 30, 7);
+        addStrokes(c, bx1 + 10 * t.modulePx, bx1 + 25 * t.modulePx, top + 20, top + 60, 11);
+        addStrokes(c, bx0 - 25 * t.modulePx, bx0 - 10 * t.modulePx, top + 20, top + 60, 13);
+        boxBlur(c, 1);
+        check("fmt " + tag + " text any", c, t.full, nullptr, true);
+        check("fmt " + tag + " text req1010", c, t.full, "mod1010", true, P::MOD1010);
+    }
+    // Required-policy contract: an unsatisfied scheme is NotFound (no
+    // fallback to another scheme); a satisfied one is reported as required.
+    // (No "MOD11 on a Mod1010 tag" negative: 01157833 is a genuinely
+    // Mod11-valid prefix of 011578333, so a misconfigured host CAN read it.)
+    Gray m10 = renderMsi("12345674", 5, 800, 400, 200, 120);  // Mod10 only
+    boxBlur(m10, 1);
+    check("req mod1010 on mod10-only", m10, nullptr, nullptr, true, P::MOD1010);
+    check("req mod10 on mod10-only", m10, "12345674", "mod10", true, P::MOD10);
+    Gray d = renderMsi("011578333", 5, 900, 400, 200, 120);
+    boxBlur(d, 1);
+    check("req mod10 on mod1010", d, "011578333", "mod10", true, P::MOD10);
+}
+
+// `g` rotated `deg` clockwise about its centre (bilinear, white fill): a
+// hand-held tilt, unlike rotateCw's 90-degree sensor rotations.
+static Gray rotateSmall(const Gray& g, float deg) {
+    const float t = deg * 3.14159265f / 180.0f, c = std::cos(t), s = std::sin(t);
+    const float cx = 0.5f * (g.w - 1), cy = 0.5f * (g.h - 1);
+    Gray o;
+    o.w = g.w;
+    o.h = g.h;
+    o.px.assign(g.px.size(), 255);
+    for (int y = 0; y < g.h; ++y)
+        for (int x = 0; x < g.w; ++x) {
+            const float sx = cx + (x - cx) * c + (y - cy) * s;
+            const float sy = cy - (x - cx) * s + (y - cy) * c;
+            const int x0 = (int)std::floor(sx), y0 = (int)std::floor(sy);
+            if (x0 < 0 || y0 < 0 || x0 + 1 >= g.w || y0 + 1 >= g.h) continue;
+            const float fx = sx - x0, fy = sy - y0;
+            auto at = [&](int xx, int yy) { return (float)g.px[(size_t)yy * g.w + xx]; };
+            const float v = (at(x0, y0) * (1 - fx) + at(x0 + 1, y0) * fx) * (1 - fy) +
+                            (at(x0, y0 + 1) * (1 - fx) + at(x0 + 1, y0 + 1) * fx) * fy;
+            o.px[(size_t)y * g.w + x] = (uint8_t)(v + 0.5f);
+        }
+    return o;
+}
+
+// Hand-held tilt on the shelf format (9-digit mod1010, blur 1, with and
+// without text clutter). The upright path tolerates about +-7 degrees at
+// 4-5px modules and misses +-10-12 (2f5406b: 12 of these 48 missed); the
+// skew retry reads all of them. Text strokes tilted the same way must stay
+// silent: the retry deskews clutter too.
+static void tiltSuite() {
+    printf("--- tilt (spec-rendered shelf format, rotated) ---\n");
+    const struct { const char* full; int m; } tags[] = {{"011578333", 5}, {"024307670", 4}, {"082814799", 3}};
+    for (auto& t : tags) {
+        const int barsW = (int)modulesFor(t.full).size() * t.m;
+        const int w = barsW + 60 * t.m, h = 400, top = 220, barH = 110;
+        const int bx0 = (w - barsW) / 2, bx1 = bx0 + barsW;
+        for (int txt = 0; txt < 2; ++txt)
+            for (float a : {-12.f, -10.f, -7.f, -3.f, 3.f, 7.f, 10.f, 12.f}) {
+                Gray g = renderMsi(t.full, t.m, w, h, top, barH);
+                if (txt) {
+                    addStrokes(g, bx0, bx1, top - 70, top - 30, 7);
+                    addStrokes(g, bx1 + 10 * t.m, bx1 + 25 * t.m, top + 20, top + 60, 11);
+                    addStrokes(g, bx0 - 25 * t.m, bx0 - 10 * t.m, top + 20, top + 60, 13);
+                }
+                boxBlur(g, 1);
+                char nm[64];
+                snprintf(nm, sizeof nm, "tilt %s %dpx %s %+.0f", t.full, t.m, txt ? "text" : "clean", a);
+                check(nm, rotateSmall(g, a), t.full, nullptr, true);
+            }
+    }
+    for (float a : {-8.f, 8.f}) {
+        Gray g;
+        g.w = 700;
+        g.h = 400;
+        g.px.assign((size_t)g.w * g.h, 255);
+        addStrokes(g, 60, 640, 150, 260, 21);
+        boxBlur(g, 1);
+        char nm[64];
+        snprintf(nm, sizeof nm, "neg tilt strokes %+.0f", a);
+        check(nm, rotateSmall(g, a), nullptr, nullptr, true);
+    }
+}
+
+// Ink bleed: single-module spaces (between a wide bar and the next bar) inked
+// solid, so the bar detector merges the neighbours and the bar-anchored
+// template decode loses its window alignment for every later digit. The grid
+// retry (decodeByDigitGrid) re-tracks the digit windows by pitch; without it,
+// 8 of these 9 read nothing.
+static void bleedSuite() {
+    printf("--- ink bleed (merged bars, grid retry) ---\n");
+    const struct { const char* full; int m; } tags[] = {{"026416032", 3}, {"029904224", 4}, {"011578333", 5}};
+    const struct { int a, b; } fills[] = {{2, -1}, {9, -1}, {5, 12}};
+    for (auto& t : tags) {
+        const std::string mods = modulesFor(t.full);
+        const int barsW = (int)mods.size() * t.m;
+        const int w = barsW + 60 * t.m, h = 400, top = 220, barH = 110;
+        const int bx0 = (w - barsW) / 2;
+        for (auto& f : fills) {
+            Gray g = renderMsi(t.full, t.m, w, h, top, barH);
+            int k = 0;
+            for (size_t i = 1; i + 1 < mods.size(); ++i) {
+                if (mods[i] != '0' || mods[i - 1] != '1' || mods[i + 1] != '1') continue;
+                if (k == f.a || k == f.b)
+                    for (int x = bx0 + (int)i * t.m; x < bx0 + (int)(i + 1) * t.m; ++x)
+                        for (int y = top; y < top + barH; ++y) g.px[(size_t)y * w + x] = 0;
+                ++k;
+            }
+            boxBlur(g, 1);
+            char nm[64];
+            snprintf(nm, sizeof nm, "bleed %s %dpx space %d%s", t.full, t.m, f.a,
+                     f.b >= 0 ? (std::string("+") + std::to_string(f.b)).c_str() : "");
+            check(nm, g, t.full, nullptr, true);
+        }
+    }
+}
+
+// Area-average downscale by f (<1): fractional module widths with
+// camera-like grey edge pixels, unlike renderMsi's whole-pixel modules.
+static Gray downscaleArea(const Gray& g, float f) {
+    Gray o;
+    o.w = (int)(g.w * f);
+    o.h = (int)(g.h * f);
+    o.px.resize((size_t)o.w * o.h);
+    const float inv = 1.0f / f;
+    for (int y = 0; y < o.h; ++y)
+        for (int x = 0; x < o.w; ++x) {
+            const float sx0 = x * inv, sx1 = (x + 1) * inv, sy0 = y * inv, sy1 = (y + 1) * inv;
+            double acc = 0, wsum = 0;
+            for (int yy = (int)sy0; yy < (int)std::ceil(sy1) && yy < g.h; ++yy) {
+                const float wy = std::min<float>(yy + 1, sy1) - std::max<float>(yy, sy0);
+                for (int xx = (int)sx0; xx < (int)std::ceil(sx1) && xx < g.w; ++xx) {
+                    const float wx = std::min<float>(xx + 1, sx1) - std::max<float>(xx, sx0);
+                    acc += wx * wy * g.px[(size_t)yy * g.w + xx];
+                    wsum += wx * wy;
+                }
+            }
+            o.px[(size_t)y * o.w + x] = (uint8_t)(acc / wsum + 0.5);
+        }
+    return o;
+}
+
+// Small modules (1.9-2.5px, fractional) with and without ink bleed, MOD1010
+// required (the shelf-tag scheme). Near 2px/module the bar-spacing module
+// estimate runs high and the grid retry needs the spectral pitch; grid reads
+// there also need only 3 agreeing lines. Asserts 0 wrong reads and a read
+// floor: 59dc46a (bar pitches, 6 votes) reads 196 of these 240, D10 220.
+static void smallBleedSuite() {
+    printf("--- small-module bleed (fractional 1.9-2.5px, MOD1010) ---\n");
+    const char* tags[] = {"026416032", "029904224", "011578333", "024948473", "008010688"};
+    const struct { int a, b; } fills[] = {{-1, -1}, {2, -1}, {9, -1}, {5, 12}};
+    int reads = 0, wrong = 0, total = 0;
+    for (const char* t : tags)
+        for (float mpx : {1.9f, 2.0f, 2.1f, 2.2f, 2.35f, 2.5f})
+            for (auto& f : fills)
+                for (int blurR = 0; blurR < 2; ++blurR) {
+                    // Rendered at 10px/module, bled, then area-downscaled.
+                    const int M = 10;
+                    const std::string mods = modulesFor(t);
+                    const int barsW = (int)mods.size() * M;
+                    const int w = barsW + 60 * M, h = 600, top = 250, barH = 160;
+                    const int bx0 = (w - barsW) / 2;
+                    Gray g = renderMsi(t, M, w, h, top, barH);
+                    int k = 0;
+                    for (size_t i = 1; i + 1 < mods.size(); ++i) {
+                        if (mods[i] != '0' || mods[i - 1] != '1' || mods[i + 1] != '1') continue;
+                        if (k == f.a || k == f.b)
+                            for (int x = bx0 + (int)i * M; x < bx0 + (int)(i + 1) * M; ++x)
+                                for (int y = top; y < top + barH; ++y) g.px[(size_t)y * w + x] = 0;
+                        ++k;
+                    }
+                    Gray s = downscaleArea(g, mpx / M);
+                    if (blurR) boxBlur(s, blurR);
+                    const msi::DecodeResult r =
+                        msi::decode(s.px.data(), s.w, s.h, msi::ChecksumPolicy::MOD1010);
+                    ++total;
+                    if (r.ok && r.digits == t) {
+                        ++reads;
+                    } else {
+                        if (r.ok) ++wrong;
+                        printf("%s small %s %.2fpx fill %d,%d blur %d got=%s\n",
+                               r.ok ? "WRONG" : "miss(info)", t, mpx, f.a, f.b, blurR,
+                               r.ok ? r.digits.c_str() : "(none)");
+                    }
+                }
+    printf("small-module bleed: %d/%d read, %d wrong\n", reads, total, wrong);
+    assertTrue("small-module bleed: 0 wrong reads", wrong == 0);
+    assertTrue("small-module bleed: >= 220 reads", reads >= 220);
+}
+
 struct ShelfCase {
     const char* file;
     const char* full;  // expected full codeword (payload + checks)
     int policy;        // SDK policy for the payload-level assertion (see kValidate)
     const char* payload;
+    bool assertStretched;  // raw 1.0 is a full-frame miss (no ROI host path);
+                           // assert the production contrast-stretch variant
 };
 
 // SDK-level sweep: native decode, then the exact Kotlin revalidation+strip,
@@ -551,12 +1092,20 @@ static void shelfSuite(const std::string& dir) {
     // properly via sensor texture. The committed equivalents are the
     // generator script + JVM vectors + the runtime suite above.)
     static const ShelfCase cases[] = {
-        {"msi-yakult-0828147.png", "08281479", 0, "0828147"},
-        {"msi-quakotml-0186477.png", "018647768", 2, ""},
-        {"msi-ondeg-0243523.png", "02435238", 0, ""},
-        {"msi-dixie-0087573.png", "00875732", 0, "0087573"},
-        {"msi-starbucks-0168971.png", "016897100", 2, "0168971"},
-        {"msi-silkalm-0826593.png", "082659368", 0, "0826593"},
+        // Full 9-digit Mod1010 codewords (7-digit payload + two checks),
+        // identical to what macOS Vision reports for these captures and
+        // consistent with the printed SKUs. The old table pinned 8-digit
+        // Mod10 codewords; the decoder now reads the full symbol, and any
+        // 8-digit prefix of a Mod1010 codeword is Mod10-valid, so asserting
+        // both is the strong form.
+        {"msi-yakult-0828147.png", "082814799", 2, "0828147", false},
+        {"msi-quakotml-0186477.png", "018647768", 2, "0186477", false},
+        {"msi-ondeg-0243523.png", "024352387", 2, "0243523", false},
+        // dixie: raw full-frame at 1.0 is an honest miss (Vision misses it
+        // too); the production contrast stretch resolves it.
+        {"msi-dixie-0087573.png", "008757320", 2, "0087573", true},
+        {"msi-starbucks-0168971.png", "016897100", 2, "0168971", false},
+        {"msi-silkalm-0826593.png", "082659368", 2, "0826593", false},
     };
     static const float kScales[] = {1.0f, 0.75f, 0.5f};
     for (const ShelfCase& sc : cases) {
@@ -567,11 +1116,11 @@ static void shelfSuite(const std::string& dir) {
         }
         printf("photo %s %dx%d\n", sc.file, base.w, base.h);
         // Asserted operating envelope per photo (3x stable), verified on the
-        // real captures: yakult/dixie/silkalm exact @1.0 under MOD_10,
-        // starbucks exact @1.0 under MOD_10_10; quakotml/ondeg @1.0 are
-        // honest-NotFound gates (truncated reads must be rejected, never
-        // emitted — they FAIL LOUD on a future phantom emission).
-        // Stretched/@0.50/harsh: informational recall signal.
+        // real captures: all six are 9-digit Mod1010 codewords Vision reads
+        // identically. Raw 1.0 is asserted except for dixie, whose full-frame
+        // 1.0 miss is honest (Vision misses it too) — its gate rides the
+        // production contrast stretch. Stretched/@0.50/harsh: informational
+        // recall signal elsewhere.
         std::string file = sc.file;
         // Empty payload = honest-NotFound gate (see table); otherwise exact.
         bool wantNone = sc.payload[0] == '\0';
@@ -579,7 +1128,7 @@ static void shelfSuite(const std::string& dir) {
             Gray v = (f == 1.0f) ? base : downscaleNN(base, f);
             char nm[96];
             snprintf(nm, sizeof(nm), "%s @%.2f", sc.file, f);
-            bool asserted = (f == 1.0f);
+            bool asserted = (f == 1.0f) && !sc.assertStretched;
             std::string a = nm, b = nm, c = nm;
             if (wantNone) {
                 checkSdkNone(a + " [run1]", v, sc.policy, asserted);
@@ -593,16 +1142,17 @@ static void shelfSuite(const std::string& dir) {
         }
         Gray s = base;
         contrastStretch(s);  // production-equivalent preprocessing
-        // Stretched variants are informational recall signal (the stretch
-        // redistributes pixel statistics the fixtures weren't tuned for).
+        // Stretched variants: asserted only for cases whose gate rides the
+        // stretch (see table); otherwise informational recall signal.
+        bool sAsserted = sc.assertStretched;
         if (wantNone) {
-            checkSdkNone(std::string(sc.file) + " stretched [run1]", s, sc.policy, false);
-            checkSdkNone(std::string(sc.file) + " stretched [run2]", s, sc.policy, false);
-            checkSdkNone(std::string(sc.file) + " stretched [run3]", s, sc.policy, false);
+            checkSdkNone(std::string(sc.file) + " stretched [run1]", s, sc.policy, sAsserted);
+            checkSdkNone(std::string(sc.file) + " stretched [run2]", s, sc.policy, sAsserted);
+            checkSdkNone(std::string(sc.file) + " stretched [run3]", s, sc.policy, sAsserted);
         } else {
-            checkSdk(std::string(sc.file) + " stretched [run1]", s, sc, false);
-            checkSdk(std::string(sc.file) + " stretched [run2]", s, sc, false);
-            checkSdk(std::string(sc.file) + " stretched [run3]", s, sc, false);
+            checkSdk(std::string(sc.file) + " stretched [run1]", s, sc, sAsserted);
+            checkSdk(std::string(sc.file) + " stretched [run2]", s, sc, sAsserted);
+            checkSdk(std::string(sc.file) + " stretched [run3]", s, sc, sAsserted);
         }
         // Harsh scale+photometric combos: informational recall signal.
         for (float f : kScales) {
@@ -694,7 +1244,12 @@ int main(int argc, char** argv) {
     std::string shelfDir = (argc > 1) ? argv[1]
                                       : "../../barcode-scanner-sdk/src/test/resources/msi-shelf";
     syntheticSuite();
+    shelfFormatSuite();
+    tiltSuite();
+    bleedSuite();
+    smallBleedSuite();
     shelfSuite(shelfDir);
+    frameSuite();
     benchSuite(shelfDir);
     printf("ASSERTS pass=%d fail=%d (info-only misses=%d)\n", g_assertPass, g_assertFails,
            g_infoFails);

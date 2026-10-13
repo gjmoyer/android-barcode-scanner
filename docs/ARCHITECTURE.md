@@ -6,7 +6,7 @@ Clean-architecture, enterprise-style layering. Dependency rule: **outer layers d
 ```
 ┌────────────────────────────────────────────────────────┐
 │ api/  BarcodeScannerFacade, BarcodeScannerFactory,     │  PUBLIC — host apps touch only this
-│       ScannerConfig, ScanResult                        │
+│       ScannerConfig, ScanResult, CameraStatus          │
 ├────────────────────────────────────────────────────────┤
 │ domain/model      Symbology, ScanFrame, DecodedBarcode │  Stable value types
 │ domain/decoder    BarcodeDecoder (strategy),           │  Open/Closed: add engine =>
@@ -22,7 +22,7 @@ Clean-architecture, enterprise-style layering. Dependency rule: **outer layers d
 │                   MsiRegionCropper, table/checksum     │
 │ data/fusion       FusedDecoder                         │  Orchestrates all engines
 ├────────────────────────────────────────────────────────┤
-│ camera/           CameraScanManager (CameraX)          │  Frame producer only
+│ camera/           CameraScanManager (CameraX)          │  Frames + camera state/controls
 │ di/               ScannerContainer (manual DI)         │  Wiring; no Hilt imposed
 └────────────────────────────────────────────────────────┘
 ```
@@ -71,7 +71,7 @@ No pipeline change.
   unneeded rotations never materialize thanks to confident early-exit).
 - `zxingTryHarder(false)` opts the native sweep out of thorough mode. The MSI
   engine is always thorough: multi-ROI scanline voting, digit-template
-  correlation, and a far-field 2x retry on small frames.
+  correlation, and small-module 1D/2D 2x retries.
 
 ## MSI decode path (detail)
 
@@ -82,10 +82,27 @@ Grayscale frame (row-major bytes via JNI)
     Up to 8 ROIs, strongest edge-density first
   → per ROI: averaged profile + up to 9 individual scanline rows
     → bar centers as prominent luminance minima; module = median spacing / 3
+    → every bar a Start candidate, every digit count that fits the bars
+      (no floor on trailing bars, since tags carry print to the right)
     → digit windows correlated against blurred 12-module templates
-    → checksum gate (MOD10/MOD11/MOD1010/MOD1110, in order) + ≥2-vote agreement
+    → digit-grid gate: window starts must lie within 1.5 modules of a line
+      (uniform pitch); off-grid checksum-valid hypotheses are dropped
+    → checksum gate: host policy pushed down (only that scheme competes);
+      NONE = MOD10/MOD11/MOD1010/MOD1110 in order; + ≥2-vote agreement
+  → guard gate per vote key: Start / strict Stop / 6-module trailing quiet
+    zone, each the best over agreeing scanlines. Scanlines carry a
+    verification tail past the ROI; a quiet zone cut by the frame edge
+    rejects the read unless the length bounds forbid a longer symbol
   → winner = most votes, ties by average score
-  → single 2x NN upscale retry if every ROI failed on a small frame (<800px edge)
+  → 1D 2x profile retry if every ROI failed (top level only): re-vote each
+    failed ROI with module <4.5px on its own scanlines upsampled 2x (no new
+    ROI search)
+  → skew retry if still nothing (top level only): projection search finds
+    the bar angle (±15°) on the first ROI tilted ≥1.5° whose deskew sharpens
+    the band ≥1.5x; scanlines along the symbol axis, deskewed extent first,
+    then the original extent; same vote and guard gates
+  → single 2x NN upscale retry if still nothing, on a small frame (<800px
+    edge) or on small modules with checksum-valid evidence
   → Kotlin: re-validate reported digits strictly under `msiChecksumPolicy`,
     strip check digits, reject degenerate (single-digit) payloads
 ```
@@ -93,7 +110,13 @@ Grayscale frame (row-major bytes via JNI)
 - **Full-frame MSI runs before ROI MSI** (measured more accurate: intact quiet
   zones beat tight-crop edge artifacts; easy frames early-exit before
   localization costs). `MsiRegionAssistDecoder` (ML Kit isolation → pad +
-  deskew crop → shared native decoder) stays the tilted-label backup.
+  deskew crop → shared native decoder) stays the backup for tilts beyond
+  the native skew retry's ±15°.
+- **Stills retry contrast-stretched**: `decodeFrame` tries every orientation
+  plain, then (`FrameOptions.stretchRetry`, stills only) once more through
+  the 2%/98% stretch. Stills are never stretched up front: a whole-photo
+  stretch clips bars that already read. Live aim-box crops are stretched
+  once in `prepareRegion` and never retry.
 - **One decoder instance per path**, each owning a synchronized `MsiVoteGate`,
   so ROI misses can never reset the full-frame consecutive count.
 - **Native library is optional at runtime**: `MsiNativeDecoder.nativeAvailable`
@@ -116,8 +139,9 @@ Grayscale frame (row-major bytes via JNI)
 - **Native C++ MSI engine** (`src/main/cpp/msi_decoder.cpp`, no third-party
   barcode code): signal-template correlation survives the blur that defeats
   width thresholding. `MsiCodeTable`/`MsiChecksumValidator` stay in Kotlin —
-  the validator enforces the host's `msiChecksumPolicy` on native-reported
-  digits (the engine auto-detects; Kotlin decides). Verified by the host
+  the host's `msiChecksumPolicy` is pushed into native candidate selection
+  (under `MOD_10_10` a Mod10-valid truncation cannot outvote the full read) and the
+  validator re-enforces it on native-reported digits. Verified by the host
   harness (`tools/msi-harness`, host-compiled, no device needed), JVM
   contract tests, and on-device sweeps (`DeviceMsiTest`).
 - **Fusion owns orientation**, engines own inversion/binarization: avoids N×M retry explosion.
@@ -126,3 +150,11 @@ Grayscale frame (row-major bytes via JNI)
 - **Domain references Android graphics types** (Bitmap/Rect) as an accepted v1 tradeoff: an Android
   library module pays less for Robolectric than for a FrameImage abstraction layer; revisit if a
   pure-JVM artifact is ever needed.
+- **Live publications are session-scoped**: `DefaultBarcodeScanner` numbers
+  camera sessions and publishes results, `cameraStatus` and `torchEnabled`
+  only under `cameraLock` while the publishing session is current, with
+  non-suspending emission so the check and the publish are atomic with stop.
+  Collectors may run inline (re-entrant lock), so every flow update in
+  start/stop/failure is followed by a session re-check. A decode or CameraX
+  callback outliving `stopCamera` (or a host Retry) can therefore never
+  finish the next session; `Failed` is final per session.

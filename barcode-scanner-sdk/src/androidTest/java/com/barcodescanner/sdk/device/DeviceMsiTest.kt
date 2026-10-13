@@ -1,6 +1,8 @@
 package com.barcodescanner.sdk.device
 
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Matrix
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.barcodescanner.sdk.api.BarcodeScannerFactory
@@ -8,7 +10,6 @@ import com.barcodescanner.sdk.api.MsiChecksumPolicy
 import com.barcodescanner.sdk.api.ScanResult
 import com.barcodescanner.sdk.api.ScannerConfigBuilder
 import com.barcodescanner.sdk.data.zxingcpp.ZXingCppDecoder
-import com.barcodescanner.sdk.domain.pipeline.OrientationCandidates
 import kotlinx.coroutines.runBlocking
 import org.junit.Assume.assumeTrue
 import org.junit.Test
@@ -235,7 +236,7 @@ class DeviceMsiTest {
                 org.junit.Assert.assertNotNull("cannot decode asset $name", upright)
                 try {
                     for (contentRotation in listOf(0, 90, 180, 270)) {
-                        val raw = OrientationCandidates.rotate(upright!!, contentRotation)
+                        val raw = rotate(upright!!, contentRotation)
                         val sensorRotation = (360 - contentRotation) % 360
                         val result = runBlocking { scanner.scanBitmap(raw, sensorRotation) }
                         org.junit.Assert.assertTrue(
@@ -252,5 +253,13 @@ class DeviceMsiTest {
         } finally {
             scanner.close()
         }
+    }
+
+    // Pixel-exact quarter turns (nearest neighbour): bilinear filtering would
+    // blur the narrow MSI bars this test depends on.
+    private fun rotate(src: Bitmap, degrees: Int): Bitmap {
+        if (degrees % 360 == 0) return src
+        val m = Matrix().apply { postRotate(degrees.toFloat()) }
+        return Bitmap.createBitmap(src, 0, 0, src.width, src.height, m, false)
     }
 }

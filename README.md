@@ -20,19 +20,23 @@ measurement). See
 
 ## Requirements
 
-- Android Studio with **SDK 36+** (compileSdk 37, targetSdk 36)
-- AGP 9.4.1, Kotlin 2.4.20 (built-in — no kotlin-android plugin), Gradle 9.6.0, JDK 17+
+- Android Studio with **SDK 37** (compileSdk 37; sample app targetSdk 37)
+- AGP 9.4.1, Kotlin 2.4.21 (built-in — no kotlin-android plugin), Gradle 9.8.1, JDK 25 for the Gradle daemon (pinned by `gradle/gradle-daemon-jvm.properties`; Gradle downloads it if missing; app bytecode targets Java 17)
 - Android NDK + CMake 3.22.1 (the SDK compiles its own MSI decoder from
   `src/main/cpp/`; zxing-cpp v3.1.1 arrives as a prebuilt Maven Central AAR —
   network fetch happens once via Gradle)
-- minSdk 28 (Android 9). Native libraries ship ARM-only (`armeabi-v7a`,
-  `arm64-v8a`); other ABIs gracefully degrade to `NotFound` on native paths.
+- minSdk 28 (Android 9). Native libraries ship for `armeabi-v7a`,
+  `arm64-v8a` and `x86_64`. Without one (32-bit x86, or a host app whose
+  `abiFilters` exclude the device ABI) the live camera runs preview-only and
+  reports `CameraStatus.Failed`, and stills return `ScanResult.Failure`.
 
 ## Open in Android Studio
 
 1. `File → Open…` → select this folder.
 2. Let Gradle sync.
-3. Run the `sample-app` on a device to try live scanning.
+3. Run the `sample-app` on a device to try live scanning. While scanning,
+   the **Torch** button toggles the flash (re-applied on each one-shot scan),
+   pinch zooms and tap focuses; camera failures show in the status line.
 
 ## Use in any app
 
@@ -78,14 +82,16 @@ val result = scanner.scanBitmap(bitmap)
 ```
 
 Host apps only touch `api/` (`BarcodeScannerFacade`, `BarcodeScannerFactory`,
-`ScannerConfig`, `ScanResult`) plus `domain/model/` (`Symbology`, `DecodedBarcode`).
+`ScannerConfig`, `ScanResult`, `CameraStatus`) plus `domain/model/` (`Symbology`, `DecodedBarcode`).
 No DI framework is imposed (manual `di/` container inside the SDK).
 
 ## Viewfinder overlay (host UI)
 
-All camera work lives in the SDK (`camera/` — CameraX binding, stride-aware
-YUV→ARGB, rotation, 1280px cap, single-flight conflation). The host owns only
-the preview surface and the overlay drawing:
+All camera work lives in the SDK (`camera/` — CameraX binding, 16:9 preview and
+~1080p analysis sharing one field of view, single-flight conflation, and ONE
+native pass per accepted frame that crops the aim box out of the Y plane,
+contrast-stretches it and rotates it upright; every engine then reads that one
+buffer in place). The host owns only the preview surface and the overlay drawing:
 
 - Pass a `PreviewView` to `startCamera` (or any `Preview.SurfaceProvider` for
   Compose/headless — overlays are then the host's own drawing).
@@ -95,6 +101,16 @@ the preview surface and the overlay drawing:
   is exactly the box being decoded. A barcode outside the drawn box cannot
   decode — keep it generous. Without a `PreviewView`, fractions fall back to
   the sensor crop.
+- Camera controls for the live session: `setTorchEnabled(on) { accepted -> }`
+  with the actual state on `torchEnabled`, `scaleZoom(gestureScale)` for pinch
+  zoom, and `focusAt(previewView.meteringPointFactory.createPoint(x, y))` for
+  tap-to-focus (continuous autofocus resumes after ~3 s). All are no-ops (torch
+  reports false) without a running camera.
+- `cameraStatus` (`Idle`/`Starting`/`Running`/`InUse`/`Failed`) explains a black
+  preview: show a hint on `InUse` (another app holds the camera; CameraX reopens
+  it automatically) and stop + offer a retry on `Failed` (also reported once
+  on `results` as a `ScanResult.Failure`). Results, status and torch state of a
+  stopped session never publish into the next one.
 
 ## Configuration
 
@@ -103,6 +119,7 @@ val config = ScannerConfigBuilder()
     .only(Symbology.QR_CODE, Symbology.DATA_BAR_EXPANDED, Symbology.MSI_PLESSEY)
     .msiChecksumPolicy(MsiChecksumPolicy.MOD_10)
     .msiMinPayloadDigits(6)                  // reject short lucky MSI parses (shelf SKUs)
+    .msiSymbolLength(9)                      // grocery shelf tags: 7-digit item + 2 checks
     .decodeTimeoutMillis(1500)               // whole frame budget (preprocessing + orientations + engines)
     .duplicateSuppressionMillis(1500)        // live-mode repeat suppression
     .minConfidence(0.5f)
@@ -117,9 +134,17 @@ val config = ScannerConfigBuilder()
   thorough mode.
 - MSI results are re-validated strictly under `msiChecksumPolicy` and short or
   degenerate reads are withheld — a wrong policy yields `NotFound`, never a
-  misread presented as valid.
+  misread presented as valid. The policy is also pushed into the native
+  engine's candidate selection. grocery shelf tags are 9-digit Mod1010 (item +
+  two checks): use `MOD_10_10`; under `MOD_10` they emit the 8-digit
+  `item + check` and lose truncation protection.
 - `msiMinPayloadDigits` (default 3, spec floor): raise to ~6 for shelf SKUs;
   short MSI parses validate by luck and can win blurry live frames.
+- `msiSymbolLength(n)` / `msiSymbolLengths(range)` (default null = any):
+  accepted MSI symbol lengths, check digits included, independent of the
+  checksum policy. Enforced in native candidate selection before voting, so a
+  phantom of another length can't outvote the true read. grocery shelf tags are
+  9 digits; set it whenever your labels have a fixed length.
 - Duplicate suppression only affects the live `results` flow; one-shot
   `scanBitmap`/`scanFrame` always return the decode result.
 
@@ -152,8 +177,8 @@ docs/                         # ARCHITECTURE.md, MSI_PLESSEY_RESEARCH.md
    allocates unneeded rotations.
 3. **Per-engine retries** — zxing `TryRotate`/`TryInvert`/`TryHarder`; MSI
     multi-ROI scanline voting with blurred digit-template correlation
-    (shape matching, no binarization threshold), checksum gating, and a
-    far-field 2x retry on small frames.
+    (shape matching, no binarization threshold), checksum gating, and
+    small-module 1D/2D 2x retries.
 4. **Fusion voting** — hits pool across orientations (deduped on
     value+symbology, max confidence kept); a hit at confidence ≥0.95 stops
     the scan immediately. MSI hits additionally require ≥2 agreeing

@@ -1,6 +1,11 @@
 package com.barcodescanner.sdk.data.zxingcpp
 
 import android.graphics.Bitmap
+import android.graphics.ImageFormat
+import android.graphics.Rect
+import androidx.camera.core.ImageProxy
+import com.barcodescanner.sdk.data.frame.LumaFrame
+import com.barcodescanner.sdk.data.frame.NativeFrame
 import android.graphics.Point
 import com.barcodescanner.sdk.domain.decoder.DecodeOutcome
 import com.barcodescanner.sdk.domain.model.ScanFrame
@@ -240,5 +245,42 @@ class ZXingCppDecoderTest {
             readerFactory = { throw AssertionError("reader must not be constructed") },
         )
         assertTrue(d.decode(frame()) is DecodeOutcome.NotFound)
+    }
+
+    @Test
+    fun decodeLuma_readsPreparedFrameInPlaceViaImageProxy() = runBlocking {
+        val buf = NativeFrame.allocate(16, 8)
+        buf.put(0, 7)
+        val luma = LumaFrame(buf, 16, 8)
+        val reader = mockk<BarcodeReader>()
+        var proxy: ImageProxy? = null
+        every { reader.read(any<ImageProxy>()) } answers {
+            proxy = firstArg()
+            listOf(result(BarcodeReader.Format.DATA_BAR_EXP, "01987654321"))
+        }
+        every { reader.read(any<Bitmap>(), any(), any()) } throws AssertionError("live path must not use bitmaps")
+        val d = ZXingCppDecoder(setOf(Symbology.DATA_BAR_EXPANDED), readerFactory = { reader })
+        val out = d.decodeLuma(luma)
+        assertTrue("expected Success, got $out", out is DecodeOutcome.Success)
+        val barcode = (out as DecodeOutcome.Success).barcodes.single()
+        assertEquals("01987654321", barcode.rawValue)
+        assertFalse("prepared frames are upright", barcode.isUpsideDown)
+        // Exactly the fields zxing-cpp 3.1.1 read(ImageProxy) consumes.
+        val p = proxy!!
+        assertEquals(ImageFormat.YUV_420_888, p.format)
+        assertEquals(Rect(0, 0, 16, 8), p.cropRect)
+        assertEquals(0, p.imageInfo.rotationDegrees)
+        assertEquals(16, p.planes[0].rowStride)
+        assertEquals(7.toByte(), p.planes[0].buffer.get(0))
+    }
+
+    @Test
+    fun decodeLuma_missingNative_isNotFound() = runBlocking {
+        val d = ZXingCppDecoder(
+            setOf(Symbology.DATA_BAR),
+            readerFactory = { throw UnsatisfiedLinkError("mock missing .so") },
+        )
+        val out = d.decodeLuma(LumaFrame(NativeFrame.allocate(16, 8), 16, 8))
+        assertTrue("expected NotFound, got $out", out is DecodeOutcome.NotFound)
     }
 }

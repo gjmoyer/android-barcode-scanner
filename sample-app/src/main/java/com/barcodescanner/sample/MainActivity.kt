@@ -1,6 +1,7 @@
 package com.barcodescanner.sample
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
 import android.media.AudioManager
@@ -10,7 +11,10 @@ import android.os.Bundle
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.view.GestureDetector
 import android.view.Gravity
+import android.view.MotionEvent
+import android.view.ScaleGestureDetector
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -23,6 +27,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.barcodescanner.sdk.api.BarcodeScannerFactory
 import com.barcodescanner.sdk.api.BarcodeScannerFacade
+import com.barcodescanner.sdk.api.CameraStatus
 import com.barcodescanner.sdk.api.MsiChecksumPolicy
 import com.barcodescanner.sdk.api.ScanResult
 import com.barcodescanner.sdk.api.ScannerConfigBuilder
@@ -35,8 +40,13 @@ import kotlinx.coroutines.launch
  *
  * 1. `BarcodeScannerFactory.create(this, config)` (one liner, no DI framework needed),
  * 2. `scanner.startCamera(this, previewView)` for live preview + decode,
- * 3. collect [BarcodeScannerFacade.results] for decoded barcodes,
+ * 3. collect [BarcodeScannerFacade.results] for decoded barcodes, and
+ *    [BarcodeScannerFacade.cameraStatus] / [BarcodeScannerFacade.torchEnabled]
+ *    for camera state,
  * 4. `scanner.close()` in onDestroy.
+ *
+ * Camera controls while scanning: the Torch button, pinch to zoom and tap to
+ * focus on the preview.
  *
  * Scan flow in this sample: the camera stays off until SCAN is tapped, so no
  * constant scanning / decode churn happens in the background. A tap engages
@@ -65,6 +75,12 @@ class MainActivity : ComponentActivity() {
         Symbology.entries.filter { it != Symbology.UNKNOWN }.toSet()
     private val symBoxes = mutableMapOf<Symbology, android.widget.CheckBox>()
 
+    /**
+     * Torch preference. Every one-shot scan stops the camera (which turns the
+     * torch off), so the choice is re-applied each time the camera runs.
+     */
+    private var torchWanted = false
+
     /** True after tapping SCAN, until the next successful decode. */
     private var awaitingScan = false
 
@@ -75,6 +91,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var resultDetail: TextView
     private lateinit var scanButton: Button
     private lateinit var togglePolicy: Button
+    private lateinit var torchButton: Button
     private lateinit var preview: PreviewView
 
     private var toneGenerator: ToneGenerator? = null
@@ -105,13 +122,20 @@ class MainActivity : ComponentActivity() {
         }
         scanButton = Button(this).apply { text = "Scan" }
         togglePolicy = Button(this).apply { text = "Checksum: MOD_10" }
+        torchButton = Button(this).apply {
+            text = TORCH_OFF_TEXT
+            // Enabled only while the camera runs (see onCameraStatus).
+            isEnabled = false
+        }
 
         val buttonRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             addView(scanButton, LinearLayout.LayoutParams(0, -2, 1f))
             addView(togglePolicy, LinearLayout.LayoutParams(0, -2, 1f))
+            addView(torchButton, LinearLayout.LayoutParams(0, -2, 1f))
         }
+        bindCameraGestures(previewStack)
 
         // Symbology scope: one checkbox per known symbology (this is the
         // consumer control — ScannerConfigBuilder.only/enabledSymbologies).
@@ -208,9 +232,17 @@ class MainActivity : ComponentActivity() {
             clearResultCard()
             scanButton.text = "Scanning… tap a barcode"
             scanButton.isEnabled = false
-            status.text = "Scanning… point at a barcode (QR, DataBar, MSI…)"
+            status.text = SCANNING_TEXT
             // Engage the camera only now — no constant scanning.
             startScanner()
+        }
+
+        torchButton.setOnClickListener {
+            val current = scanner ?: return@setOnClickListener
+            // The button label follows torchEnabled (the camera's actual
+            // state), not the request, so a rejected toggle cannot desync it.
+            torchWanted = !current.torchEnabled.value
+            applyTorch(current)
         }
 
         togglePolicy.setOnClickListener {
@@ -249,18 +281,15 @@ class MainActivity : ComponentActivity() {
             // Shelf SKUs are 6+ digits; a lower floor lets blurry live frames
             // emit short false positives (e.g. "0128") with 2 correlated votes.
             .msiMinPayloadDigits(6)
-            // Printed shelf SKUs omit the check digit (it lives in the barcode),
-            // so trust the OCR read as printed (emitted at confidence 0.5).
-            .msiOcrRequireChecksum(false)
-            // OCR is the last engine; give the fallback room to run after the
-            // bar engines on a bad label (default 1.5s cut it off).
-            .decodeTimeoutMillis(4_000)
+            // grocery shelf tags are 9-digit symbols (7-digit item + two
+            // checks) under every policy the cycler picks: other lengths are
+            // phantoms, rejected before they can outvote a true read.
+            .msiSymbolLength(9)
+            // Default decode timeout (1.5s): live aim-box frames finish in tens
+            // of ms; the budget only bounds a stalled frame.
             // Viewfinder ROI: decode only the aimed box (faster frames, less
             // competing print). Fractions match the ViewfinderView overlay.
             .scanRegion(VIEWFINDER_W, VIEWFINDER_H)
-            // Debug: persist the first live MsiOcr frame as PNG for offline
-            // bar-miss forensics (adb pull .../files/ocr-debug).
-            .debugOcrFrameDump(true)
             .build()
         scanner = BarcodeScannerFactory.create(this, config)
         bindResults()
@@ -302,12 +331,91 @@ class MainActivity : ComponentActivity() {
         val current = scanner ?: return
         collectJob = lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
-                current.results.collect { result ->
-                    if (result is ScanResult.Success) {
-                        onScanSuccess(result)
+                launch {
+                    current.results.collect { result ->
+                        if (result is ScanResult.Success) {
+                            onScanSuccess(result)
+                        }
                     }
                 }
+                launch {
+                    current.torchEnabled.collect { on ->
+                        torchButton.text = if (on) TORCH_ON_TEXT else TORCH_OFF_TEXT
+                    }
+                }
+                launch { current.cameraStatus.collect(::onCameraStatus) }
             }
+        }
+    }
+
+    /**
+     * Turns [CameraStatus] into UI: a black preview is never left unexplained.
+     * Failed is final for the camera session, so stop and offer a retry.
+     */
+    private fun onCameraStatus(cameraStatus: CameraStatus) {
+        torchButton.isEnabled = cameraStatus == CameraStatus.Running
+        when (cameraStatus) {
+            CameraStatus.Running -> {
+                if (awaitingScan) status.text = SCANNING_TEXT
+                scanner?.let { if (torchWanted) applyTorch(it) }
+            }
+            CameraStatus.InUse -> if (awaitingScan) {
+                status.text = "Camera in use by another app — scanning resumes when it is released"
+            }
+            is CameraStatus.Failed -> {
+                scanner?.stopCamera()
+                awaitingScan = false
+                status.text = "Camera failed: ${cameraStatus.reason}"
+                scanButton.text = "Retry"
+                scanButton.isEnabled = true
+            }
+            CameraStatus.Idle, CameraStatus.Starting -> Unit
+        }
+    }
+
+    private fun applyTorch(target: BarcodeScannerFacade) {
+        target.setTorchEnabled(torchWanted) { accepted ->
+            if (!accepted && torchWanted) {
+                torchWanted = false
+                status.text = "Torch unavailable (no flash unit or camera not running)"
+            }
+        }
+    }
+
+    /**
+     * Pinch zoom and tap-to-focus on the preview. Both are no-ops in the SDK
+     * while no camera runs, so they need no state checks here.
+     */
+    @SuppressLint("ClickableViewAccessibility") // Tap calls performClick below.
+    private fun bindCameraGestures(target: android.view.View) {
+        val pinch = ScaleGestureDetector(
+            this,
+            object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                override fun onScale(detector: ScaleGestureDetector): Boolean {
+                    scanner?.scaleZoom(detector.scaleFactor)
+                    return true
+                }
+            },
+        )
+        val tap = GestureDetector(
+            this,
+            object : GestureDetector.SimpleOnGestureListener() {
+                override fun onDown(e: MotionEvent): Boolean = true
+
+                override fun onSingleTapUp(e: MotionEvent): Boolean {
+                    // The preview fills the stack, so stack coordinates are
+                    // preview coordinates; the factory maps them to the sensor.
+                    runCatching { preview.meteringPointFactory.createPoint(e.x, e.y) }
+                        .onSuccess { scanner?.focusAt(it) }
+                    target.performClick()
+                    return true
+                }
+            },
+        )
+        target.setOnTouchListener { _, event ->
+            pinch.onTouchEvent(event)
+            if (!pinch.isInProgress) tap.onTouchEvent(event)
+            true
         }
     }
 
@@ -437,8 +545,15 @@ class MainActivity : ComponentActivity() {
 
     private companion object {
         const val READY_TEXT = "Ready — tap Scan, aim inside the box, then point at a barcode (QR, DataBar, MSI…)"
-        /** Viewfinder fractions (upright): must match scanRegion() in recreateScanner. */
+        const val SCANNING_TEXT = "Scanning… point at a barcode (QR, DataBar, MSI…). Pinch to zoom, tap to focus."
+        const val TORCH_OFF_TEXT = "Torch: off"
+        const val TORCH_ON_TEXT = "Torch: on"
+        /**
+         * Viewfinder fractions (upright): must match scanRegion() in
+         * recreateScanner. Wide and short: a shelf tag's MSI bars fill the
+         * width, and the short box keeps competing print out of the crop.
+         */
         const val VIEWFINDER_W = 0.9f
-        const val VIEWFINDER_H = 0.5f
+        const val VIEWFINDER_H = 0.2f
     }
 }

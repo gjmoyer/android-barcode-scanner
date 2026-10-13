@@ -10,18 +10,27 @@ package com.barcodescanner.sdk.domain.model
 data class ScannerConfig(
     val enabledSymbologies: Set<Symbology>,
     /**
-     * Max orientations attempted per frame: 1..4 (see OrientationCandidates).
-     * Default 4: the pipeline is cheap-first (upright first, confident
-     * early-exit, lazy rotations), so easy frames never pay for the rotations
-     * they don't try — there is no fast/degraded mode, only this bound for
-     * fixed-geometry hosts that know their aim.
+     * Max MSI orientations attempted per one-shot still: 1..4, tried
+     * natively in the order upright, upside-down, 90, 270 on the one
+     * converted frame (no rotated copies), first read wins (confirmed
+     * against the opposite direction when that view is tried) — easy stills
+     * never pay for the rotations they don't try. ML Kit and zxing resolve
+     * rotation themselves and are unaffected. Applies to one-shot scans
+     * (`scanBitmap`/`scanFrame`). Live camera aim-box frames always try MSI
+     * upright and upside-down: sideways tags cannot fit the wide box (ML Kit
+     * and zxing still resolve rotation themselves).
      */
     val maxOrientationsTried: Int,
     /** Per-frame decode timeout; fusion returns best-so-far after this. */
     val decodeTimeoutMillis: Long,
     /** Suppress identical results within this window (live mode dedup). */
     val duplicateSuppressionMillis: Long,
-    /** MSI Plessey checksum policy (Mod10 default per spec). */
+    /**
+     * MSI Plessey checksum policy (Mod10 default per spec). Enforced inside
+     * native candidate selection, not just on the final read. grocery shelf
+     * tags are 9-digit Mod1010 (item + 2 checks): use MOD_10_10 to emit the
+     * item number and stop Mod10-valid 8-digit truncations from winning.
+     */
     val msiChecksumPolicy: MsiChecksumPolicy,
     /**
      * Minimum MSI payload (checksum-stripped) length to emit. The spec floor is
@@ -58,18 +67,18 @@ data class ScannerConfig(
      */
     val zxingTryHarder: Boolean? = null,
     /**
-     * Debug only: write the first live frame that yields an `MsiOcr` hit as a
-     * lossless PNG into the app's external `ocr-debug/` dir (capped, app-private
-     * storage, no extra permission). Lets developers pull the exact failing
-     * pixels via `adb pull` and reproduce bar-decode misses offline. Never
-     * affects decode results. Default false.
+     * Retired, no effect: dumped the first live `MsiOcr` frame as PNG. The OCR
+     * engine is gone and live frames are native luma crops, never bitmaps.
+     * Kept for source compatibility.
      */
     val debugOcrFrameDump: Boolean = false,
     /**
      * Viewfinder region as centered upright fractions (null = everything
-     * visible). The camera decodes only this region: fewer pixels (≈2× faster
-     * image stages at 45% area), less competing print, and — most importantly —
-     * the box tells the user where to aim so the tag fills it.
+     * visible). The live camera reads only this region — one native crop,
+     * stretch and rotate per frame, then every engine reads that crop in place:
+     * fewer pixels, less competing print, and — most importantly — the box
+     * tells the user where to aim so the tag fills it. A wide, short box (e.g.
+     * 0.9 x 0.2) suits shelf-tag MSI bars.
      *
      * What-you-see-is-what-scans: the fractions are of the DISPLAYED preview
      * (the overlay draws the same fractions on the PreviewView), and analysis
@@ -85,6 +94,21 @@ data class ScannerConfig(
      * generous.
      */
     val scanRegion: ScanRegion? = null,
+    /**
+     * Accepted MSI symbol lengths in digits, check digits included — the whole
+     * codeword in the bars, independent of [msiChecksumPolicy] and
+     * [msiStripChecksum] (commercial SDKs call this the symbol count). Null
+     * (default) accepts any length the engine reads (7..10 digits). grocery
+     * shelf tags are 9 (7-digit item + two checks): `msiSymbolLength(9)`.
+     *
+     * Enforced inside native candidate selection, before scanline voting, and
+     * again on the final read: MSI's weak checksums let phantoms of other
+     * lengths pass by chance (a 7-digit Mod1010 string validates 1 time in
+     * 100), and a filter applied only to the winner would let one of them
+     * outvote the true read and then be withheld. [msiMinPayloadDigits] still
+     * applies to the emitted payload.
+     */
+    val msiSymbolLengths: IntRange? = null,
 ) {
     init {
         require(enabledSymbologies.isNotEmpty()) { "At least one symbology must be enabled" }
@@ -95,6 +119,11 @@ data class ScannerConfig(
         require(decodeTimeoutMillis in 100..10_000L) { "decodeTimeoutMillis out of range" }
         require(duplicateSuppressionMillis >= 0) { "duplicateSuppressionMillis must be >= 0" }
         require(msiMinPayloadDigits in 3..32) { "msiMinPayloadDigits must be 3..32" }
+        msiSymbolLengths?.let {
+            require(!it.isEmpty() && it.first >= 3 && it.last <= 32) {
+                "msiSymbolLengths must be a non-empty range within 3..32, was $it"
+            }
+        }
         require(minConfidence in 0f..1f) { "minConfidence must be 0..1" }
         // Silent footgun guard: fixed engine confidences are ML Kit 0.95 /
         // ZXing 0.9 / MSI 1.0 / OCR 0.5-0.7, so a high floor silently disables
@@ -145,6 +174,7 @@ data class ScannerConfig(
         private var dedup = 1_500L
         private var msi = MsiChecksumPolicy.MOD_10
         private var msiMinDigits = 3
+        private var msiSymbolLengths: IntRange? = null
         private var msiStripCheck = true
         private var msiOcrChecksum = false
         private var minConf = 0.5f
@@ -169,13 +199,17 @@ data class ScannerConfig(
         fun duplicateSuppressionMillis(v: Long) = apply { dedup = v }
         fun msiChecksumPolicy(v: MsiChecksumPolicy) = apply { msi = v }
         fun msiMinPayloadDigits(v: Int) = apply { msiMinDigits = v }
+        /** Accept only MSI symbols of exactly [digits] digits, checks included (see [ScannerConfig.msiSymbolLengths]). */
+        fun msiSymbolLength(digits: Int) = apply { msiSymbolLengths = digits..digits }
+        /** Accepted MSI symbol lengths, checks included; null accepts any (see [ScannerConfig.msiSymbolLengths]). */
+        fun msiSymbolLengths(range: IntRange?) = apply { msiSymbolLengths = range }
         /** Emit full MSI codewords with checks (see [ScannerConfig.msiStripChecksum]). */
         fun msiStripChecksum(v: Boolean) = apply { msiStripCheck = v }
         fun msiOcrRequireChecksum(v: Boolean) = apply { msiOcrChecksum = v }
         fun minConfidence(v: Float) = apply { minConf = v }
         /** Decouple zxing-cpp TryHarder from the always-thorough default; null is thorough. */
         fun zxingTryHarder(v: Boolean?) = apply { zxingHarder = v }
-        /** Debug only: dump the first `MsiOcr` live frame as PNG (see field). */
+        /** Retired, no effect (see field). */
         fun debugOcrFrameDump(v: Boolean) = apply { ocrDump = v }
         /**
          * Viewfinder region as centered upright fractions (0..1). Null (default)
@@ -202,6 +236,7 @@ data class ScannerConfig(
                 zxingTryHarder = zxingHarder,
                 debugOcrFrameDump = ocrDump,
                 scanRegion = region,
+                msiSymbolLengths = msiSymbolLengths,
             )
         }
     }

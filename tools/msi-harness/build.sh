@@ -9,7 +9,7 @@ SRC="${1:-../../barcode-scanner-sdk/src/main/cpp}"
 OUT="${OUT:-msi_harness}"
 clang++ -std=c++17 -O2 -Wall -Wextra \
     -I"$SRC" \
-    msi_harness.cpp "$SRC/msi_decoder.cpp" \
+    msi_harness.cpp "$SRC/msi_decoder.cpp" "$SRC/msi_frame.cpp" \
     -lz \
     -o "$OUT"
 echo "built ./$OUT (decoder: $SRC)"

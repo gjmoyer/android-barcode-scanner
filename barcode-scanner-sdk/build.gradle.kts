@@ -19,15 +19,15 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         consumerProguardFiles("consumer-rules.pro")
 
-        // Native MSI decoder (src/main/cpp): ARM only. Physical devices are
-        // ARM (arm64-v8a; armeabi-v7a kept for 32-bit hardware); x86/x86_64
-        // emulator slices are deliberately not shipped — the decoder degrades
-        // to NotFound without its .so (see MsiNativeDecoder.nativeAvailable),
-        // and modern emulators (e.g. the arm64 Pixel 10a AVD) are unaffected.
+        // Native library (src/main/cpp) hosts the whole frame path — camera
+        // crop, still conversion and MSI decode — so every scan needs it:
+        // arm64-v8a and armeabi-v7a for devices, x86_64 for x86_64
+        // emulators/ChromeOS. 32-bit x86 is not shipped: there, live scanning
+        // reports onError and stills return Failure (see NativeFrame.available).
         externalNativeBuild {
             cmake {
                 cppFlags("-std=c++17")
-                abiFilters("armeabi-v7a", "arm64-v8a")
+                abiFilters("armeabi-v7a", "arm64-v8a", "x86_64")
             }
         }
     }
@@ -92,10 +92,9 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)
     testImplementation(libs.mockk)
-    testImplementation(libs.coroutines.core)
+    // coroutines-core/-android already on implementation; test + androidTest inherit them.
 
-    androidTestImplementation("androidx.test:runner:1.7.0")
-    androidTestImplementation("androidx.test:rules:1.7.0")
-    androidTestImplementation("androidx.test.ext:junit:1.3.0")
-    androidTestImplementation(libs.coroutines.android)
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.rules)
+    androidTestImplementation(libs.androidx.test.ext.junit)
 }

@@ -2,48 +2,83 @@ package com.barcodescanner.sdk.camera
 
 import android.annotation.SuppressLint
 import android.content.Context
-import android.graphics.Bitmap
+import android.graphics.ImageFormat
 import android.graphics.Rect
 import android.graphics.RectF
-import android.os.SystemClock
+import android.os.Looper
 import android.util.Size
+import androidx.annotation.MainThread
+import androidx.camera.core.Camera
+import androidx.camera.core.CameraInfo
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.CameraState
+import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
+import androidx.camera.core.MeteringPoint
 import androidx.camera.core.Preview
+import androidx.camera.core.TorchState
+import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
-import com.barcodescanner.sdk.domain.model.ScanFrame
+import androidx.lifecycle.LiveData
+import androidx.lifecycle.Observer
+import com.barcodescanner.sdk.api.CameraStatus
+import com.barcodescanner.sdk.data.frame.LumaBufferPool
+import com.barcodescanner.sdk.data.frame.LumaFrame
+import com.barcodescanner.sdk.data.frame.NativeFrame
 import com.barcodescanner.sdk.domain.model.ScannerConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * CameraX live-scan manager (internal; host apps use startCamera on the facade).
  *
- * Frame policy tuned for barcode workloads:
- *  - 1280x720 cap via ResolutionSelector (bounds MSI/preprocessing cost),
- *  - STRATEGY_KEEP_ONLY_LATEST + single-flight decode gate: at most ONE decode
- *    in flight; while a slow MSI frame decodes, newer frames are dropped (not queued),
- *  - stride-aware YUV_420_888 -> ARGB conversion (rowStride/pixelStride and
- *    cropRect respected; direct integer BT.601, no JPEG round-trip so narrow
- *    bars survive; the naive buffer-concat path shears on Pixel/Samsung),
+ * Each camera frame is touched at most ONCE, and only natively:
+ *  - STRATEGY_KEEP_ONLY_LATEST + a single-flight gate checked BEFORE any pixel
+ *    work: a frame arriving while a decode runs is closed untouched (dropped,
+ *    never queued or partially processed),
+ *  - an accepted frame gets one [NativeFrame.prepare] pass straight from the
+ *    Y plane (rowStride respected, no Kotlin pixel loop, no Bitmap): crop to
+ *    the aim box, contrast stretch, rotate upright — into a pooled NV21
+ *    buffer every engine then reads in place ([LumaFrame]). The ImageProxy is
+ *    closed right after that pass, so CameraX can deliver the next frame while
+ *    the decode runs,
+ *  - only the aim box ([ScannerConfig.scanRegion], what-you-see-is-what-scans
+ *    via [viewBoxToBuffer]) is ever read; chroma planes are never read,
+ *  - preview and analysis both 16:9 (same field of view — what makes the
+ *    [viewBoxToBuffer] mapping exact — and the aspect closest to phone
+ *    displays, so few analysis pixels fall off-screen); analysis ~1920x1080
+ *    (lower-then-higher fallback stays inside the sizes every device streams
+ *    next to a preview). The box is a small crop of it, so resolution buys
+ *    bar width, not decode cost,
  *  - structured [scope] (no GlobalScope): stop()/close() cancels in-flight work,
- *  - sensor rotation forwarded into [ScanFrame.rotationDegrees] so still-image
- *    and live paths share one orientation pipeline.
+ *  - CameraX camera/torch state reported through [onStatus] and [onTorch]
+ *    (main thread) so hosts never show a silently dead preview; the camera
+ *    is released on the main thread, as CameraX requires.
+ *
+ * Unsupported ABIs (x86 emulators: ARM-only native packaging) get a preview
+ * without analysis and one [onError] report instead of a silent dead scanner.
  */
 internal class CameraScanManager(
     private val context: Context,
     private val config: ScannerConfig,
     private val scope: CoroutineScope,
-    private val onFrame: suspend (ScanFrame) -> Unit,
+    /**
+     * Decodes one prepared frame. Returns true when [LumaFrame.buffer] may be
+     * rewritten afterwards; false when an engine may still be reading it (a
+     * timed-out ML Kit task), in which case the buffer is dropped from the pool.
+     */
+    private val onFrame: suspend (LumaFrame) -> Boolean,
     /**
      * Called (on the main thread) when camera binding fails — e.g. no back
      * camera, camera in use, or the lifecycle is already destroyed. Without
@@ -52,8 +87,16 @@ internal class CameraScanManager(
      * an uncaught main-thread exception and crashes the app.
      */
     private val onError: (Throwable) -> Unit = {},
+    /** Main thread; CameraX camera state of the bound session. Never invoked after [stop]. */
+    private val onStatus: (CameraStatus) -> Unit = {},
+    /** Main thread; actual torch state reported by CameraX. Never invoked after [stop]. */
+    private val onTorch: (Boolean) -> Unit = {},
 ) {
+    private val mainExecutor = ContextCompat.getMainExecutor(context)
     private var cameraProvider: ProcessCameraProvider? = null
+    /** Bound camera; written on main, read by the controls from any thread. */
+    @Volatile
+    private var camera: Camera? = null
     private var previewUseCase: Preview? = null
     private var analysisUseCase: ImageAnalysis? = null
     private var analysisExecutor: ExecutorService? = null
@@ -67,8 +110,15 @@ internal class CameraScanManager(
     @Volatile
     private var previewView: PreviewView? = null
 
-    /** Single-flight gate: true while a decode is in flight. */
+    /** Single-flight gate: true while a frame is being prepared or decoded. */
     private val decodeInFlight = AtomicBoolean(false)
+
+    /** Prepared-frame buffers; an in-use (timed-out) buffer is never released. */
+    private val pool = LumaBufferPool()
+
+    /** CameraX LiveData registrations; added and removed on the main thread only. */
+    @Volatile
+    private var observers: CameraObservers? = null
 
     @Volatile
     private var stopped = false
@@ -106,17 +156,91 @@ internal class CameraScanManager(
             }
             cameraProvider = provider
             bind(provider, lifecycleOwner, surfaceProvider)
-        }, ContextCompat.getMainExecutor(context))
+        }, mainExecutor)
     }
 
     fun stop() {
         stopped = true
         decodeInFlight.set(false)
+        pool.clear()
         previewView = null
+        // CameraX unbinding and LiveData observer removal are main-thread only
+        // (off main, unbind throws and the use cases stay bound). Hosts stop on
+        // main, where release stays synchronous; an off-main stop (e.g. close()
+        // from a worker) defers it, so a bind still running on main is
+        // released after it lands instead of leaking its observers and use cases.
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            releaseCamera()
+        } else {
+            runCatching { mainExecutor.execute { releaseCamera() } }
+                .onFailure { android.util.Log.w(TAG, "camera release could not be scheduled", it) }
+        }
+    }
+
+    @MainThread
+    private fun releaseCamera() {
+        // A manager restarted before a deferred release owns fresh resources;
+        // its restart already released the previous binding.
+        if (!stopped) return
+        detachCameraObservers()
         unbindUseCases()
         cameraProvider = null
         runCatching { analysisExecutor?.shutdownNow() }
         analysisExecutor = null
+    }
+
+    /**
+     * Requests a torch change; [onResult] (main thread) reports whether CameraX
+     * accepted it. False without a running camera or a flash unit.
+     */
+    fun setTorchEnabled(enabled: Boolean, onResult: (Boolean) -> Unit) {
+        val activeCamera = camera
+        if (stopped || activeCamera == null || !activeCamera.cameraInfo.hasFlashUnit()) {
+            rejectTorch(onResult)
+            return
+        }
+        val torchFuture = runCatching { activeCamera.cameraControl.enableTorch(enabled) }.getOrElse {
+            android.util.Log.w(TAG, "torch request failed", it)
+            rejectTorch(onResult)
+            return
+        }
+        torchFuture.addListener(
+            { onResult(runCatching { torchFuture.get(); true }.getOrDefault(false)) },
+            mainExecutor,
+        )
+    }
+
+    /** Callers may be off main; the result is always delivered on main. */
+    private fun rejectTorch(onResult: (Boolean) -> Unit) {
+        runCatching { mainExecutor.execute { onResult(false) } }
+    }
+
+    /** Multiplies the zoom ratio by [scaleFactor], clamped to the camera's range. */
+    fun scaleZoom(scaleFactor: Float) {
+        if (stopped || !scaleFactor.isFinite() || scaleFactor <= 0f) return
+        val activeCamera = camera ?: return
+        runCatching {
+            val zoom = activeCamera.cameraInfo.zoomState.value ?: return
+            val target = (zoom.zoomRatio * scaleFactor).coerceIn(zoom.minZoomRatio, zoom.maxZoomRatio)
+            // The future is left unobserved: CameraX fails it (never throws)
+            // when a newer request supersedes it or the camera is inactive.
+            if (target != zoom.zoomRatio) activeCamera.cameraControl.setZoomRatio(target)
+        }.onFailure { android.util.Log.w(TAG, "zoom request failed", it) }
+    }
+
+    /** One-shot AF/AE at [point]; continuous autofocus resumes after a short auto-cancel. */
+    fun focusAt(point: MeteringPoint) {
+        if (stopped) return
+        val activeCamera = camera ?: return
+        runCatching {
+            val action = FocusMeteringAction.Builder(
+                point,
+                FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE,
+            ).setAutoCancelDuration(FOCUS_AUTO_CANCEL_SECONDS, TimeUnit.SECONDS).build()
+            // Unobserved like zoom; the auto-cancel returns to continuous
+            // autofocus so a tap can't leave focus locked on an old label.
+            activeCamera.cameraControl.startFocusAndMetering(action)
+        }.onFailure { android.util.Log.w(TAG, "focus request failed", it) }
     }
 
     /**
@@ -128,6 +252,7 @@ internal class CameraScanManager(
         val provider = cameraProvider ?: return
         val cases = listOfNotNull(previewUseCase, analysisUseCase)
         if (cases.isNotEmpty()) runCatching { provider.unbind(*cases.toTypedArray()) }
+        camera = null
         previewUseCase = null
         analysisUseCase = null
     }
@@ -139,241 +264,280 @@ internal class CameraScanManager(
         surfaceProvider: Preview.SurfaceProvider,
     ) {
         val executor = analysisExecutor ?: return
+        detachCameraObservers()
         unbindUseCases()
-        val preview = Preview.Builder().build().also {
-            it.surfaceProvider = surfaceProvider
-        }
-        val analysis = ImageAnalysis.Builder()
-            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
+        val preview = Preview.Builder()
             .setResolutionSelector(
-                ResolutionSelector.Builder()
-                    .setResolutionStrategy(
-                        ResolutionStrategy(
-                            Size(1280, 720),
-                            ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER,
-                        ),
-                    ).build(),
+                ResolutionSelector.Builder().setAspectRatioStrategy(STREAM_ASPECT).build(),
             )
             .build()
-        analysis.setAnalyzer(executor) { imageProxy ->
-            val frame = try {
-                imageProxy.toScanFrame()
-            } finally {
-                imageProxy.close()
-            } ?: return@setAnalyzer
-            // Single-flight: drop this frame if a decode is still running.
-            if (!decodeInFlight.compareAndSet(false, true)) {
-                frame.bitmap.recycle()
-                return@setAnalyzer
-            }
-            scope.launch {
-                try {
-                    if (stopped) return@launch
-                    onFrame(frame)
-                } finally {
-                    runCatching { frame.bitmap.recycle() }
-                    decodeInFlight.set(false)
-                }
-            }
-        }
+            .also { it.surfaceProvider = surfaceProvider }
+        // No native frame library (x86 emulator): preview only. Binding an
+        // analysis stream nothing can read would just burn camera bandwidth.
+        val analysis = if (NativeFrame.available) buildAnalysis(executor) else null
+        val useCases = listOfNotNull(preview, analysis).toTypedArray()
         previewUseCase = preview
         analysisUseCase = analysis
-        try {
-            provider.bindToLifecycle(
-                lifecycleOwner,
-                CameraSelector.DEFAULT_BACK_CAMERA,
-                preview,
-                analysis,
-            )
+        val boundCamera = try {
+            provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, *useCases)
         } catch (t: Throwable) {
             // Binding throws for missing/in-use cameras, destroyed lifecycles,
             // or unbindable use cases — and it throws HERE, asynchronously on
             // the main executor after start() returned, so the host's
             // try/catch around startCamera cannot see it. Clean up the
             // half-bound use cases and report instead of crashing.
-            runCatching { provider.unbind(preview, analysis) }
+            runCatching { provider.unbind(*useCases) }
             previewUseCase = null
             analysisUseCase = null
             android.util.Log.w(TAG, "camera bind failed", t)
             onError(t)
+            return
+        }
+        camera = boundCamera
+        observeCamera(boundCamera.cameraInfo, lifecycleOwner)
+        // A replayed Running can make the host stop inline (already released).
+        if (stopped) return
+        if (analysis == null) {
+            val t = UnsupportedOperationException(
+                "live decoding needs libmsi_decoder, not packaged for ${android.os.Build.SUPPORTED_ABIS.joinToString()}",
+            )
+            android.util.Log.w(TAG, "preview only: ${t.message}")
+            onError(t)
         }
     }
 
-    private fun ImageProxy.toScanFrame(): ScanFrame? = runCatching {
-        // NOTE: named toStrideAwareBitmap (not toBitmap) — CameraX 1.6 added a
-        // member ImageProxy.toBitmap() which shadows extensions; an explicit
-        // distinct name guarantees OUR stride-aware conversion runs.
-        val bitmap = toStrideAwareBitmap() ?: return null
-        ScanFrame(
-            bitmap = bitmap,
-            rotationDegrees = when (imageInfo.rotationDegrees) {
-                90, 180, 270 -> imageInfo.rotationDegrees
-                else -> 0
-            },
-            timestampMillis = SystemClock.elapsedRealtime(),
-        )
-    }.getOrNull()
+    @MainThread
+    private fun observeCamera(info: CameraInfo, lifecycleOwner: LifecycleOwner) {
+        detachCameraObservers()
+        // observeForever synchronously replays the value from before this bind,
+        // while CameraX posts this session's states asynchronously. A replayed
+        // error or PENDING_OPEN may be stale, so only an error-free OPEN
+        // (harmless if stale, current when a host shares the camera) is honored.
+        var attached = false
+        val stateObserver = Observer<CameraState> { state ->
+            if (stopped) return@Observer
+            if (!attached) {
+                if (state.type == CameraState.Type.OPEN && state.error == null) {
+                    onStatus(CameraStatus.Running)
+                }
+                return@Observer
+            }
+            toCameraStatus(state, lifecycleOwner.lifecycle.currentState)?.let(onStatus)
+        }
+        val torchObserver = Observer<Int> { torchState ->
+            if (!stopped && attached) onTorch(torchState == TorchState.ON)
+        }
+        observers = CameraObservers(info.cameraState, stateObserver, info.torchState, torchObserver)
+        // Torch first (its replay is ignored): the state replay can run a
+        // host stop inline, and that release must find both registered.
+        info.torchState.observeForever(torchObserver)
+        info.cameraState.observeForever(stateObserver)
+        attached = true
+    }
+
+    /** LiveData observers may only be removed on the main thread. */
+    private fun detachCameraObservers() {
+        val registration = observers ?: return
+        observers = null
+        val remove = Runnable { runCatching { registration.remove() } }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            remove.run()
+        } else {
+            runCatching { mainExecutor.execute(remove) }
+        }
+    }
+
+    private class CameraObservers(
+        private val cameraState: LiveData<CameraState>,
+        private val stateObserver: Observer<CameraState>,
+        private val torchState: LiveData<Int>,
+        private val torchObserver: Observer<Int>,
+    ) {
+        @MainThread
+        fun remove() {
+            cameraState.removeObserver(stateObserver)
+            torchState.removeObserver(torchObserver)
+        }
+    }
+
+    private fun buildAnalysis(executor: ExecutorService): ImageAnalysis {
+        val analysis = ImageAnalysis.Builder()
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
+            .setResolutionSelector(
+                ResolutionSelector.Builder()
+                    .setAspectRatioStrategy(STREAM_ASPECT)
+                    .setResolutionStrategy(
+                        ResolutionStrategy(
+                            Size(ANALYSIS_LONG_EDGE, ANALYSIS_SHORT_EDGE),
+                            ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER,
+                        ),
+                    ).build(),
+            )
+            .build()
+        analysis.setAnalyzer(executor) { proxy ->
+            // Gate BEFORE any pixel work: a frame arriving mid-decode is closed
+            // untouched, so no frame is ever processed twice or half-processed.
+            if (stopped || !decodeInFlight.compareAndSet(false, true)) {
+                proxy.close()
+                return@setAnalyzer
+            }
+            val frame = try {
+                prepare(proxy)
+            } catch (t: Throwable) {
+                android.util.Log.w(TAG, "frame prepare failed", t)
+                null
+            } finally {
+                // prepare() copied the aim box out: the camera buffer goes back
+                // now, not after the decode.
+                proxy.close()
+            }
+            if (frame == null) {
+                decodeInFlight.set(false)
+                return@setAnalyzer
+            }
+            scope.launch {
+                var reusable = false
+                try {
+                    reusable = stopped || onFrame(frame)
+                } finally {
+                    // Return to the pool BEFORE opening the gate so the next
+                    // frame finds it; an in-use (or cancelled) buffer is dropped.
+                    if (reusable) pool.release(frame.buffer)
+                    decodeInFlight.set(false)
+                }
+            }
+        }
+        return analysis
+    }
 
     /**
-     * Stride-aware YUV_420_888 -> Bitmap via direct NV21 -> ARGB conversion.
-     *
-     * No JPEG round-trip: the old `YuvImage.compressToJpeg(70)` + decode path
-     * low-passed the 2-3px narrow bars MSI/DataBar depend on (while the rest of
-     * the pipeline uses `filter=false` precisely to preserve them). Direct
-     * integer BT.601 conversion preserves edges and is faster (~1 pass vs
-     * encode+decode). Honors [ImageProxy.getCropRect], rowStride and
-     * pixelStride. Result capped at 1280px long edge with nearest-neighbor
-     * scaling (`filter=false`) so narrow bars survive.
+     * The one pixel pass of a live frame: aim-box geometry in Kotlin (a few
+     * float ops), then [NativeFrame.prepare] reads the box straight out of the
+     * Y plane into a pooled buffer. Null when the frame is unusable.
      */
-    private fun ImageProxy.toStrideAwareBitmap(): Bitmap? = runCatching {
-        val nv21 = toNv21() ?: return null
-        // Clamp sensor crop to image bounds (defensive: some HALs report a
-        // crop larger than the buffer on rotation).
-        val raw = cropRect
-        val left = raw.left.coerceIn(0, width)
-        val top = raw.top.coerceIn(0, height)
-        val right = raw.right.coerceIn(left + 1, width)
-        val bottom = raw.bottom.coerceIn(top + 1, height)
-        val sensor = Rect(left, top, right, bottom)
-        // Viewfinder ROI (null = everything visible): what-you-see-is-what-scans.
-        // The overlay box is drawn in PreviewView space, so the analysis crop is
-        // derived from the displayed area — never the full sensor, which extends
-        // past the FILL_CENTER display crop.
-        val rotation = when (imageInfo.rotationDegrees) {
-            90, 180, 270 -> imageInfo.rotationDegrees
-            else -> 0
-        }
+    private fun prepare(proxy: ImageProxy): LumaFrame? {
+        if (proxy.format != ImageFormat.YUV_420_888) return null
+        val luma = proxy.planes.firstOrNull() ?: return null
+        // YUV_420_888 guarantees pixelStride 1 for Y; the native pass relies on it.
+        if (luma.pixelStride != 1) return null
+        val rotation = normalizeRotation(proxy.imageInfo.rotationDegrees)
+        val sensor = clampToBuffer(proxy.cropRect, proxy.width, proxy.height)
         val view = previewView?.let { v ->
             // Plain int getters; transient zeros fall back to the sensor ROI.
             val vw = runCatching { v.width }.getOrDefault(0)
             val vh = runCatching { v.height }.getOrDefault(0)
             if (vw > 0 && vh > 0) vw to vh else null
         }
-        val crop = if (view == null) {
-            roiToBuffer(sensor, width, height, rotation, config.scanRegion)
+        val box = if (view == null) {
+            roiToBuffer(sensor, proxy.width, proxy.height, rotation, config.scanRegion)
         } else {
-            viewBoxToBuffer(sensor, width, height, rotation, view.first, view.second, config.scanRegion)
+            viewBoxToBuffer(sensor, proxy.width, proxy.height, rotation, view.first, view.second, config.scanRegion)
         }
-        val cw = crop.width()
-        val ch = crop.height()
-        if (cw <= 0 || ch <= 0) return null
-        // Defensive: packed NV21 must hold the full frame; otherwise the
-        // stride packer produced a short array (should not happen).
-        if (nv21.size < width * height * 3 / 2) return null
-        val argb = nv21ToArgb(nv21, width, height, crop)
-        val full = Bitmap.createBitmap(argb, cw, ch, Bitmap.Config.ARGB_8888)
-        val scale = minOf(1f, 1280f / maxOf(full.width, full.height))
-        if (scale >= 1f) full
-        else {
-            val scaled = Bitmap.createScaledBitmap(
-                full,
-                (full.width * scale).toInt().coerceAtLeast(1),
-                (full.height * scale).toInt().coerceAtLeast(1),
-                false,
-            )
-            full.recycle()
-            scaled
+        val crop = evenCrop(box) ?: return null
+        val width = NativeFrame.uprightWidth(crop.width(), crop.height(), rotation)
+        val height = NativeFrame.uprightHeight(crop.width(), crop.height(), rotation)
+        val buffer = pool.take(width, height)
+        val ok = NativeFrame.prepare(
+            luma.buffer, proxy.width, proxy.height, luma.rowStride,
+            crop.left, crop.top, crop.right, crop.bottom,
+            rotation, true, buffer,
+        )
+        if (!ok) {
+            pool.release(buffer)
+            return null
         }
-    }.getOrNull()
-
-    /**
-     * Packed NV21 (as produced by [toNv21]: Y `w*h` + interleaved VU `w*h/2`)
-     * to ARGB, converting only [crop]. Integer BT.601 full-range approx:
-     * R=Y+1.402(V-128), G=Y-0.344(U-128)-0.714(V-128), B=Y+1.772(U-128).
-     * Color accuracy is irrelevant for barcodes; edge preservation is.
-     */
-    internal fun nv21ToArgb(nv21: ByteArray, w: Int, h: Int, crop: Rect): IntArray {
-        val cw = crop.width()
-        val ch = crop.height()
-        require(cw > 0 && ch > 0) { "empty crop" }
-        require(nv21.size >= w * h * 3 / 2) { "short NV21 buffer" }
-        val out = IntArray(cw * ch)
-        val yBase = 0
-        val vuBase = w * h
-        var dst = 0
-        for (y in 0 until ch) {
-            val srcY = crop.top + y
-            val yRow = yBase + srcY * w
-            val uvRow = vuBase + (srcY shr 1) * w
-            for (x in 0 until cw) {
-                val srcX = crop.left + x
-                val yy = nv21[yRow + srcX].toInt() and 0xFF
-                val uvOffset = uvRow + (srcX shr 1) * 2
-                val vv = nv21[uvOffset].toInt() and 0xFF
-                val uu = nv21[uvOffset + 1].toInt() and 0xFF
-                val vOff = vv - 128
-                val uOff = uu - 128
-                var r = yy + ((360 * vOff) shr 8)
-                var g = yy - ((88 * uOff + 183 * vOff) shr 8)
-                var b = yy + ((454 * uOff) shr 8)
-                if (r < 0) r = 0 else if (r > 255) r = 255
-                if (g < 0) g = 0 else if (g > 255) g = 255
-                if (b < 0) b = 0 else if (b > 255) b = 255
-                out[dst++] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
-            }
-        }
-        return out
+        return LumaFrame(buffer, width, height, maxOrientations = LIVE_ORIENTATIONS, scanTopFraction = 0f)
     }
-
-    /** Packs YUV_420_888 planes into NV21 respecting strides and cropRect source size. */
-    private fun ImageProxy.toNv21(): ByteArray? = runCatching {
-        val w = width
-        val h = height
-        if (w <= 0 || h <= 0) return null
-        // Guard against bogus dimensions (int overflow / OOM before native loop).
-        val pixels = w.toLong() * h.toLong()
-        if (pixels > MAX_FRAME_PIXELS) return null
-        val yPlane = planes[0]
-        val uPlane = planes[1]
-        val vPlane = planes[2]
-        val out = ByteArray((pixels * 3 / 2).toInt())
-
-        // Y plane: row-by-row (rowStride may exceed width).
-        val yBuf = yPlane.buffer
-        val yRowStride = yPlane.rowStride
-        var dst = 0
-        val yRow = ByteArray(yRowStride)
-        for (row in 0 until h) {
-            yBuf.position(row * yRowStride)
-            val take = minOf(yRowStride, yBuf.remaining())
-            yBuf.get(yRow, 0, take)
-            val copy = minOf(w, take)
-            System.arraycopy(yRow, 0, out, dst, copy)
-            dst += copy
-        }
-
-        // U/V planes: subsampled by 2; pixelStride 1 (planar) or 2 (interleaved).
-        val uvH = h / 2
-        val uvW = w / 2
-        val uBuf = uPlane.buffer
-        val vBuf = vPlane.buffer
-        val uRowStride = uPlane.rowStride
-        val vRowStride = vPlane.rowStride
-        val uPixelStride = uPlane.pixelStride
-        val vPixelStride = vPlane.pixelStride
-        val uRow = ByteArray(uRowStride)
-        val vRow = ByteArray(vRowStride)
-        for (row in 0 until uvH) {
-            uBuf.position(row * uRowStride)
-            vBuf.position(row * vRowStride)
-            uBuf.get(uRow, 0, minOf(uRowStride, uBuf.remaining()))
-            vBuf.get(vRow, 0, minOf(vRowStride, vBuf.remaining()))
-            for (col in 0 until uvW) {
-                val vu = vRow[col * vPixelStride]
-                val uu = uRow[col * uPixelStride]
-                out[dst++] = vu // NV21 order: V then U
-                out[dst++] = uu
-            }
-        }
-        out
-    }.getOrNull()
 
     companion object {
         /** Logcat tag; filter with `adb logcat -s CameraScanManager`. */
         const val TAG = "CameraScanManager"
-        /** Rejects bogus ImageProxy dimensions before the `w*h*3/2` alloc. */
-        const val MAX_FRAME_PIXELS = 16_000_000L
+        /**
+         * Analysis target (~1080p). Lower-then-higher fallback: never above
+         * the preview-class sizes every device streams next to a preview.
+         */
+        const val ANALYSIS_LONG_EDGE = 1920
+        const val ANALYSIS_SHORT_EDGE = 1080
+        /** Shared by preview and analysis: one field of view for the box mapping. */
+        private val STREAM_ASPECT = AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY
+        /**
+         * MSI orientations tried per live frame: upright and upside-down
+         * (sideways tags cannot fit the wide aim box; stills try all four).
+         * The native frame decoder arbitrates a read against the opposite
+         * direction, so reversed bars cannot yield a false read. Doubles the
+         * decode cost of frames without a read.
+         */
+        const val LIVE_ORIENTATIONS = 2
+        /** Smallest usable crop edge; anything below is degenerate geometry. */
+        const val MIN_CROP_PX = 16
+        /** Tap-to-focus hold before continuous autofocus resumes. */
+        private const val FOCUS_AUTO_CANCEL_SECONDS = 3L
+
+        /**
+         * Maps a CameraX camera state to a host-facing status; null for
+         * transitional states (CLOSING/CLOSED: rebind, lifecycle stop, or a
+         * reopen after a recoverable error). Internal for tests.
+         */
+        internal fun toCameraStatus(state: CameraState, lifecycleState: Lifecycle.State): CameraStatus? {
+            val stateError = state.error
+            if (stateError != null) {
+                if (stateError.code == CameraState.ERROR_CAMERA_IN_USE ||
+                    stateError.code == CameraState.ERROR_MAX_CAMERAS_IN_USE
+                ) {
+                    return CameraStatus.InUse
+                }
+                if (stateError.type == CameraState.ErrorType.CRITICAL) {
+                    // Policy closes a background client's camera and CameraX
+                    // reopens it on the next start, so only a foreground
+                    // failure is final.
+                    return if (lifecycleState.isAtLeast(Lifecycle.State.STARTED)) {
+                        CameraStatus.Failed("camera error ${stateError.code}", stateError.cause)
+                    } else {
+                        null
+                    }
+                }
+            }
+            return when (state.type) {
+                CameraState.Type.PENDING_OPEN -> CameraStatus.InUse
+                CameraState.Type.OPENING -> CameraStatus.Starting
+                CameraState.Type.OPEN -> CameraStatus.Running
+                else -> null
+            }
+        }
+
+        /** ImageInfo rotation normalized to 0/90/180/270 (anything else = 0). */
+        internal fun normalizeRotation(degrees: Int): Int = when (degrees) {
+            90, 180, 270 -> degrees
+            else -> 0
+        }
+
+        /**
+         * HAL crop clamped into the [imageWidth] x [imageHeight] plane, never
+         * empty (some HALs report a crop larger than the buffer on rotation).
+         */
+        internal fun clampToBuffer(raw: Rect, imageWidth: Int, imageHeight: Int): Rect {
+            val left = raw.left.coerceIn(0, imageWidth - 1)
+            val top = raw.top.coerceIn(0, imageHeight - 1)
+            return Rect(
+                left,
+                top,
+                raw.right.coerceIn(left + 1, imageWidth),
+                raw.bottom.coerceIn(top + 1, imageHeight),
+            )
+        }
+
+        /**
+         * [box] trimmed by at most one pixel per axis to even dimensions (NV21
+         * output; the box is centered, so its far-edge pixel is immaterial).
+         * Stays inside [box], hence inside the plane. Null below [MIN_CROP_PX].
+         */
+        internal fun evenCrop(box: Rect): Rect? {
+            val w = box.width() and 1.inv()
+            val h = box.height() and 1.inv()
+            if (w < MIN_CROP_PX || h < MIN_CROP_PX) return null
+            return Rect(box.left, box.top, box.left + w, box.top + h)
+        }
 
         /**
          * Maps the on-screen viewfinder box to buffer pixels — the

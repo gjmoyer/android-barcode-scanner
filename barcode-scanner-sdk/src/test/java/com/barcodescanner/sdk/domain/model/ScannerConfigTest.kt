@@ -56,6 +56,27 @@ class ScannerConfigTest {
     }
 
     @Test
+    fun msiSymbolLengths_defaultAny_exactAndRangeBuilders() {
+        assertEquals(null, ScannerConfig.default().msiSymbolLengths)
+        assertEquals(9..9, ScannerConfig.Builder().msiSymbolLength(9).build().msiSymbolLengths)
+        assertEquals(8..9, ScannerConfig.Builder().msiSymbolLengths(8..9).build().msiSymbolLengths)
+        assertEquals(
+            null,
+            ScannerConfig.Builder().msiSymbolLength(9).msiSymbolLengths(null).build().msiSymbolLengths,
+        )
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun msiSymbolLengths_empty_rejected() {
+        ScannerConfig.Builder().msiSymbolLengths(9..8).build()
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun msiSymbolLengths_belowSpec_rejected() {
+        ScannerConfig.Builder().msiSymbolLength(2).build()
+    }
+
+    @Test
     fun scanRegion_buildsCenteredRect() {
         val config = ScannerConfig.Builder().scanRegion(0.9f, 0.5f).build()
         assertEquals(ScannerConfig.ScanRegion(0.9f, 0.5f), config.scanRegion)
