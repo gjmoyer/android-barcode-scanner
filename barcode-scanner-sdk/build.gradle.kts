@@ -92,10 +92,9 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)
     testImplementation(libs.mockk)
-    testImplementation(libs.coroutines.core)
+    // coroutines-core/-android already on implementation; test + androidTest inherit them.
 
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.rules)
     androidTestImplementation(libs.androidx.test.ext.junit)
-    androidTestImplementation(libs.coroutines.android)
 }
