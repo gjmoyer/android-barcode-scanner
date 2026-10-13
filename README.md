@@ -34,7 +34,9 @@ measurement). See
 
 1. `File → Open…` → select this folder.
 2. Let Gradle sync.
-3. Run the `sample-app` on a device to try live scanning.
+3. Run the `sample-app` on a device to try live scanning. While scanning,
+   the **Torch** button toggles the flash (re-applied on each one-shot scan),
+   pinch zooms and tap focuses; camera failures show in the status line.
 
 ## Use in any app
 
