@@ -25,8 +25,10 @@ measurement). See
 - Android NDK + CMake 3.22.1 (the SDK compiles its own MSI decoder from
   `src/main/cpp/`; zxing-cpp v3.1.1 arrives as a prebuilt Maven Central AAR —
   network fetch happens once via Gradle)
-- minSdk 28 (Android 9). Native libraries ship ARM-only (`armeabi-v7a`,
-  `arm64-v8a`); other ABIs gracefully degrade to `NotFound` on native paths.
+- minSdk 28 (Android 9). Native libraries ship for `armeabi-v7a`,
+  `arm64-v8a` and `x86_64`. Without one (32-bit x86, or a host app whose
+  `abiFilters` exclude the device ABI) the live camera runs preview-only and
+  reports `CameraStatus.Failed`, and stills return `ScanResult.Failure`.
 
 ## Open in Android Studio
 
@@ -78,7 +80,7 @@ val result = scanner.scanBitmap(bitmap)
 ```
 
 Host apps only touch `api/` (`BarcodeScannerFacade`, `BarcodeScannerFactory`,
-`ScannerConfig`, `ScanResult`) plus `domain/model/` (`Symbology`, `DecodedBarcode`).
+`ScannerConfig`, `ScanResult`, `CameraStatus`) plus `domain/model/` (`Symbology`, `DecodedBarcode`).
 No DI framework is imposed (manual `di/` container inside the SDK).
 
 ## Viewfinder overlay (host UI)
@@ -97,6 +99,16 @@ buffer in place). The host owns only the preview surface and the overlay drawing
   is exactly the box being decoded. A barcode outside the drawn box cannot
   decode — keep it generous. Without a `PreviewView`, fractions fall back to
   the sensor crop.
+- Camera controls for the live session: `setTorchEnabled(on) { accepted -> }`
+  with the actual state on `torchEnabled`, `scaleZoom(gestureScale)` for pinch
+  zoom, and `focusAt(previewView.meteringPointFactory.createPoint(x, y))` for
+  tap-to-focus (continuous autofocus resumes after ~3 s). All are no-ops (torch
+  reports false) without a running camera.
+- `cameraStatus` (`Idle`/`Starting`/`Running`/`InUse`/`Failed`) explains a black
+  preview: show a hint on `InUse` (another app holds the camera; CameraX reopens
+  it automatically) and stop + offer a retry on `Failed` (also reported once
+  on `results` as a `ScanResult.Failure`). Results, status and torch state of a
+  stopped session never publish into the next one.
 
 ## Configuration
 

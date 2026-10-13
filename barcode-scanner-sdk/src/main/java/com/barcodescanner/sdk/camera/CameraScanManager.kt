@@ -5,18 +5,30 @@ import android.content.Context
 import android.graphics.ImageFormat
 import android.graphics.Rect
 import android.graphics.RectF
+import android.os.Looper
 import android.util.Size
+import androidx.annotation.MainThread
+import androidx.camera.core.Camera
+import androidx.camera.core.CameraInfo
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.CameraState
+import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
+import androidx.camera.core.MeteringPoint
 import androidx.camera.core.Preview
+import androidx.camera.core.TorchState
 import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LiveData
+import androidx.lifecycle.Observer
+import com.barcodescanner.sdk.api.CameraStatus
 import com.barcodescanner.sdk.data.frame.LumaBufferPool
 import com.barcodescanner.sdk.data.frame.LumaFrame
 import com.barcodescanner.sdk.data.frame.NativeFrame
@@ -25,6 +37,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -48,7 +61,10 @@ import java.util.concurrent.atomic.AtomicBoolean
  *    (lower-then-higher fallback stays inside the sizes every device streams
  *    next to a preview). The box is a small crop of it, so resolution buys
  *    bar width, not decode cost,
- *  - structured [scope] (no GlobalScope): stop()/close() cancels in-flight work.
+ *  - structured [scope] (no GlobalScope): stop()/close() cancels in-flight work,
+ *  - CameraX camera/torch state reported through [onStatus] and [onTorch]
+ *    (main thread) so hosts never show a silently dead preview; the camera
+ *    is released on the main thread, as CameraX requires.
  *
  * Unsupported ABIs (x86 emulators: ARM-only native packaging) get a preview
  * without analysis and one [onError] report instead of a silent dead scanner.
@@ -71,8 +87,16 @@ internal class CameraScanManager(
      * an uncaught main-thread exception and crashes the app.
      */
     private val onError: (Throwable) -> Unit = {},
+    /** Main thread; CameraX camera state of the bound session. Never invoked after [stop]. */
+    private val onStatus: (CameraStatus) -> Unit = {},
+    /** Main thread; actual torch state reported by CameraX. Never invoked after [stop]. */
+    private val onTorch: (Boolean) -> Unit = {},
 ) {
+    private val mainExecutor = ContextCompat.getMainExecutor(context)
     private var cameraProvider: ProcessCameraProvider? = null
+    /** Bound camera; written on main, read by the controls from any thread. */
+    @Volatile
+    private var camera: Camera? = null
     private var previewUseCase: Preview? = null
     private var analysisUseCase: ImageAnalysis? = null
     private var analysisExecutor: ExecutorService? = null
@@ -91,6 +115,10 @@ internal class CameraScanManager(
 
     /** Prepared-frame buffers; an in-use (timed-out) buffer is never released. */
     private val pool = LumaBufferPool()
+
+    /** CameraX LiveData registrations; added and removed on the main thread only. */
+    @Volatile
+    private var observers: CameraObservers? = null
 
     @Volatile
     private var stopped = false
@@ -128,7 +156,7 @@ internal class CameraScanManager(
             }
             cameraProvider = provider
             bind(provider, lifecycleOwner, surfaceProvider)
-        }, ContextCompat.getMainExecutor(context))
+        }, mainExecutor)
     }
 
     fun stop() {
@@ -136,10 +164,83 @@ internal class CameraScanManager(
         decodeInFlight.set(false)
         pool.clear()
         previewView = null
+        // CameraX unbinding and LiveData observer removal are main-thread only
+        // (off main, unbind throws and the use cases stay bound). Hosts stop on
+        // main, where release stays synchronous; an off-main stop (e.g. close()
+        // from a worker) defers it, so a bind still running on main is
+        // released after it lands instead of leaking its observers and use cases.
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            releaseCamera()
+        } else {
+            runCatching { mainExecutor.execute { releaseCamera() } }
+                .onFailure { android.util.Log.w(TAG, "camera release could not be scheduled", it) }
+        }
+    }
+
+    @MainThread
+    private fun releaseCamera() {
+        // A manager restarted before a deferred release owns fresh resources;
+        // its restart already released the previous binding.
+        if (!stopped) return
+        detachCameraObservers()
         unbindUseCases()
         cameraProvider = null
         runCatching { analysisExecutor?.shutdownNow() }
         analysisExecutor = null
+    }
+
+    /**
+     * Requests a torch change; [onResult] (main thread) reports whether CameraX
+     * accepted it. False without a running camera or a flash unit.
+     */
+    fun setTorchEnabled(enabled: Boolean, onResult: (Boolean) -> Unit) {
+        val activeCamera = camera
+        if (stopped || activeCamera == null || !activeCamera.cameraInfo.hasFlashUnit()) {
+            rejectTorch(onResult)
+            return
+        }
+        val torchFuture = runCatching { activeCamera.cameraControl.enableTorch(enabled) }.getOrElse {
+            android.util.Log.w(TAG, "torch request failed", it)
+            rejectTorch(onResult)
+            return
+        }
+        torchFuture.addListener(
+            { onResult(runCatching { torchFuture.get(); true }.getOrDefault(false)) },
+            mainExecutor,
+        )
+    }
+
+    /** Callers may be off main; the result is always delivered on main. */
+    private fun rejectTorch(onResult: (Boolean) -> Unit) {
+        runCatching { mainExecutor.execute { onResult(false) } }
+    }
+
+    /** Multiplies the zoom ratio by [scaleFactor], clamped to the camera's range. */
+    fun scaleZoom(scaleFactor: Float) {
+        if (stopped || !scaleFactor.isFinite() || scaleFactor <= 0f) return
+        val activeCamera = camera ?: return
+        runCatching {
+            val zoom = activeCamera.cameraInfo.zoomState.value ?: return
+            val target = (zoom.zoomRatio * scaleFactor).coerceIn(zoom.minZoomRatio, zoom.maxZoomRatio)
+            // The future is left unobserved: CameraX fails it (never throws)
+            // when a newer request supersedes it or the camera is inactive.
+            if (target != zoom.zoomRatio) activeCamera.cameraControl.setZoomRatio(target)
+        }.onFailure { android.util.Log.w(TAG, "zoom request failed", it) }
+    }
+
+    /** One-shot AF/AE at [point]; continuous autofocus resumes after a short auto-cancel. */
+    fun focusAt(point: MeteringPoint) {
+        if (stopped) return
+        val activeCamera = camera ?: return
+        runCatching {
+            val action = FocusMeteringAction.Builder(
+                point,
+                FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE,
+            ).setAutoCancelDuration(FOCUS_AUTO_CANCEL_SECONDS, TimeUnit.SECONDS).build()
+            // Unobserved like zoom; the auto-cancel returns to continuous
+            // autofocus so a tap can't leave focus locked on an old label.
+            activeCamera.cameraControl.startFocusAndMetering(action)
+        }.onFailure { android.util.Log.w(TAG, "focus request failed", it) }
     }
 
     /**
@@ -151,6 +252,7 @@ internal class CameraScanManager(
         val provider = cameraProvider ?: return
         val cases = listOfNotNull(previewUseCase, analysisUseCase)
         if (cases.isNotEmpty()) runCatching { provider.unbind(*cases.toTypedArray()) }
+        camera = null
         previewUseCase = null
         analysisUseCase = null
     }
@@ -162,6 +264,7 @@ internal class CameraScanManager(
         surfaceProvider: Preview.SurfaceProvider,
     ) {
         val executor = analysisExecutor ?: return
+        detachCameraObservers()
         unbindUseCases()
         val preview = Preview.Builder()
             .setResolutionSelector(
@@ -175,7 +278,7 @@ internal class CameraScanManager(
         val useCases = listOfNotNull(preview, analysis).toTypedArray()
         previewUseCase = preview
         analysisUseCase = analysis
-        try {
+        val boundCamera = try {
             provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, *useCases)
         } catch (t: Throwable) {
             // Binding throws for missing/in-use cameras, destroyed lifecycles,
@@ -190,12 +293,70 @@ internal class CameraScanManager(
             onError(t)
             return
         }
+        camera = boundCamera
+        observeCamera(boundCamera.cameraInfo, lifecycleOwner)
+        // A replayed Running can make the host stop inline (already released).
+        if (stopped) return
         if (analysis == null) {
             val t = UnsupportedOperationException(
                 "live decoding needs libmsi_decoder, not packaged for ${android.os.Build.SUPPORTED_ABIS.joinToString()}",
             )
             android.util.Log.w(TAG, "preview only: ${t.message}")
             onError(t)
+        }
+    }
+
+    @MainThread
+    private fun observeCamera(info: CameraInfo, lifecycleOwner: LifecycleOwner) {
+        detachCameraObservers()
+        // observeForever synchronously replays the value from before this bind,
+        // while CameraX posts this session's states asynchronously. A replayed
+        // error or PENDING_OPEN may be stale, so only an error-free OPEN
+        // (harmless if stale, current when a host shares the camera) is honored.
+        var attached = false
+        val stateObserver = Observer<CameraState> { state ->
+            if (stopped) return@Observer
+            if (!attached) {
+                if (state.type == CameraState.Type.OPEN && state.error == null) {
+                    onStatus(CameraStatus.Running)
+                }
+                return@Observer
+            }
+            toCameraStatus(state, lifecycleOwner.lifecycle.currentState)?.let(onStatus)
+        }
+        val torchObserver = Observer<Int> { torchState ->
+            if (!stopped && attached) onTorch(torchState == TorchState.ON)
+        }
+        observers = CameraObservers(info.cameraState, stateObserver, info.torchState, torchObserver)
+        // Torch first (its replay is ignored): the state replay can run a
+        // host stop inline, and that release must find both registered.
+        info.torchState.observeForever(torchObserver)
+        info.cameraState.observeForever(stateObserver)
+        attached = true
+    }
+
+    /** LiveData observers may only be removed on the main thread. */
+    private fun detachCameraObservers() {
+        val registration = observers ?: return
+        observers = null
+        val remove = Runnable { runCatching { registration.remove() } }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            remove.run()
+        } else {
+            runCatching { mainExecutor.execute(remove) }
+        }
+    }
+
+    private class CameraObservers(
+        private val cameraState: LiveData<CameraState>,
+        private val stateObserver: Observer<CameraState>,
+        private val torchState: LiveData<Int>,
+        private val torchObserver: Observer<Int>,
+    ) {
+        @MainThread
+        fun remove() {
+            cameraState.removeObserver(stateObserver)
+            torchState.removeObserver(torchObserver)
         }
     }
 
@@ -310,6 +471,40 @@ internal class CameraScanManager(
         const val LIVE_ORIENTATIONS = 2
         /** Smallest usable crop edge; anything below is degenerate geometry. */
         const val MIN_CROP_PX = 16
+        /** Tap-to-focus hold before continuous autofocus resumes. */
+        private const val FOCUS_AUTO_CANCEL_SECONDS = 3L
+
+        /**
+         * Maps a CameraX camera state to a host-facing status; null for
+         * transitional states (CLOSING/CLOSED: rebind, lifecycle stop, or a
+         * reopen after a recoverable error). Internal for tests.
+         */
+        internal fun toCameraStatus(state: CameraState, lifecycleState: Lifecycle.State): CameraStatus? {
+            val stateError = state.error
+            if (stateError != null) {
+                if (stateError.code == CameraState.ERROR_CAMERA_IN_USE ||
+                    stateError.code == CameraState.ERROR_MAX_CAMERAS_IN_USE
+                ) {
+                    return CameraStatus.InUse
+                }
+                if (stateError.type == CameraState.ErrorType.CRITICAL) {
+                    // Policy closes a background client's camera and CameraX
+                    // reopens it on the next start, so only a foreground
+                    // failure is final.
+                    return if (lifecycleState.isAtLeast(Lifecycle.State.STARTED)) {
+                        CameraStatus.Failed("camera error ${stateError.code}", stateError.cause)
+                    } else {
+                        null
+                    }
+                }
+            }
+            return when (state.type) {
+                CameraState.Type.PENDING_OPEN -> CameraStatus.InUse
+                CameraState.Type.OPENING -> CameraStatus.Starting
+                CameraState.Type.OPEN -> CameraStatus.Running
+                else -> null
+            }
+        }
 
         /** ImageInfo rotation normalized to 0/90/180/270 (anything else = 0). */
         internal fun normalizeRotation(degrees: Int): Int = when (degrees) {

@@ -3,6 +3,7 @@ package com.barcodescanner.sdk.api
 import android.graphics.Bitmap
 import com.barcodescanner.sdk.domain.model.ScanFrame
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.StateFlow
 
 /**
  * Public entry point. Host apps only touch this interface + [ScannerConfig] + [ScanResult].
@@ -59,6 +60,41 @@ interface BarcodeScannerFacade : AutoCloseable {
     )
 
     fun stopCamera()
+
+    /**
+     * Live camera session state, updated on the main thread. [CameraStatus.Idle]
+     * before [startCamera] and after [stopCamera]/[close]. On
+     * [CameraStatus.Failed] (then also reported once on [results] as a
+     * [ScanResult.Failure], unless the camera was already stopped), stop the
+     * camera and offer a retry.
+     */
+    val cameraStatus: StateFlow<CameraStatus>
+
+    /** Torch state reported by the camera; false whenever no camera session runs. */
+    val torchEnabled: StateFlow<Boolean>
+
+    /**
+     * Requests a live-camera torch state change. [onResult] is called on the
+     * main thread with false when the camera is not running, has no flash, or
+     * CameraX rejects the request. Observe [torchEnabled] for the actual state.
+     */
+    fun setTorchEnabled(enabled: Boolean, onResult: (Boolean) -> Unit)
+
+    /**
+     * Pinch zoom for the live camera: multiplies the current zoom ratio by
+     * [scaleFactor] (a gesture's incremental scale), clamped to the camera's
+     * supported range. No-op when no camera is running; never throws.
+     */
+    fun scaleZoom(scaleFactor: Float)
+
+    /**
+     * Tap to focus for the live camera: one-shot autofocus and exposure at
+     * [point]. Create the point on the main thread with the preview's
+     * `PreviewView.meteringPointFactory` so view coordinates map to the
+     * sensor. Continuous autofocus resumes after a few seconds. No-op when no
+     * camera is running; never throws.
+     */
+    fun focusAt(point: androidx.camera.core.MeteringPoint)
 
     /** Current config (immutable snapshot). */
     val config: ScannerConfig

@@ -6,7 +6,7 @@ Clean-architecture, enterprise-style layering. Dependency rule: **outer layers d
 ```
 ┌────────────────────────────────────────────────────────┐
 │ api/  BarcodeScannerFacade, BarcodeScannerFactory,     │  PUBLIC — host apps touch only this
-│       ScannerConfig, ScanResult                        │
+│       ScannerConfig, ScanResult, CameraStatus          │
 ├────────────────────────────────────────────────────────┤
 │ domain/model      Symbology, ScanFrame, DecodedBarcode │  Stable value types
 │ domain/decoder    BarcodeDecoder (strategy),           │  Open/Closed: add engine =>
@@ -22,7 +22,7 @@ Clean-architecture, enterprise-style layering. Dependency rule: **outer layers d
 │                   MsiRegionCropper, table/checksum     │
 │ data/fusion       FusedDecoder                         │  Orchestrates all engines
 ├────────────────────────────────────────────────────────┤
-│ camera/           CameraScanManager (CameraX)          │  Frame producer only
+│ camera/           CameraScanManager (CameraX)          │  Frames + camera state/controls
 │ di/               ScannerContainer (manual DI)         │  Wiring; no Hilt imposed
 └────────────────────────────────────────────────────────┘
 ```
@@ -150,3 +150,11 @@ Grayscale frame (row-major bytes via JNI)
 - **Domain references Android graphics types** (Bitmap/Rect) as an accepted v1 tradeoff: an Android
   library module pays less for Robolectric than for a FrameImage abstraction layer; revisit if a
   pure-JVM artifact is ever needed.
+- **Live publications are session-scoped**: `DefaultBarcodeScanner` numbers
+  camera sessions and publishes results, `cameraStatus` and `torchEnabled`
+  only under `cameraLock` while the publishing session is current, with
+  non-suspending emission so the check and the publish are atomic with stop.
+  Collectors may run inline (re-entrant lock), so every flow update in
+  start/stop/failure is followed by a session re-check. A decode or CameraX
+  callback outliving `stopCamera` (or a host Retry) can therefore never
+  finish the next session; `Failed` is final per session.

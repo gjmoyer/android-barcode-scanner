@@ -1,6 +1,8 @@
 package com.barcodescanner.sdk.api
 
 import android.graphics.Bitmap
+import android.os.Looper
+import androidx.camera.core.SurfaceOrientedMeteringPointFactory
 import com.barcodescanner.sdk.data.frame.LumaFrame
 import com.barcodescanner.sdk.data.frame.NativeFrame
 import com.barcodescanner.sdk.di.ScannerContainer
@@ -17,6 +19,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
@@ -180,6 +183,195 @@ class DefaultBarcodeScannerTest {
             yield()
             assertEquals(emptyList<ScanResult>(), received)
             job.cancel()
+        } finally {
+            scanner.close()
+        }
+    }
+
+    @Test
+    fun liveSuccess_fromStoppedSession_isDroppedWithoutPrimingState() = runBlocking {
+        // Retry restarts the camera while an old decode may still be running:
+        // its late result must not finish the new session or seed its state.
+        val scanner = scanner(suppressionMillis = 10_000)
+        try {
+            val received = mutableListOf<ScanResult>()
+            val job = launch(Dispatchers.Unconfined) { scanner.results.collect { received += it } }
+            val oldSession = scanner.currentCameraSession()
+            scanner.stopCamera()
+            scanner.acceptLiveSuccess(oldSession, success("A"))
+            scanner.acceptLiveSuccess(oldSession, msiBar("86774681"))
+            yield()
+            assertTrue("a stopped session must not publish", received.isEmpty())
+            // Stability not primed: the first MSI bar sighting is still withheld.
+            assertEquals(false, scanner.confirmLiveBarHit(msiBar("86774681")))
+            // Dedup not primed: the current session emits "A" at once.
+            scanner.acceptLiveSuccess(scanner.currentCameraSession(), success("A"))
+            yield()
+            assertEquals(listOf("A"), received.map { (it as ScanResult.Success).barcode.rawValue })
+            job.cancel()
+        } finally {
+            scanner.close()
+        }
+    }
+
+    @Test
+    fun liveFrame_fromStoppedSession_isSkipped() = runBlocking {
+        val scanner = scanner(suppressionMillis = 0)
+        try {
+            val oldSession = scanner.currentCameraSession()
+            scanner.stopCamera()
+            // Skipped before any engine runs: the buffer stays reusable.
+            assertTrue(scanner.handleLiveFrame(blankFrame(), oldSession))
+        } finally {
+            scanner.close()
+        }
+    }
+
+    @Test
+    fun liveSuccess_hostStoppingOnFirstResult_dropsLaterResultsOfThatSession() = runBlocking {
+        // Like a scan dialog, the host stops the camera on its first result.
+        // A collector doing so inline re-enters the camera lock mid-publish: it
+        // must not deadlock, and that session's later results must not publish.
+        val scanner = scanner(suppressionMillis = 0)
+        try {
+            val received = mutableListOf<String>()
+            val job = launch(Dispatchers.Unconfined) {
+                scanner.results.collect {
+                    received += (it as ScanResult.Success).barcode.rawValue
+                    scanner.stopCamera()
+                }
+            }
+            val session = scanner.currentCameraSession()
+            scanner.acceptLiveSuccess(session, success("A"))
+            scanner.acceptLiveSuccess(session, success("B"))
+            yield()
+            assertEquals(listOf("A"), received)
+            job.cancel()
+        } finally {
+            scanner.close()
+        }
+    }
+
+    @Test
+    fun cameraState_idleWithTorchOffBeforeStartAndAfterClose() {
+        val scanner = scanner(suppressionMillis = 0)
+        assertEquals(CameraStatus.Idle, scanner.cameraStatus.value)
+        assertEquals(false, scanner.torchEnabled.value)
+        scanner.close()
+        assertEquals(CameraStatus.Idle, scanner.cameraStatus.value)
+        assertEquals(false, scanner.torchEnabled.value)
+    }
+
+    @Test
+    fun cameraFailure_isFinalForItsSession_andStaleSessionsAreIgnored() = runBlocking {
+        val scanner = scanner(suppressionMillis = 0)
+        try {
+            val received = mutableListOf<ScanResult>()
+            val job = launch(Dispatchers.Unconfined) { scanner.results.collect { received += it } }
+            val session = scanner.currentCameraSession()
+            scanner.publishCameraStatus(session, CameraStatus.Running)
+            assertEquals(CameraStatus.Running, scanner.cameraStatus.value)
+            scanner.reportCameraFailure(session, UnsupportedOperationException("no libmsi_decoder"))
+            assertTrue(scanner.cameraStatus.value is CameraStatus.Failed)
+            // CameraX may still post OPEN after a failure outside its state machine.
+            scanner.publishCameraStatus(session, CameraStatus.Running)
+            assertTrue(scanner.cameraStatus.value is CameraStatus.Failed)
+            yield()
+            assertEquals(1, received.count { it is ScanResult.Failure })
+            // Stop resets; the stopped session can no longer publish anything.
+            scanner.stopCamera()
+            assertEquals(CameraStatus.Idle, scanner.cameraStatus.value)
+            scanner.publishCameraStatus(session, CameraStatus.Running)
+            scanner.reportCameraFailure(session, IllegalStateException("late"))
+            yield()
+            assertEquals(CameraStatus.Idle, scanner.cameraStatus.value)
+            assertEquals(1, received.count { it is ScanResult.Failure })
+            job.cancel()
+        } finally {
+            scanner.close()
+        }
+    }
+
+    @Test
+    fun cameraControls_withoutCamera_areNoOps() {
+        val scanner = scanner(suppressionMillis = 0)
+        val point = SurfaceOrientedMeteringPointFactory(1f, 1f).createPoint(0.5f, 0.5f)
+        val torchResults = mutableListOf<Boolean>()
+        scanner.scaleZoom(2f)
+        scanner.scaleZoom(Float.NaN)
+        scanner.focusAt(point)
+        scanner.setTorchEnabled(true) { torchResults += it }
+        scanner.close()
+        // Closed scanner: still never throws.
+        scanner.scaleZoom(0.5f)
+        scanner.focusAt(point)
+        scanner.setTorchEnabled(true) { torchResults += it }
+        // Results are posted to the main thread, never delivered inline.
+        assertTrue(torchResults.isEmpty())
+        shadowOf(Looper.getMainLooper()).idle()
+        assertEquals(listOf(false, false), torchResults)
+        assertEquals(false, scanner.torchEnabled.value)
+        assertEquals(CameraStatus.Idle, scanner.cameraStatus.value)
+    }
+
+    @Test
+    fun criticalCameraError_publishesFailedAndOneFailureResult() = runBlocking {
+        val scanner = scanner(suppressionMillis = 0)
+        try {
+            val received = mutableListOf<ScanResult>()
+            val job = launch(Dispatchers.Unconfined) { scanner.results.collect { received += it } }
+            val session = scanner.currentCameraSession()
+            val failure = CameraStatus.Failed("camera fatal error", IllegalStateException("fatal"))
+            scanner.publishCameraStatus(session, failure)
+            scanner.publishCameraStatus(session, CameraStatus.Failed("again"))
+            yield()
+            assertEquals(failure, scanner.cameraStatus.value)
+            val failures = received.filterIsInstance<ScanResult.Failure>()
+            assertEquals(listOf("camera fatal error"), failures.map { it.message })
+            job.cancel()
+        } finally {
+            scanner.close()
+        }
+    }
+
+    @Test
+    fun cameraFailure_hostStoppingOnFailedStatus_reportsNoFailureIntoTheNextSession() = runBlocking {
+        // A status collector that stops (as on Retry) inline must not receive
+        // the old session's results failure in the session that follows.
+        val scanner = scanner(suppressionMillis = 0)
+        try {
+            val received = mutableListOf<ScanResult>()
+            val results = launch(Dispatchers.Unconfined) { scanner.results.collect { received += it } }
+            val status = launch(Dispatchers.Unconfined) {
+                scanner.cameraStatus.collect { if (it is CameraStatus.Failed) scanner.stopCamera() }
+            }
+            val session = scanner.currentCameraSession()
+            scanner.reportCameraFailure(session, IllegalStateException("bind failed"))
+            yield()
+            assertTrue(session != scanner.currentCameraSession())
+            assertEquals(CameraStatus.Idle, scanner.cameraStatus.value)
+            assertTrue(received.none { it is ScanResult.Failure })
+            status.cancel()
+            results.cancel()
+        } finally {
+            scanner.close()
+        }
+    }
+
+    @Test
+    fun torchRequest_fromWorkerThread_reportsOnMainThread() {
+        val scanner = scanner(suppressionMillis = 0)
+        try {
+            val callbackOnMain = mutableListOf<Boolean>()
+            val worker = Thread {
+                scanner.setTorchEnabled(true) {
+                    callbackOnMain += Looper.myLooper() == Looper.getMainLooper()
+                }
+            }
+            worker.start()
+            worker.join()
+            shadowOf(Looper.getMainLooper()).idle()
+            assertEquals(listOf(true), callbackOnMain)
         } finally {
             scanner.close()
         }

@@ -136,6 +136,21 @@ emulator image and local fixture photos.
 - Fixture truth labels in `shelfSuite`/`DeviceMsiTest` that are 8-digit
   `MOD_10` may be truncations of 9-digit tags (research doc §6 caveat).
 
+## Live camera invariants
+
+- Every live publication (results, `cameraStatus`, `torchEnabled`) carries
+  its camera session and publishes only under `cameraLock` while that session
+  is current (`acceptLiveSuccess`, `publishForSession`): a decode that
+  outlives `stopCamera` (or a host's Retry restart) must never finish or
+  prime the next session. Keep emission non-suspending (`tryEmit`) so it can
+  stay inside that critical section.
+- `CameraStatus.Failed` is final for its session (`publishCameraStatus`);
+  async bind/provider failures and a missing native library report it plus
+  one `ScanResult.Failure`. Never throw from CameraX listener callbacks.
+- CameraX unbind and LiveData observer removal run on the main thread
+  (`CameraScanManager.stop` defers off-main calls); unbind only the
+  scanner's own use cases, never `unbindAll()`.
+
 ## Validating decoder changes
 
 Every change to `msi_decoder.cpp` needs, before commit:

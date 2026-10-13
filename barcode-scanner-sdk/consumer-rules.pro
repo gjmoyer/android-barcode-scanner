@@ -1,7 +1,11 @@
 # SDK consumer ProGuard — keep public API, allow shrinking everything else.
 -keep public class com.barcodescanner.sdk.api.** { *; }
 -keep public class com.barcodescanner.sdk.domain.model.** { *; }
-# Native MSI decoder: keep the JNI bridge (called from C++ by name).
+# Native frame path and MSI decoder: keep the JNI bridges (bound from C++ by
+# name), independent of whether the host uses the default ProGuard files.
+-keepclasseswithmembernames class com.barcodescanner.sdk.data.frame.NativeFrame {
+    native <methods>;
+}
 -keepclasseswithmembernames class com.barcodescanner.sdk.data.msi.MsiNativeDecoder {
     native <methods>;
 }

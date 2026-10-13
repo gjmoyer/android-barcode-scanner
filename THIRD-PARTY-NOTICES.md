@@ -17,10 +17,10 @@ If you distribute the built AAR/APK, pass these notices on to your recipients.
 
 ## Google ML Kit — proprietary (no license text to reproduce)
 
-- Bundled artifacts: `com.google.mlkit:barcode-scanning:17.3.0`,
-  `com.google.mlkit:text-recognition:16.0.1` (offline bundled models, no Play
-  Services dependency). Use is governed by the Google APIs Terms of Service
-  and the ML Kit Terms; attribution via license text is not applicable.
+- Bundled artifact: `com.google.mlkit:barcode-scanning:17.3.0` (offline
+  bundled model, no Play Services dependency). Use is governed by the Google
+  APIs Terms of Service and the ML Kit Terms; attribution via license text is
+  not applicable.
 
 ---
 

@@ -3,7 +3,9 @@ package com.barcodescanner.sdk.api
 import android.content.Context
 import android.graphics.Bitmap
 import android.os.SystemClock
+import androidx.camera.core.MeteringPoint
 import androidx.camera.view.PreviewView
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import com.barcodescanner.sdk.camera.CameraScanManager
 import com.barcodescanner.sdk.data.frame.LumaFrame
@@ -21,10 +23,11 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.filterIsInstance
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
@@ -46,7 +49,10 @@ import java.util.concurrent.atomic.AtomicBoolean
  *    A suppressed duplicate is still returned to the caller (not lied to as NotFound).
  *  - only the live camera path emits to [results], with per-key dedup:
  *    identical (value, symbology) within [ScannerConfig.duplicateSuppressionMillis]
- *    is swallowed there.
+ *    is swallowed there,
+ *  - every live publication (results, [cameraStatus], [torchEnabled]) carries
+ *    its camera session: a stopped session (stop, or a host's Retry restart)
+ *    can never publish into a newer one.
  */
 internal class DefaultBarcodeScanner(
     private val container: ScannerContainer,
@@ -61,18 +67,27 @@ internal class DefaultBarcodeScanner(
     )
     override val results: Flow<ScanResult> = _results.asSharedFlow()
 
+    private val _cameraStatus = MutableStateFlow<CameraStatus>(CameraStatus.Idle)
+    override val cameraStatus: StateFlow<CameraStatus> = _cameraStatus.asStateFlow()
+    private val _torchEnabled = MutableStateFlow(false)
+    override val torchEnabled: StateFlow<Boolean> = _torchEnabled.asStateFlow()
+
     private var cameraManager: CameraScanManager? = null
     private val cameraLock = Any()
+    /**
+     * Incremented on every camera stop (guarded by [cameraLock]). Manager
+     * callbacks and live frames carry their session, so a late callback or
+     * decode from a stopped camera can never publish into a newer one.
+     */
+    private var cameraSession = 0L
     private val closed = AtomicBoolean(false)
     /** Live-path dedup: key -> last emitted elapsed-realtime. */
     private val dedup = ConcurrentHashMap<String, Long>()
-    private val emitMutex = Mutex()
+    private val dedupLock = Any()
     /**
      * Stability gate for MSI bar reads (see [confirmLiveBarHit]): pending key
-     * plus consecutive count. Plain vars (not mutex-guarded): readers/writers
-     * are the single-flight live loop plus stop/close resets — a torn update
-     * costs at most one extra withheld frame or one early emit, never a wrong
-     * value (emission still goes through dedup + checksum gating upstream).
+     * plus consecutive count. The live path updates them under [cameraLock]
+     * (see [acceptLiveSuccess]), as do the stop/close resets.
      */
     @Volatile
     private var pendingKey: String? = null
@@ -162,33 +177,111 @@ internal class DefaultBarcodeScanner(
             // lock, so a check outside would allow starting a camera after close.
             check(!closed.get()) { "Scanner is closed" }
             stopCameraLocked()
+            // Flow updates resume Unconfined collectors inline, inside this
+            // (re-entrant) lock, so each one is followed by a re-check: a
+            // collector may have closed the scanner or started its own camera.
+            if (closed.get() || cameraManager != null) return
+            val session = cameraSession
             val manager = CameraScanManager(
                 context = container.app,
                 config = config,
                 scope = scope,
-                onFrame = { frame -> handleLiveFrame(frame) },
-                onError = { t ->
-                    // Async bind failure (no/in-use camera, dead lifecycle) or
-                    // no native frame library on this ABI: the host's
-                    // try/catch around startCamera cannot see either (bind
-                    // runs after start returns), so surface it on the results
-                    // flow instead of failing silently.
-                    _results.tryEmit(
-                        ScanResult.Failure(
-                            message = "live scanning unavailable: ${t.message}",
-                            cause = t,
-                            kind = ScanResult.ErrorKind.TRANSIENT,
-                        ),
-                    )
-                },
+                onFrame = { frame -> handleLiveFrame(frame, session) },
+                onError = { t -> reportCameraFailure(session, t) },
+                onStatus = { status -> publishCameraStatus(session, status) },
+                onTorch = { enabled -> publishForSession(session) { _torchEnabled.value = enabled } },
             )
             cameraManager = manager
+            _cameraStatus.value = CameraStatus.Starting
+            // A collector that stopped (or restarted) on Starting already
+            // stopped this manager; starting it now would revive the camera.
+            if (session != cameraSession || closed.get()) return
             start(manager)
         }
     }
 
     override fun stopCamera() {
         synchronized(cameraLock) { stopCameraLocked() }
+    }
+
+    override fun setTorchEnabled(enabled: Boolean, onResult: (Boolean) -> Unit) {
+        val manager = synchronized(cameraLock) { cameraManager }
+        // Outside the lock: a host callback must never run while holding it.
+        if (manager != null) {
+            manager.setTorchEnabled(enabled, onResult)
+        } else {
+            runCatching { ContextCompat.getMainExecutor(container.app).execute { onResult(false) } }
+        }
+    }
+
+    override fun scaleZoom(scaleFactor: Float) {
+        synchronized(cameraLock) { cameraManager }?.scaleZoom(scaleFactor)
+    }
+
+    override fun focusAt(point: MeteringPoint) {
+        synchronized(cameraLock) { cameraManager }?.focusAt(point)
+    }
+
+    private inline fun publishForSession(session: Long, update: () -> Unit) {
+        synchronized(cameraLock) { if (session == cameraSession) update() }
+    }
+
+    /** Session of the running (or next) camera; internal for tests. */
+    internal fun currentCameraSession(): Long = synchronized(cameraLock) { cameraSession }
+
+    /**
+     * Camera state of [session]; internal for tests. [CameraStatus.Failed] is
+     * final for its session: CameraX may still post OPEN after a failure
+     * reported outside its state machine (no native decoder: preview without
+     * decoding), and that must not paper over the failure.
+     */
+    internal fun publishCameraStatus(session: Long, status: CameraStatus) {
+        if (status is CameraStatus.Failed) {
+            publishFailure(session, status)
+            return
+        }
+        publishForSession(session) {
+            if (_cameraStatus.value !is CameraStatus.Failed) _cameraStatus.value = status
+        }
+    }
+
+    /**
+     * Async bind failure (no/in-use camera, dead lifecycle) or no native frame
+     * library on this ABI; internal for tests. The host's try/catch around
+     * startCamera cannot see either (bind runs after start returns), so it is
+     * published as [CameraStatus.Failed] and once on the results flow instead
+     * of failing silently.
+     */
+    internal fun reportCameraFailure(session: Long, t: Throwable) {
+        publishFailure(session, CameraStatus.Failed("live scanning unavailable: ${t.message}", t))
+    }
+
+    /**
+     * Every transition to [CameraStatus.Failed] (bind/provider failure, no
+     * native library, critical CameraX error): once per session, as the
+     * status and then one [ScanResult.Failure] on [results].
+     */
+    private fun publishFailure(session: Long, failure: CameraStatus.Failed) {
+        var first = false
+        publishForSession(session) {
+            if (_cameraStatus.value !is CameraStatus.Failed) {
+                _cameraStatus.value = failure
+                first = true
+            }
+        }
+        // Re-checked: a status collector may have stopped or restarted the
+        // camera inline, and this failure must not reach the new session.
+        if (first) {
+            publishForSession(session) {
+                _results.tryEmit(
+                    ScanResult.Failure(
+                        message = failure.reason,
+                        cause = failure.cause,
+                        kind = ScanResult.ErrorKind.TRANSIENT,
+                    ),
+                )
+            }
+        }
     }
 
     /**
@@ -203,19 +296,18 @@ internal class DefaultBarcodeScanner(
      * faulting the shared decode scope would crash the app (uncaught
      * coroutine exception). A dropped live frame is always safe (the next
      * frame arrives ~100ms later); one-shot [scanFrame]/[scanBitmap] still
-     * throw to the caller as documented.
+     * throw to the caller as documented. A frame of a stopped [session] is
+     * skipped, and its decode can never publish (see [acceptLiveSuccess]).
      */
-    internal suspend fun handleLiveFrame(frame: LumaFrame): Boolean {
-        if (closed.get()) return true
+    internal suspend fun handleLiveFrame(frame: LumaFrame, session: Long = currentCameraSession()): Boolean {
+        if (closed.get() || session != currentCameraSession()) return true
         var reusable = false
         try {
             val live = container.lumaFusion.decode(frame)
             reusable = live.bufferReusable
             // Upright by construction (native rotate): no rotated candidates.
             val result = live.outcome.toScanResult(SystemClock.elapsedRealtime(), rotatedCandidate = false)
-            // Stability gate swallows the first sighting of an MSI bar value;
-            // the next frame decides (see method).
-            if (result is ScanResult.Success && confirmLiveBarHit(result)) emitLiveDeduped(result)
+            if (result is ScanResult.Success) acceptLiveSuccess(session, result)
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
@@ -225,13 +317,39 @@ internal class DefaultBarcodeScanner(
         return reusable
     }
 
+    /**
+     * Live-path handling of a decoded frame; internal for tests.
+     *
+     * A decode can outlive its camera session (stop, or a host's Retry
+     * restart), and stopping the camera does not cancel it. Its result must
+     * neither prime a newer session's stability/dedup state nor publish into
+     * it, or Retry could finish with the label aimed at before the failure.
+     * So the session check, those updates and the (non-suspending) publish
+     * form one critical section with stop: a result publishes only while its
+     * session is current.
+     */
+    internal fun acceptLiveSuccess(session: Long, result: ScanResult.Success) {
+        synchronized(cameraLock) {
+            if (session != cameraSession) return
+            // Stability gate swallows the first sighting of an MSI bar value;
+            // the next frame decides (see method).
+            if (confirmLiveBarHit(result)) emitLiveDeduped(result)
+        }
+    }
+
     private fun stopCameraLocked() {
         cameraManager?.stop()
         cameraManager = null
+        cameraSession++
         // Fresh aim on next engagement: a stale pending key matching the new
         // aim's first sighting would emit without confirmation.
         pendingKey = null
         pendingCount = 0
+        // State first, flow updates last: collectors run inline and may start
+        // a newer camera, whose state these resets must not overwrite.
+        val session = cameraSession
+        _torchEnabled.value = false
+        if (session == cameraSession) _cameraStatus.value = CameraStatus.Idle
     }
 
     override fun close() {
@@ -273,11 +391,15 @@ internal class DefaultBarcodeScanner(
         }
     }
 
-    /** Live-path emission with per-key dedup; internal for tests. */
-    internal suspend fun emitLiveDeduped(result: ScanResult.Success) {
+    /**
+     * Live-path emission with per-key dedup; internal for tests. Never
+     * suspends ([_results] drops oldest), so it can publish atomically with
+     * the session check in [acceptLiveSuccess].
+     */
+    internal fun emitLiveDeduped(result: ScanResult.Success) {
         val key = "${result.barcode.symbology}:${result.barcode.rawValue}"
         val now = SystemClock.elapsedRealtime()
-        emitMutex.withLock {
+        synchronized(dedupLock) {
             // Prune stale keys so a long session scanning many unique codes does
             // not grow the map without bound.
             if (dedup.size > DEDUP_PRUNE_THRESHOLD) {
@@ -288,7 +410,7 @@ internal class DefaultBarcodeScanner(
             if (last != null && now - last < config.duplicateSuppressionMillis) return
             dedup[key] = now
         }
-        _results.emit(result)
+        _results.tryEmit(result)
     }
 
     private companion object {
