@@ -94,8 +94,8 @@ dependencies {
     testImplementation(libs.mockk)
     testImplementation(libs.coroutines.core)
 
-    androidTestImplementation("androidx.test:runner:1.7.0")
-    androidTestImplementation("androidx.test:rules:1.7.0")
-    androidTestImplementation("androidx.test.ext:junit:1.3.0")
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.rules)
+    androidTestImplementation(libs.androidx.test.ext.junit)
     androidTestImplementation(libs.coroutines.android)
 }
