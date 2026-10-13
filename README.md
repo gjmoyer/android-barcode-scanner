@@ -135,7 +135,7 @@ val config = ScannerConfigBuilder()
 - MSI results are re-validated strictly under `msiChecksumPolicy` and short or
   degenerate reads are withheld — a wrong policy yields `NotFound`, never a
   misread presented as valid. The policy is also pushed into the native
-  engine's candidate selection. grocery shelf tags are 9-digit Mod1010 (item +
+  engine's candidate selection. Grocery shelf tags are 9-digit Mod1010 (item +
   two checks): use `MOD_10_10`; under `MOD_10` they emit the 8-digit
   `item + check` and lose truncation protection.
 - `msiMinPayloadDigits` (default 3, spec floor): raise to ~6 for shelf SKUs;
@@ -143,7 +143,7 @@ val config = ScannerConfigBuilder()
 - `msiSymbolLength(n)` / `msiSymbolLengths(range)` (default null = any):
   accepted MSI symbol lengths, check digits included, independent of the
   checksum policy. Enforced in native candidate selection before voting, so a
-  phantom of another length can't outvote the true read. grocery shelf tags are
+  phantom of another length can't outvote the true read. Grocery shelf tags are
   9 digits; set it whenever your labels have a fixed length.
 - Duplicate suppression only affects the live `results` flow; one-shot
   `scanBitmap`/`scanFrame` always return the decode result.

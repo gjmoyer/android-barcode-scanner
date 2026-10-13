@@ -35,7 +35,8 @@ Exit code = number of asserted failures (0 = green).
    (4px → 12px close-up, the `tmplLen` clamp regression), blur/contrast/
    brightness ladder, off-center bands, and negatives (blank/black/noise must
    be honest NotFound, never crash).
-2. **Shelf-format vectors** (`shelfFormatSuite`, ASSERTED): the real shelf-tag format — 9-digit Mod1010 (7-digit item + two check digits, 39 bars),
+2. **Shelf-format vectors** (`shelfFormatSuite`, ASSERTED): the real
+   shelf-tag format — 9-digit Mod1010 (7-digit item + two check digits, 39 bars),
    leading-zero SKUs at 5/4/3 px modules, blurred, clean and with
    glyph-height text around the symbol, decoded with no required policy and
    with `ChecksumPolicy::MOD1010` pushed down. Every prefix of these

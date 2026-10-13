@@ -45,7 +45,7 @@ class MsiNativeDecoder(
      * pre-native Kotlin decoder enforced. Revalidation (not the reported
      * scheme name) decides: every Mod1010/Mod1110 codeword also validates as
      * Mod10 by construction, so name-matching would mis-route double-check
-     * labels. NONE accepts anything. grocery shelf tags are 9-digit Mod1010
+     * labels. NONE accepts anything. Grocery shelf tags are 9-digit Mod1010
      * (7-digit item + two check digits): use MOD_10_10 for them.
      */
     private val checksumPolicy: ScannerConfig.MsiChecksumPolicy =

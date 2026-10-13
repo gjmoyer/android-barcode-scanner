@@ -27,7 +27,7 @@ data class ScannerConfig(
     val duplicateSuppressionMillis: Long,
     /**
      * MSI Plessey checksum policy (Mod10 default per spec). Enforced inside
-     * native candidate selection, not just on the final read. grocery shelf
+     * native candidate selection, not just on the final read. Grocery shelf
      * tags are 9-digit Mod1010 (item + 2 checks): use MOD_10_10 to emit the
      * item number and stop Mod10-valid 8-digit truncations from winning.
      */
@@ -98,7 +98,7 @@ data class ScannerConfig(
      * Accepted MSI symbol lengths in digits, check digits included — the whole
      * codeword in the bars, independent of [msiChecksumPolicy] and
      * [msiStripChecksum] (commercial SDKs call this the symbol count). Null
-     * (default) accepts any length the engine reads (7..10 digits). grocery
+     * (default) accepts any length the engine reads (7..10 digits). Grocery
      * shelf tags are 9 (7-digit item + two checks): `msiSymbolLength(9)`.
      *
      * Enforced inside native candidate selection, before scanline voting, and

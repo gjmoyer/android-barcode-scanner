@@ -1059,7 +1059,7 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
     const int nall = (int)all.size();
     if (nall == 0) return false;
     // Prefix duplicates: shorter is a strict PREFIX of longer. Every prefix
-    // of a Mod1010 code passes Mod10 (grocery shelf tags are 7-digit item +
+    // of a Mod1010 code passes Mod10 (9-digit shelf tags are 7-digit item +
     // Mod10 + Mod10: 39 bars on 101/126 measured real tags), so a tie in
     // strength must NOT drop the longer — that discarded the true 9-digit
     // read for its 8-digit truncation (real photos: 237 -> 298/755 ok).

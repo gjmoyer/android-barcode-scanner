@@ -45,7 +45,7 @@ emulator image and local fixture photos.
 
 ## MSI decoder rules
 
-- **grocery shelf tags are 9-digit Mod1010**: 7-digit item + Mod10 check +
+- **Grocery shelf tags are 9-digit Mod1010**: 7-digit item + Mod10 check +
   Mod10 over (item + first check), 39 bars. Item 0115783 → `011578333`.
   Every prefix of such a codeword is Mod10-valid and Luhn/Mod11 ignore
   leading zeros, so 8-digit truncations and dropped leading zeros validate.

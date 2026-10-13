@@ -803,7 +803,7 @@ static void addStrokes(Gray& g, int x0, int x1, int y0, int y1, uint32_t seed) {
     }
 }
 
-// shelf-tag format, rendered from the spec: 7-digit item + Mod10 +
+// Shelf-tag format, rendered from the spec: 7-digit item + Mod10 +
 // Mod10 over (item + first check) = 9 digits, 39 bars (real-photo truth:
 // 101 of 126 measurable tags; e.g. item 0115783 -> 011578333). Every prefix
 // of such a codeword is itself Mod10-valid, and Luhn ignores leading zeros,

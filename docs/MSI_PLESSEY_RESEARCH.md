@@ -155,7 +155,7 @@ Kotlin re-validates strictly under the configured policy before stripping.
 | ondeg `0243523` | ❌ phantoms validate | True bars never resolve; shifted windows checksum-validate by luck. Tracked gap; live stability gate is the remaining defense. |
 
 > **Truth-label caveat (see §10).** These fixtures are not in the repo and
-> could not be re-verified. real 9-digit shelf tags encode 9 digits (item + Mod10 +
+> could not be re-verified. Real shelf tags encode 9 digits (item + Mod10 +
 > Mod10), and every 8-digit prefix of such a codeword is Mod10-valid, so the
 > 8-digit `MOD_10` labels above (yakult `08281479`, dixie `00875732`, ondeg
 > `02435238`) are most likely physical truncations that happen to strip to
@@ -553,8 +553,8 @@ Consequences:
   unless the policy is pushed down.
 - Luhn and Mod11 ignore leading zeros, so a dropped leading `0`
   (`11578333`) still validates.
-- Under `MOD_10` grocery shelf tags emit the 8-digit `item+check1`; hosts scanning
-  grocery shelf tags should configure `MOD_10_10` to get the 7-digit item.
+- Under `MOD_10` 9-digit shelf tags emit the 8-digit `item+check1`; hosts
+  scanning such tags should configure `MOD_10_10` to get the 7-digit item.
 
 Inputs: per tag, tight crops below the item line at 1.0/1.5/2.0/3.0× and a
 1.5× context crop (755 crops), with the SDK's 2/98 contrast stretch.
