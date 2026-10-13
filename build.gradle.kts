@@ -14,5 +14,6 @@ buildscript {
 }
 
 tasks.register<Delete>("clean") {
+    description = "clean build dir"
     delete(rootProject.layout.buildDirectory)
 }

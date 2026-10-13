@@ -57,7 +57,10 @@ struct DecodeOptions {
     // Share of the image height skipped at the top during barcode band
     // search (clamped to 0..0.9). 0.25 suits full camera frames (overlays and
     // competing print live up there); aim-box crops pass 0 because the box
-    // itself is the target area.
+    // itself is the target area. Close-up labels filling the frame still
+    // decode (their band extends below the cut); anything entirely in the top
+    // quarter is missed by design. Change with care: widening the search adds
+    // ROI candidates that compete in voting.
     float scanTopFraction = 0.25f;
     // Accepted symbol lengths in digits, check digits included (the whole
     // codeword in the bars, e.g. 9 for a 7-digit SKU + 2 checks). 0 leaves a

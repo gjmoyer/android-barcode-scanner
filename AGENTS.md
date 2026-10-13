@@ -21,8 +21,10 @@ Native code: `barcode-scanner-sdk/src/main/cpp/` (`msi_decoder.cpp/.h`,
 
 ## Build and test
 
-Gradle needs a JDK 17+; none is on PATH by default on this machine — use
-Android Studio's bundled JBR:
+The Gradle daemon runs on JDK 25 (`gradle/gradle-daemon-jvm.properties`;
+Gradle downloads it from foojay.io if absent, which the proxy may block).
+No JDK is on PATH by default on this machine — use Android Studio's bundled
+JBR (25):
 
 ```sh
 export JAVA_HOME="$HOME/Applications/Android Studio <version>.app/Contents/jbr/Contents/Home"
@@ -64,7 +66,7 @@ emulator image and local fixture photos.
 - Failure-path retries run in order: 1D 2x profile retry (re-votes failed
   ROIs with module <4.5px, no new ROI search; top level only, since inside
   the 2D recursion it compounds to 4x and bred phantoms), then the skew
-  retry, then the 2D NN 2x frame retry. 2D bilinear and per-ROI 2D upscales
+  retry, then the grid retry, then the 2D NN 2x frame retry. 2D bilinear and per-ROI 2D upscales
   were measured and rejected: they re-detect ROIs and bred confident phantoms.
 - Skew retry (`estimateSkew`, top level only): projection search over ±15°
   for the angle that sharpens the deskewed band average; gated by
@@ -76,6 +78,17 @@ emulator image and local fixture photos.
   extent, and don't use the structure tensor for the angle (biased about 3°):
   all were measured and lost reads.
   Measure tilt with rotated crops, not only the upright set.
+- Grid retry (`decodeByDigitGrid`, top level only, after the skew retry):
+  for blurred tags whose merged bars shift every bar-anchored digit window.
+  It tracks windows by digit pitch; bars only seed the Start and module.
+  Each line's read must pass the checksum, the grid residual,
+  `kGridMinScore` 0.7, `kGridMinReadCorr` 0.6 and its own guards, then the
+  normal vote. The prefix rule must also drop an equal-strength prefix when
+  the longer read closes: an 8-digit prefix of a Mod1010 tag is
+  Mod1010-valid one time in ten. Moving it ahead of the skew retry lost
+  tilted reads; re-measure clutter latency (desktop 8.1 ms mean) and
+  wrong reads before widening its scales, sigmas or scope (the 2D
+  recursion, deskewed scanlines).
 - Stills retry stretched (`FrameOptions.stretchRetry`, set only by
   `NativeFrame.prepareStill`): `decodeFrame` sweeps every orientation
   plain, then once more through the 2%/98% contrast stretch. Never stretch
@@ -120,14 +133,18 @@ emulator image and local fixture photos.
 ## Validating decoder changes
 
 Every change to `msi_decoder.cpp` needs, before commit:
-1. Host harness green (`ASSERTS ... fail=0`), verdict lines diffed against
+1. Host harness green (`ASSERTS ... fail=0`; `bleedSuite` covers the grid
+   retry), verdict lines diffed against
    the previous build (only `BENCH` timings may differ unless intended).
 2. Real-photo regression when a local photo set is available (research doc
    §10): score against the 9-digit truth as ok / 8-digit truncation /
    wrong / none, for both no required policy and `MOD1010`. Refactors and
    perf changes must change zero rows. Also time 1280×720 text-clutter
    negatives (must stay 0 false positives). Count wrong reads on unreadable
-   (scored=no) tags too: they must never misread.
+   (scored=no) tags too: they must never misread. Score every tag with a
+   full bar field, including ones Apple Vision misses (the SDK out-reads
+   it); only symbols cut by the photo edge or unreadable by a commercial
+   scanner stay unscored.
 3. `assembleDebug` for the NDK build.
 
 Shelf photos, OCR output and derived crops are private data: never commit

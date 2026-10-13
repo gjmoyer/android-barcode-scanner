@@ -13,8 +13,8 @@
 //  7. Hypothesis test: expected bar sequence is W(start) + 4n bits + n,n(stop).
 //     Try plausible (start trim, digit count) combos to absorb false/missed
 //     bar detections; decode bits -> BCD -> digits.
-//  8. Checksum gate: try MOD10/MOD11/MOD1010/MOD1110/NONE; only candidates
-//     passing a policy (or NONE with multi-row agreement) become votes.
+//  8. Checksum gate: try MOD10/MOD11/MOD1010/MOD1110; only candidates
+//     passing a scheme become votes (checksum-less reads are never emitted).
 //  9. Winner = most-voted digit string across scanlines.
 #include "msi_decoder.h"
 
@@ -30,9 +30,6 @@ namespace {
 
 // Debug verbosity, set via msi::setDebug().
 int g_debug = 0;
-// When true, decodeByDigitTemplates allows more missing bars (for faint images).
-// Set by decode() for the fallback pass.
-bool g_relaxedBars = false;
 
 } // namespace
 
@@ -52,16 +49,7 @@ constexpr int kMaxDigits = 10;   // real MSI payloads + checks top out here
                                // Longer "valid" strings are template noise
                                // that happened to pass checks (verified FPs
                                // with 11-15 digits on rails).
-constexpr int kMinVotesNone = 3;     // NONE policy needs more agreement
-constexpr int kMinVotesCheck = 2;    // checksum'd policies need 2
-// Default fraction of the frame height skipped at the top during ROI band
-// search (DecodeOptions::scanTopFraction). Full frames only: close-up labels
-// filling the frame still decode (their band extends below the cut); anything
-// living entirely in the top quarter is missed by design (status overlays /
-// competing print live there on a full-frame aim UI). Aim-box crops pass 0 —
-// the box IS the target area. Change with care: widening the search adds ROI
-// candidates that compete in voting.
-constexpr float kScanTopFraction = 0.25f;
+constexpr int kMinVotesCheck = 2;    // agreeing scanlines per winner
 // Long-edge ceiling for the far-field 2x upscale retry (decodeImpl): small
 // frames only, so the 4x-pixel retry stays cheap. 1280px+ frames already
 // carry >=2px modules when a barcode is plausibly framed.
@@ -387,15 +375,6 @@ int findRoiCandidates(const uint8_t* g, int W, int H, Rect* rois, int cap,
     return nrois;
 }
 
-// Legacy single-ROI wrapper (kept for compatibility).
-bool findRoi(const uint8_t* g, int W, int H, Rect& roi) {
-    Rect rois[8];
-    int n = findRoiCandidates(g, W, H, rois, 8, kScanTopFraction);
-    if (n == 0) return false;
-    roi = rois[0];
-    return true;
-}
-
 // ------------------------------------------------------- profile utils
 // Extract horizontal profile (float, 0=black..255=white), light smoothing.
 void extractProfile(const uint8_t* g, int W, const Rect& roi, int y,
@@ -643,7 +622,7 @@ void averageSkewProfile(const uint8_t* g, int W, const Rect& roi, float slope,
 struct Bar { float center; float width; };  // width via inflection points
 
 // Find bar centers as prominent local minima. Returns count.
-int findBars(const float* p, int n, Bar* bars, int cap, bool sensitive = false) {
+int findBars(const float* p, int n, Bar* bars, int cap) {
     float mean = 0;
     for (int i = 0; i < n; ++i) mean += p[i];
     mean /= n;
@@ -656,12 +635,7 @@ int findBars(const float* p, int n, Bar* bars, int cap, bool sensitive = false) 
     }
     float stddev = sqrtf(var / n);
     // Threshold: 0.4 * stddev, clamped to [3, 8].
-    // Sensitive mode: use 0.25 * stddev, clamped to [2, 6].
-    float depthThr = sensitive ? 0.25f * stddev : 0.4f * stddev;
-    float lo = sensitive ? 2.0f : 3.0f;
-    float hi = sensitive ? 6.0f : 8.0f;
-    if (depthThr < lo) depthThr = lo;
-    if (depthThr > hi) depthThr = hi;
+    float depthThr = std::clamp(0.4f * stddev, 3.0f, 8.0f);
     int nb = 0;
     for (int i = 1; i + 1 < n && nb < cap; ++i) {
         if (p[i] < p[i - 1] && p[i] <= p[i + 1] && p[i] < mean - depthThr) {
@@ -692,57 +666,6 @@ int findBars(const float* p, int n, Bar* bars, int cap, bool sensitive = false) 
     return nb;
 }
 
-// 2-means on widths -> label each bar narrow(0)/wide(1). Returns threshold.
-float clusterWidths(Bar* bars, int nb, uint8_t* labels) {
-    float lo = 1e9f, hi = -1e9f;
-    for (int i = 0; i < nb; ++i) {
-        lo = std::min(lo, bars[i].width);
-        hi = std::max(hi, bars[i].width);
-    }
-    float c0 = lo, c1 = hi;
-    for (int it = 0; it < 25; ++it) {
-        float s0 = 0, s1 = 0; int n0 = 0, n1 = 0;
-        float thr = (c0 + c1) * 0.5f;
-        for (int i = 0; i < nb; ++i) {
-            if (bars[i].width < thr) { s0 += bars[i].width; ++n0; }
-            else { s1 += bars[i].width; ++n1; }
-        }
-        if (!n0 || !n1) break;
-        float nc0 = s0 / n0, nc1 = s1 / n1;
-        if (fabsf(nc0 - c0) < 1e-3f && fabsf(nc1 - c1) < 1e-3f) break;
-        c0 = nc0; c1 = nc1;
-    }
-    float thr = (c0 + c1) * 0.5f;
-    for (int i = 0; i < nb; ++i) labels[i] = bars[i].width >= thr ? 1 : 0;
-    return thr;
-}
-
-// BCD table: index = 4-bit value, value = char or 0 if invalid (all 0-9 valid).
-inline char bcdToChar(int v) { return (v >= 0 && v <= 9) ? (char)('0' + v) : 0; }
-
-// Try decoding bars[s .. s+count) as an MSI symbol. labels: 1=wide,0=narrow.
-// Expected: bars[s]=W(start), bars[s+1 .. s+4n]=digits, last two narrow(stop).
-// Returns decoded string or empty.
-std::string tryDecodeBars(const uint8_t* labels, int s, int ndigits) {
-    int count = 1 + 4 * ndigits + 2;
-    if (labels[s] != 1) return {};                       // start must be wide
-    if (labels[s + count - 2] != 0) return {};           // stop bars narrow
-    if (labels[s + count - 1] != 0) return {};
-    std::string out;
-    out.reserve(ndigits);
-    for (int d = 0; d < ndigits; ++d) {
-        int v = 0;
-        for (int b = 0; b < 4; ++b) {
-            v = (v << 1) | labels[s + 1 + d * 4 + b];
-        }
-        char c = bcdToChar(v);
-        if (!c) return {};
-        out.push_back(c);
-    }
-    return out;
-}
-
-// Decode one profile. Returns candidate (digits, policy) pairs found.
 // Filter bars by spacing sanity: consecutive bars should be ~3 modules apart.
 // Removes false splits (too close) and flags gaps (missed bars).
 // Returns filtered count. Module estimate is output.
@@ -775,105 +698,6 @@ int filterBars(Bar* bars, int nb, float& moduleOut) {
     return nf;
 }
 
-// Classify bars by correlating the signal around each bar center against
-// narrow-bar and wide-bar templates. More robust than width thresholding
-// under blur because it matches signal SHAPE, not absolute sizes.
-void classifyBarsByCorrelation(const float* p, int n, Bar* bars, int nb,
-                               float module, uint8_t* labels) {
-    // Build templates: narrow (1 module black) and wide (2 modules black),
-    // each in a 4-module window, blurred to match observed blur.
-    // We estimate blur sigma from the data: narrow bars' measured widths.
-    const int winMods = 4;
-    int winPx = (int)(winMods * module + 0.5f);
-    if (winPx < 8) winPx = 8;
-    if (winPx > 64) winPx = 64;
-
-    // Template: square wave (-1 for black, +1 for white), then blur.
-    // Narrow: black in middle 1 module. Wide: black in middle 2 modules.
-    float tmplN[64], tmplW[64];
-    // Estimate sigma: use 0.35 * module as blur (typical for these images).
-    float sigma = 0.35f * module;
-    for (int i = 0; i < winPx; ++i) {
-        float x = (i - winPx / 2.0f) / module;  // in modules, centered
-        float sqN = (fabsf(x) < 0.5f) ? -1.0f : 1.0f;
-        float sqW = (fabsf(x) < 1.0f) ? -1.0f : 1.0f;
-        tmplN[i] = sqN;
-        tmplW[i] = sqW;
-    }
-    // Gaussian blur the templates.
-    float kern[13];
-    int kh = (int)(sigma * 3);
-    if (kh > 6) kh = 6;
-    if (kh < 1) kh = 1;
-    float ks = 0;
-    for (int i = -kh; i <= kh; ++i) {
-        kern[i + kh] = expf(-0.5f * i * i / (sigma * sigma));
-        ks += kern[i + kh];
-    }
-    for (int i = 0; i <= 2 * kh; ++i) kern[i] /= ks;
-    float bN[64], bW[64];
-    for (int i = 0; i < winPx; ++i) {
-        float sN = 0, sW = 0;
-        for (int k = -kh; k <= kh; ++k) {
-            int j = i + k;
-            if (j < 0) j = 0;
-            if (j >= winPx) j = winPx - 1;
-            sN += tmplN[j] * kern[k + kh];
-            sW += tmplW[j] * kern[k + kh];
-        }
-        bN[i] = sN;
-        bW[i] = sW;
-    }
-    // Normalize templates (zero mean, unit variance).
-    float mN = 0, mW = 0;
-    for (int i = 0; i < winPx; ++i) { mN += bN[i]; mW += bW[i]; }
-    mN /= winPx; mW /= winPx;
-    float vN = 0, vW = 0;
-    for (int i = 0; i < winPx; ++i) {
-        bN[i] -= mN; bW[i] -= mW;
-        vN += bN[i] * bN[i]; vW += bW[i] * bW[i];
-    }
-    vN = sqrtf(vN); vW = sqrtf(vW);
-    if (vN > 1e-6f) for (int i = 0; i < winPx; ++i) bN[i] /= vN;
-    if (vW > 1e-6f) for (int i = 0; i < winPx; ++i) bW[i] /= vW;
-
-    // Classify each bar.
-    for (int b = 0; b < nb; ++b) {
-        int c = (int)(bars[b].center + 0.5f);
-        int i0 = c - winPx / 2;
-        if (i0 < 0 || i0 + winPx > n) {
-            // Fallback to width-based if near edge.
-            labels[b] = bars[b].width > 1.5f * module ? 1 : 0;
-            continue;
-        }
-        // Extract and normalize signal window.
-        float seg[64];
-        float ms = 0;
-        for (int i = 0; i < winPx; ++i) {
-            seg[i] = p[i0 + i];
-            ms += seg[i];
-        }
-        ms /= winPx;
-        float vs = 0;
-        for (int i = 0; i < winPx; ++i) {
-            seg[i] -= ms;
-            vs += seg[i] * seg[i];
-        }
-        vs = sqrtf(vs);
-        if (vs < 1e-6f) {
-            labels[b] = 0;
-            continue;
-        }
-        for (int i = 0; i < winPx; ++i) seg[i] /= vs;
-        float cN = 0, cW = 0;
-        for (int i = 0; i < winPx; ++i) {
-            cN += seg[i] * bN[i];
-            cW += seg[i] * bW[i];
-        }
-        labels[b] = (cW > cN) ? 1 : 0;
-    }
-}
-
 // Digit-template correlation decode: for each digit position, correlate the
 // 12-module signal window against all 10 digit templates. Uses bar positions
 // only for start alignment and module estimation; no per-bar width labels.
@@ -893,7 +717,56 @@ struct DigitTemplateCache {
     bool valid = false;
 };
 constexpr int kNumSigmas = 3;
+// Template blur sigma per hypothesis, in modules (see decodeByDigitTemplates).
+constexpr float kSigmaMul[kNumSigmas] = {0.35f, 0.6f, 0.95f};
 thread_local DigitTemplateCache t_digitCache[kNumSigmas];
+
+// MSI digit patterns, 12 modules each (1 = bar).
+const char* const kDigitPat[10] = {
+    "100100100100", "100100100110", "100100110100", "100100110110",
+    "100110100100", "100110100110", "100110110100", "100110110110",
+    "110100100100", "110100100110"
+};
+
+// Renders the 10 digit templates at this module and Gaussian blur sigma (px),
+// each zero-mean and unit-norm; returns their length (12 modules, clamped to
+// 96 so wide close-up modules cannot overflow the caller's buffers).
+int buildDigitTemplates(float module, float sigma, float (*tmpl)[96]) {
+    int len = (int)(12 * module + 0.5f);
+    if (len > 96) len = 96;
+    int kh = (int)(sigma * 3);
+    if (kh < 1) kh = 1;
+    if (kh > 6) kh = 6;
+    float w[13];
+    for (int k = -kh; k <= kh; ++k) w[k + kh] = expf(-0.5f * k * k / (sigma * sigma));
+    for (int d = 0; d < 10; ++d) {
+        float sq[96];
+        for (int i = 0; i < len; ++i) {
+            int modIdx = (int)(i / module);
+            if (modIdx > 11) modIdx = 11;
+            sq[i] = (kDigitPat[d][modIdx] == '1') ? -1.0f : 1.0f;
+        }
+        for (int i = 0; i < len; ++i) {
+            float s = 0, ks = 0;
+            for (int k = -kh; k <= kh; ++k) {
+                int j = i + k;
+                if (j < 0) j = 0;
+                if (j >= len) j = len - 1;
+                s += sq[j] * w[k + kh];
+                ks += w[k + kh];
+            }
+            tmpl[d][i] = s / ks;
+        }
+        float m = 0;
+        for (int i = 0; i < len; ++i) m += tmpl[d][i];
+        m /= len;
+        float v = 0;
+        for (int i = 0; i < len; ++i) { tmpl[d][i] -= m; v += tmpl[d][i] * tmpl[d][i]; }
+        v = sqrtf(v);
+        if (v > 1e-6f) for (int i = 0; i < len; ++i) tmpl[d][i] /= v;
+    }
+    return len;
+}
 
 // Start, Stop and trailing quiet-zone contrast of a decoded hypothesis, in
 // units of the digit field's intensity standard deviation. MSI Start is "110"
@@ -992,13 +865,6 @@ float maxDigitGridResidual(const float* pos, int nd) {
 bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
                             float module, std::string& outDigits, float& outScore,
                             float& outFirstStart, float& outLastEnd) {
-    // Build 10 digit templates (12 modules each), blurred.
-    // Template patterns from MSI spec.
-    static const char* kDigitPat[10] = {
-        "100100100100", "100100100110", "100100110100", "100100110110",
-        "100110100100", "100110100110", "100110110100", "100110110110",
-        "110100100100", "110100100110"
-    };
     // Multi-sigma templates: real shelf blur varies per shot/row, and a
     // fixed 0.4*module assumption misranks digits under heavier blur
     // (commercial truth: correct string found once at 0.916, outvoted by
@@ -1006,7 +872,7 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
     // hypotheses; selection below picks across the pooled set. Template
     // build is ~0.5% of correlation cost, so rebuilds are cheap; the
     // (module, sigma) cache still hits across adjacent agreeing profiles.
-    static const float kSigmaMul[kNumSigmas] = {0.35f, 0.6f, 0.95f};
+    // Blur hypotheses: kSigmaMul.
     struct Valid {
         std::string digits;
         float score;
@@ -1035,45 +901,7 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
     if (cache.valid && cache.moduleBits == bits && cache.sigmaBits == sbits) {
         tmplLen = cache.tmplLen;
     } else {
-        float sigma = sigmaMul * module;
-        // Precompute templates at this module size.
-        // max 12 modules * 8 px
-        for (int d = 0; d < 10; ++d) {
-            int len = (int)(12 * module + 0.5f);
-            // Clamp BEFORE recording tmplLen: wide close-up modules would
-            // otherwise set tmplLen > 96 and overflow seg[96]/tmpl[d] below
-            // (stack smash on labels filling the frame).
-            if (len > 96) len = 96;
-            if (d == 0) tmplLen = len;
-        // Render square wave.
-        float sq[96];
-        for (int i = 0; i < len; ++i) {
-            int modIdx = (int)(i / module);
-            if (modIdx > 11) modIdx = 11;
-            sq[i] = (kDigitPat[d][modIdx] == '1') ? -1.0f : 1.0f;
-        }
-        // Blur.
-        int kh = (int)(sigma * 3);
-        if (kh < 1) kh = 1; if (kh > 6) kh = 6;
-        for (int i = 0; i < len; ++i) {
-            float s = 0, ks = 0;
-            for (int k = -kh; k <= kh; ++k) {
-                int j = i + k;
-                if (j < 0) j = 0; if (j >= len) j = len - 1;
-                float w = expf(-0.5f * k * k / (sigma * sigma));
-                s += sq[j] * w; ks += w;
-            }
-            tmpl[d][i] = s / ks;
-        }
-        // Normalize.
-        float m = 0;
-        for (int i = 0; i < len; ++i) m += tmpl[d][i];
-        m /= len;
-        float v = 0;
-        for (int i = 0; i < len; ++i) { tmpl[d][i] -= m; v += tmpl[d][i]*tmpl[d][i]; }
-        v = sqrtf(v);
-        if (v > 1e-6f) for (int i = 0; i < len; ++i) tmpl[d][i] /= v;
-        }  // for (int d...) — one blurred template per digit
+        tmplLen = buildDigitTemplates(module, sigmaMul * module, tmpl);
     }  // else — cache miss: rebuilt above
     // Publish the build for the next profile with an identical estimate.
     cache.moduleBits = bits;
@@ -1291,13 +1119,173 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
     return true;
 }
 
+const char* guardFailure(const GuardEvidence& g, int nd);
+
+// Grid-tracked digit decode (decodeImpl's grid retry only). The bar-anchored
+// decode above pins digit d's window to bar sIdx+1+4d, so one bar lost to
+// blur (two thin bars merged) shifts every later window and the symbol never
+// closes its checksum (shelf 0452-1: 35 of 39 bars found on its best lines,
+// no template read on any line; a commercial scanner reads it). Here each
+// window is placed one digit pitch (12 modules) after the previous window's
+// best match, with +/-0.5 module of slack, so the bars only seed the Start.
+// The bar-spacing module estimate is quantised (3.00 for a true 2.85), and
+// its error compounds over the digits, so kGridScales retries the pitch.
+// Each hypothesis must pass the checksum, the grid residual, the score floor
+// and its own Start/Stop/quiet-zone guards on this scanline (stricter than
+// voteScanlines, which only needs each guard on one agreeing line); the
+// best-scoring survivor is this scanline's candidate.
+// Gates (shelf set, every crop at 0/+-6 degrees and every photo, grid forced
+// on all 11.8k ROIs, MOD10 at open lengths): true scanline reads score >=0.52
+// (1st percentile; median 0.82) with every digit >=0.50 (5th percentile);
+// chance strings that pass the checksum and guards score 0.65 median. With
+// score >=0.7 and every digit >=0.6, the ROI vote kept all 306 true items and
+// left 3 wrong ROI winners, all one by-chance prefix (handled by the prefix
+// rule below). Dropping sigma 0.95 and the 0.91/0.97/1.03/1.09 pitches (3.5x
+// less work) kept 300 items, every grid-only read among them, and 0 wrong;
+// with the early track exit below, barcode-free clutter costs 8.1ms mean
+// against 8.0 without the grid (3430 aim views, desktop).
+constexpr float kGridScales[] = {0.94f, 1.0f, 1.06f};
+constexpr int kGridSigmas = 2;             // kSigmaMul[0..1]
+constexpr float kGridMinDigitCorr = 0.4f;  // tracking stops below this
+constexpr float kGridMinReadCorr = 0.6f;   // weakest digit of a read
+constexpr float kGridMinScore = 0.7f;      // mean digit correlation of a read
+void decodeByDigitGrid(const float* p, int n, int nVerify, int nHead, const Bar* bars, int nb,
+                       float module, std::vector<Candidate>& cands) {
+    if (module < 0.5f) return;
+    Candidate best{{}, ChecksumPolicy::NONE, -1e9f, 0, {}};
+    for (float scale : kGridScales) {
+        const float mod = module * scale;
+        for (int sgi = 0; sgi < kGridSigmas; ++sgi) {
+            float tmpl[10][96];
+            const int len = buildDigitTemplates(mod, kSigmaMul[sgi] * mod, tmpl);
+            // Best digit template of the window starting within +/-0.5
+            // module of pos (0.25-module steps).
+            auto bestDigitNear = [&](float pos, int& bestDigit, float& bestCorr, float& bestPos) {
+                for (int j = -2; j <= 2; ++j) {
+                    const float s = pos + j * 0.25f * mod;
+                    const int i0 = (int)std::floor(s + 0.5f);
+                    if (i0 < 0 || i0 + len > n) continue;
+                    float seg[96], m = 0;
+                    for (int i = 0; i < len; ++i) { seg[i] = p[i0 + i]; m += seg[i]; }
+                    m /= len;
+                    float v = 0;
+                    for (int i = 0; i < len; ++i) { seg[i] -= m; v += seg[i] * seg[i]; }
+                    v = sqrtf(v);
+                    if (v < 1e-6f) continue;
+                    for (int dg = 0; dg < 10; ++dg) {
+                        float c = 0;
+                        for (int i = 0; i < len; ++i) c += seg[i] * tmpl[dg][i];
+                        c /= v;
+                        if (c > bestCorr) { bestCorr = c; bestDigit = dg; bestPos = s; }
+                    }
+                }
+            };
+            for (int sIdx = 0; sIdx < nb; ++sIdx) {
+                // Start prefilters of decodeByDigitTemplates: a wide bar after
+                // at least 7 modules of quiet.
+                if (bars[sIdx].width < 1.2f * module) continue;
+                if (sIdx > 0 && bars[sIdx].center - bars[sIdx - 1].center < 7.0f * module) continue;
+                if (bars[sIdx].center + 1.0f * mod + kMinDigits * 12 * mod > n + 0.5f * mod) break;
+                // Start "110": the first digit begins 2 modules after the
+                // centre of the 2-module Start bar, or 1 module when blur
+                // merged the Start bar with the first digit's bar (0452-1:
+                // centre found 1.75 modules late on 3 of 10 lines).
+                for (int anchor = 2; anchor >= 1; --anchor) {
+                    // Track up to one window past the longest symbol: the
+                    // window after a read's last digit tells a symbol end
+                    // (Stop + quiet zone) from a prefix.
+                    char dig[kMaxDigits + 1];
+                    float corr[kMaxDigits + 1], win[kMaxDigits + 1];
+                    int nt = 0;
+                    float pos = bars[sIdx].center + anchor * mod;
+                    for (; nt <= kMaxDigits; ++nt) {
+                        float bestCorr = -2.0f, bestPos = 0;
+                        int bestDigit = -1;
+                        bestDigitNear(pos, bestDigit, bestCorr, bestPos);
+                        if (bestDigit < 0) break;
+                        // Every read spans the first kMinDigits windows and
+                        // needs each digit >= kGridMinReadCorr: a weaker one
+                        // there leaves this track nothing to read (clutter).
+                        if (nt < kMinDigits && bestCorr < kGridMinReadCorr) { nt = 0; break; }
+                        dig[nt] = (char)('0' + bestDigit);
+                        corr[nt] = bestCorr;
+                        win[nt] = bestPos;
+                        pos = bestPos + 12 * mod;
+                        if (bestCorr < kGridMinDigitCorr) { ++nt; break; }
+                    }
+                    // Digits usable for reads: the leading run above the floor.
+                    int nUse = 0;
+                    while (nUse < nt && nUse < kMaxDigits && corr[nUse] >= kGridMinDigitCorr) ++nUse;
+                    // Every physical length of this track (any scheme, not
+                    // just the caller's lengths): its checksum strength and
+                    // whether it closes as a symbol (grid residual and its
+                    // own Start/Stop/quiet-zone guards).
+                    int strength[kMaxDigits + 1] = {0};
+                    bool closes[kMaxDigits + 1] = {false};
+                    GuardEvidence guards[kMaxDigits + 1];
+                    for (int nd = kMinDigits; nd <= nUse; ++nd) {
+                        strength[nd] = checksumStrength(std::string(dig, nd));
+                        if (strength[nd] == 0) continue;
+                        if (maxDigitGridResidual(win, nd) > kMaxDigitGridResidual * mod) continue;
+                        guards[nd] = guardEvidence(p, n, nVerify, nHead, win[0],
+                                                   win[nd - 1] + 12 * mod, mod);
+                        closes[nd] = guardFailure(guards[nd], nd) == nullptr;
+                    }
+                    // A read is a prefix when the track runs on to a longer
+                    // valid string with a stronger check (an 8-digit MOD10
+                    // prefix of a 9-digit MOD1010 code always validates) or
+                    // with an equal check that closes as a symbol itself
+                    // (0475-1: 01742279 of 017422791 is MOD1010-valid by
+                    // 1-in-10 chance, and its 9th digit passed as quiet zone).
+                    auto isPrefix = [&](int nd) {
+                        for (int m = nd + 1; m <= nUse; ++m)
+                            if (strength[m] > strength[nd] ||
+                                (strength[m] == strength[nd] && closes[m]))
+                                return true;
+                        return false;
+                    };
+                    float total = 0, minCorr = 2.0f;
+                    for (int nd = 1; nd <= nUse; ++nd) {
+                        total += corr[nd - 1];
+                        minCorr = std::min(minCorr, corr[nd - 1]);
+                        if (nd < kMinDigits || !lengthAllowed(nd) || strength[nd] == 0) continue;
+                        const std::string digits(dig, nd);
+                        ChecksumPolicy pol;
+                        if (validateChecksum(digits, pol).empty()) continue;
+                        if (maxDigitGridResidual(win, nd) > kMaxDigitGridResidual * mod) continue;
+                        const float score = total / nd - 0.03f * sgi;
+                        const GuardEvidence& g = guards[nd];
+                        const char* why = guardFailure(g, nd);
+                        if (!why && isPrefix(nd)) why = "prefix";
+                        if (!why && score < kGridMinScore) why = "score";
+                        if (!why && minCorr < kGridMinReadCorr) why = "weak digit";
+                        if (g_debug) {
+                            int pd = -1;
+                            float prevCorr = -2.0f, pp = 0;
+                            bestDigitNear(win[0] - 12 * mod, pd, prevCorr, pp);
+                            printf("[dbg] grid %s score=%.3f min=%.2f next=%.2f prev=%.2f lead=%.2f mod=%.2f sg=%d a=%d "
+                                   "x=%.1f start=%.2f stop=%.2f quiet=%.2f%s%s\n",
+                                   digits.c_str(), score, minCorr, nd < nt ? corr[nd] : -2.0f, prevCorr,
+                                   g.lead, mod, sgi, anchor, win[0], g.start, g.stop, g.quiet,
+                                   why ? " reject " : "", why ? why : "");
+                        }
+                        if (why || score <= best.score) continue;
+                        best = {digits, pol, score, mod, g};
+                    }
+                }
+            }
+        }
+    }
+    if (!best.digits.empty()) cands.push_back(best);
+}
+
 // Decodes p[0, n); p[n, nVerify) and p[-nHead, 0) are the verification tail
-// and head, read only by guardEvidence().
+// and head, read only by guardEvidence(). grid selects decodeByDigitGrid.
 void decodeProfile(const float* p, int n, int nVerify, int nHead,
-                   std::vector<Candidate>& cands, float* moduleOut = nullptr) {
+                   std::vector<Candidate>& cands, float* moduleOut = nullptr,
+                   bool grid = false) {
     Bar bars[kMaxBars];
-    // Use sensitive bar detection in relaxed mode (for faint images).
-    int nb = findBars(p, n, bars, kMaxBars, g_relaxedBars);
+    int nb = findBars(p, n, bars, kMaxBars);
     if (g_debug) printf("[dbg] bars found raw: %d\n", nb);
     float module = 0;
     nb = filterBars(bars, nb, module);
@@ -1306,6 +1294,10 @@ void decodeProfile(const float* p, int n, int nVerify, int nHead,
         if (*moduleOut <= 0 || module < *moduleOut) *moduleOut = module;
     }
     if (nb < 1 + 4 * kMinDigits + 2) return;
+    if (grid) {
+        decodeByDigitGrid(p, n, nVerify, nHead, bars, nb, module, cands);
+        return;
+    }
 
     // Primary: digit-template correlation.
     std::string digits;
@@ -1359,7 +1351,7 @@ const char* guardFailure(const GuardEvidence& g, int nd) {
 }
 
 // Decodes every scanline profile of one ROI and votes on (digits, policy).
-RoiVote voteScanlines(const RoiScanlines& scan) {
+RoiVote voteScanlines(const RoiScanlines& scan, bool grid = false) {
     struct Votes { int n = 0; float score = 0; float mod = 0; GuardEvidence guard; };
     std::map<std::pair<std::string, ChecksumPolicy>, Votes> votes;
     RoiVote out;
@@ -1367,7 +1359,7 @@ RoiVote voteScanlines(const RoiScanlines& scan) {
         std::vector<Candidate> cands;
         float profModule = 0;
         decodeProfile(pr.data() + scan.head, scan.n, (int)pr.size() - scan.head, scan.head, cands,
-                      &profModule);
+                      &profModule, grid);
         if (profModule > 0.5f &&
             (out.minModule <= 0 || profModule < out.minModule))
             out.minModule = profModule;
@@ -1505,8 +1497,9 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
     // (avoids text false positives outvoting the true barcode).
     float minModuleSeen = 0;  // for the small-module upscale trigger below
     bool sawCandidate = false;  // any checksum-valid scanline read, any ROI
-    // Scanlines of failed small-module ROIs, moved here for the 1D retry.
-    std::vector<RoiScanlines> retryScans;
+    // Scanlines of every failed ROI, for the 1D and grid retries.
+    std::vector<RoiScanlines> failedScans;
+    std::vector<char> smallModule1D;  // per failed ROI: eligible for the 1D retry
     for (int ri = 0; ri < nrois; ++ri) {
         const Rect& roi = rois[ri];
         if (g_debug) printf("[dbg] trying ROI %d x=[%d,%d] y=[%d,%d]\n",
@@ -1552,8 +1545,10 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
         // The 1D retry runs at the top level only: inside the 2D recursion it
         // compounds to 4x interpolation and bred phantoms (shelf set: an
         // unreadable tag's 022000046) at the cost of one far read.
-        if (allowUpscale && v.minModule > 0.5f && v.minModule < kProfileRetryMaxModule)
-            retryScans.push_back(std::move(scan));
+        if (allowUpscale) {
+            smallModule1D.push_back(v.minModule > 0.5f && v.minModule < kProfileRetryMaxModule);
+            failedScans.push_back(std::move(scan));
+        }
         if (g_debug) printf("[dbg] ROI %d: no decode\n", ri);
     }
     // Every ROI failed. Small-module retry, 1D: re-vote each small-module
@@ -1567,7 +1562,9 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
     // Shelf set, MOD1010 + 9 digits (with the length skip and policy
     // evidence above): near 118 -> 124, far 88 -> 126, still 116 -> 123 of
     // 141, zero new wrong reads; barcode-free clutter mean 1.5 -> 2.5ms.
-    for (auto& scan : retryScans) {
+    for (size_t si = 0; si < failedScans.size(); ++si) {
+        if (!smallModule1D[si]) continue;
+        RoiScanlines scan = failedScans[si];
         for (auto& pr : scan.lines) upsampleProfile2x(pr, scan.head, scan.n);
         scan.n *= 2;
         scan.head *= 2;
@@ -1646,6 +1643,25 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
                     return res;
                 }
             }
+        }
+    }
+    // Still nothing. Grid retry: re-vote each failed ROI's own 1x scanlines with the
+    // grid-tracked decode (decodeByDigitGrid), for symbols whose bars the
+    // detector merged. Same vote and guard gates, ROI order, first winner.
+    // Top level only (failedScans is filled only there), after the skew
+    // retry: ahead of it, a first ungated grid cost two +6 degree shelf crops
+    // at open lengths that the skew retry reads (0475-1 read as its 8-digit
+    // prefix; 0465-1 lost to a chance string).
+    for (const auto& scan : failedScans) {
+        const RoiVote v = voteScanlines(scan, /*grid=*/true);
+        if (v.votes > 0) {
+            res.ok = true;
+            res.digits = v.best.first;
+            res.policy = v.best.second;
+            res.votes = v.votes;
+            res.leadingQuiet = v.guard.lead;
+            if (g_debug) printf("[dbg] grid retry succeeded: %s\n", res.digits.c_str());
+            return res;
         }
     }
     // Still nothing. 2D far-field retry: modules below ~2px (distant shelf

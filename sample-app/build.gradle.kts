@@ -12,11 +12,11 @@ android {
         applicationId = "com.barcodescanner.sample"
         // Android 9 (API 28), same as the SDK: nothing used needs newer.
         minSdk = 28
-        // Android 16 (API 36): Play requirement for new apps/updates since Aug 2026.
-        // (compileSdk 37 is compile-only; target stays on the stable level.)
-        targetSdk = 36
+        // Android 17 (API 37), the current stable level; Play has required
+        // API 36+ for new apps and updates since Aug 2026.
+        targetSdk = 37
         versionCode = 1
-        versionName = "1.0"
+        versionName = "1.0.0"
         // Matches the SDK's ABI filters (ARM devices + x86_64 emulators);
         // strips the 32-bit x86 slices prebuilt AARs (zxing-cpp) would
         // otherwise package.

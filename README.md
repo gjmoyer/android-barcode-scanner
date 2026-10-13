@@ -20,8 +20,8 @@ measurement). See
 
 ## Requirements
 
-- Android Studio with **SDK 36+** (compileSdk 37, targetSdk 36)
-- AGP 9.4.1, Kotlin 2.4.20 (built-in — no kotlin-android plugin), Gradle 9.6.0, JDK 17+
+- Android Studio with **SDK 37** (compileSdk 37; sample app targetSdk 37)
+- AGP 9.4.1, Kotlin 2.4.21 (built-in — no kotlin-android plugin), Gradle 9.8.1, JDK 25 for the Gradle daemon (pinned by `gradle/gradle-daemon-jvm.properties`; Gradle downloads it if missing; app bytecode targets Java 17)
 - Android NDK + CMake 3.22.1 (the SDK compiles its own MSI decoder from
   `src/main/cpp/`; zxing-cpp v3.1.1 arrives as a prebuilt Maven Central AAR —
   network fetch happens once via Gradle)

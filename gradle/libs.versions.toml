@@ -2,7 +2,7 @@
 # Latest stable Oct 2026. AGP 9.x has built-in Kotlin: no kotlin-android plugin entry
 # (it conflicts); KGP version overridden via root buildscript classpath instead.
 agp = "9.4.1"
-kotlin = "2.4.20"
+kotlin = "2.4.21"
 coreKtx = "1.19.1"
 lifecycle = "2.11.0"
 activityKtx = "1.13.0"

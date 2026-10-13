@@ -912,6 +912,39 @@ static void tiltSuite() {
     }
 }
 
+// Ink bleed: single-module spaces (between a wide bar and the next bar) inked
+// solid, so the bar detector merges the neighbours and the bar-anchored
+// template decode loses its window alignment for every later digit. The grid
+// retry (decodeByDigitGrid) re-tracks the digit windows by pitch; without it,
+// 8 of these 9 read nothing.
+static void bleedSuite() {
+    printf("--- ink bleed (merged bars, grid retry) ---\n");
+    const struct { const char* full; int m; } tags[] = {{"026416032", 3}, {"029904224", 4}, {"011578333", 5}};
+    const struct { int a, b; } fills[] = {{2, -1}, {9, -1}, {5, 12}};
+    for (auto& t : tags) {
+        const std::string mods = modulesFor(t.full);
+        const int barsW = (int)mods.size() * t.m;
+        const int w = barsW + 60 * t.m, h = 400, top = 220, barH = 110;
+        const int bx0 = (w - barsW) / 2;
+        for (auto& f : fills) {
+            Gray g = renderMsi(t.full, t.m, w, h, top, barH);
+            int k = 0;
+            for (size_t i = 1; i + 1 < mods.size(); ++i) {
+                if (mods[i] != '0' || mods[i - 1] != '1' || mods[i + 1] != '1') continue;
+                if (k == f.a || k == f.b)
+                    for (int x = bx0 + (int)i * t.m; x < bx0 + (int)(i + 1) * t.m; ++x)
+                        for (int y = top; y < top + barH; ++y) g.px[(size_t)y * w + x] = 0;
+                ++k;
+            }
+            boxBlur(g, 1);
+            char nm[64];
+            snprintf(nm, sizeof nm, "bleed %s %dpx space %d%s", t.full, t.m, f.a,
+                     f.b >= 0 ? (std::string("+") + std::to_string(f.b)).c_str() : "");
+            check(nm, g, t.full, nullptr, true);
+        }
+    }
+}
+
 struct ShelfCase {
     const char* file;
     const char* full;  // expected full codeword (payload + checks)
@@ -1129,6 +1162,7 @@ int main(int argc, char** argv) {
     syntheticSuite();
     shelfFormatSuite();
     tiltSuite();
+    bleedSuite();
     shelfSuite(shelfDir);
     frameSuite();
     benchSuite(shelfDir);
