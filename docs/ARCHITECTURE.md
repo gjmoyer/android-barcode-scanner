@@ -11,16 +11,16 @@ Clean-architecture, enterprise-style layering. Dependency rule: **outer layers d
 │ domain/model      Symbology, ScanFrame, DecodedBarcode │  Stable value types
 │ domain/decoder    BarcodeDecoder (strategy),           │  Open/Closed: add engine =>
 │                   DecoderRegistry, DecodeOutcome       │  implement interface + register
-│ domain/pipeline   PreprocessingPipeline,               │  Pure, testable transforms
-│                   Contrast/Downscale/Orientation       │
 ├────────────────────────────────────────────────────────┤
-│ data/mlkit        MLKitDecoder (+mapper, region localizer) │  Primary engine + ROI isolation
+│ data/frame        LumaFrame, NativeFrame, buffer pool  │  The one prepared frame per scan
+│                   (crop/gray/stretch/rotate, native)   │
+├────────────────────────────────────────────────────────┤
+│ data/mlkit        MLKitDecoder (+mapper)               │  Primary engine
 │ data/zxingcpp     ZXingCppDecoder (prebuilt AAR)       │  DataBar engine (native)
 │ data/msi          MsiNativeDecoder (JNI clean-room     │  Custom MSI engine
 │                   C++ engine) + MsiVoteGate,           │
-│                   MsiRegionAssistDecoder,              │
-│                   MsiRegionCropper, table/checksum     │
-│ data/fusion       FusedDecoder                         │  Orchestrates all engines
+│                   table and checksum validator         │
+│ data/fusion       LumaFusion                           │  Orchestrates all engines
 ├────────────────────────────────────────────────────────┤
 │ camera/           CameraScanManager (CameraX)          │  Frames + camera state/controls
 │ di/               ScannerContainer (manual DI)         │  Wiring; no Hilt imposed
@@ -31,24 +31,31 @@ Clean-architecture, enterprise-style layering. Dependency rule: **outer layers d
 
 ```
 CameraX / Bitmap
-  → ScanFrame(bitmap, sensorRotation)
-  → PreprocessingPipeline stage 0: DownscaleTransform (≤1280 long edge)
-  → ContrastNormalizationTransform
-  → OrientationCandidates.expand (upright-first, sensor-compensated, up to 4 views;
-  lazy: rotations materialize only until a confident hit stops the scan)
-  → per orientation in REGISTRY order (MLKit → MSI full-frame → MsiRoi →
-  ZXingCpp): engines with internal rotation (ML Kit hint, zxing TryRotate, MSI
-  ROI deskew) get the primary view only; the scanline MSI decoder receives
-  every candidate. No last-resort engines are registered in the default
-  container (the OCR text fallback was retired), but the `LastResortDecoder`
-  seam remains: any registered ones run once per frame, only after all bar
-  engines miss, inside a reserved slice of the frame budget
-  → confident hit (≥0.95) stops scan; else pool/dedup and best-confidence wins
-  → per-engine timings + final result go to logcat under `FusedDecoder`
-  (always emitted at DEBUG; filter with `adb logcat -s FusedDecoder`)
-  → live path: per-key duplicate suppression → ScanResult.Success
+  → ScanFrame(bitmap, sensorRotation)                     # one-shot
+  → live:  CameraScanManager crops the aim box out of the camera Y plane
+    still: NativeFrame.prepareStill (gray, box-downscale >16 MP, rotate upright)
+  → ONE upright, even-sized LumaFrame (NV21: luma + neutral chroma), contrast-
+  stretched for live aim-box crops only — a still is never stretched up front
+  → LumaFusion: engines in REGISTRY order (MLKit → MsiNative → ZXingCpp) read
+  that one buffer in place; nothing converts, crops, rotates or copies pixels,
+  and no engine ever sees a second variant of the frame
+  → whole frame under one decodeTimeoutMillis budget, best-so-far on expiry;
+  hits below minConfidence or outside the enabled set are dropped
+  → pool deduped on (value, symbology) keeping max confidence; a hit at
+  CONFIDENT_THRESHOLD (0.95) stops the frame
+  → per-engine timings + final result go to logcat under `LumaFusion`
+  (always emitted at DEBUG; filter with `adb logcat -s LumaFusion`)
+  → live path: MSI bar stability gate (2 consecutive sightings) → per-key
+  duplicate suppression → ScanResult.Success
   → one-shot path: pure return, never touches the results Flow
 ```
+
+Orientation is never expanded in Kotlin. Frames are prepared upright natively,
+ML Kit and zxing resolve rotation internally, and MSI tries orientations inside
+the native decoder (`LumaFrame.maxOrientations`: 2 for live aim-box frames,
+`ScannerConfig.maxOrientationsTried` for stills). There is no last-resort engine
+stage: every registered engine runs in priority order on the one frame, and the
+OCR text fallback was retired.
 
 ## Extension recipes
 
@@ -58,17 +65,15 @@ No pipeline change.
 
 **Add a new engine** (e.g. native MSI v2, Cognex-style 2D):
 1. Implement `BarcodeDecoder` (thread-safe, `NotFound` not exception on miss).
-2. `registry.register(MyDecoder())` in `ScannerContainer` (or at runtime from the host).
-3. Done — fusion iterates `registry.snapshot()` order; no fusion edit needed.
-
-**Add a new engine** (e.g. Cognex-style 2D):
-1. Implement `BarcodeDecoder` (thread-safe, `NotFound` not exception on miss).
-2. `registry.register(MyDecoder())` in `ScannerContainer` (or at runtime from the host).
-3. Done — fusion iterates `registry.snapshot()` order; no fusion edit needed.
+2. In `ScannerContainer`, add the instance to [registry] (so `close()` releases
+   it) *and* to [lumaFusion] as a `LumaEngine` with its luma entry point, in
+   priority order — fusion iterates that list, not the registry.
+3. Done. No other pipeline change.
 
 **Tune speed vs recall**:
-- `ScannerConfig(maxOrientationsTried=N)` caps orientation views (default 4, lazy —
-  unneeded rotations never materialize thanks to confident early-exit).
+- `ScannerConfig(maxOrientationsTried=N)` caps the MSI orientations tried natively
+  on stills (1..4; live aim-box frames always try 2). A hit at the confident
+  threshold still ends the frame early.
 - `zxingTryHarder(false)` opts the native sweep out of thorough mode. The MSI
   engine is always thorough: multi-ROI scanline voting, digit-template
   correlation, and small-module 1D/2D 2x retries.
@@ -107,22 +112,23 @@ Grayscale frame (row-major bytes via JNI)
     strip check digits, reject degenerate (single-digit) payloads
 ```
 
-- **Full-frame MSI runs before ROI MSI** (measured more accurate: intact quiet
-  zones beat tight-crop edge artifacts; easy frames early-exit before
-  localization costs). `MsiRegionAssistDecoder` (ML Kit isolation → pad +
-  deskew crop → shared native decoder) stays the backup for tilts beyond
-  the native skew retry's ±15°.
-- **Stills retry contrast-stretched**: `decodeFrame` tries every orientation
-  plain, then (`FrameOptions.stretchRetry`, stills only) once more through
-  the 2%/98% stretch. Stills are never stretched up front: a whole-photo
+- **One frame per scan, no ROI pass.** The live frame is already the aim-box
+  crop; a still is read whole, and the MSI band search skips the top quarter
+  (`LumaFrame.scanTopFraction`). The retired ML Kit isolation assist left no
+  second-chance ROI path for tilts beyond the native skew retry's ±15°,
+  so widen the aim box instead.
+- **Stills retry contrast-stretched**: `decodeFrame` sweeps every orientation
+  plain, then (`FrameOptions.stretchRetry`, stills only) once more through the
+  2%/98% stretch. Stills are never stretched up front: a whole-photo
   stretch clips bars that already read. Live aim-box crops are stretched
-  once in `prepareRegion` and never retry.
-- **One decoder instance per path**, each owning a synchronized `MsiVoteGate`,
-  so ROI misses can never reset the full-frame consecutive count.
+  once in the native prepare and never retry.
+- **The MSI decoder owns a synchronized `MsiVoteGate`**, so scanline agreement
+  is counted per decoder instance. Live MSI bar reads additionally pass the
+  facade's 2-sighting stability gate (`DefaultBarcodeScanner.confirmLiveBarHit`).
 - **Native library is optional at runtime**: `MsiNativeDecoder.nativeAvailable`
   degrades to `NotFound` when the `.so` is absent (unsupported ABI, JVM
-  tests). Packaging is ARM-only (`armeabi-v7a`, `arm64-v8a`) in both the SDK
-  and the sample app.
+  tests). Packaging is `armeabi-v7a`, `arm64-v8a` and `x86_64` in both the SDK
+  and the sample app; 32-bit x86 is the one unpackaged ABI.
 
 ## Decisions (ADRs, condensed)
 
@@ -144,9 +150,11 @@ Grayscale frame (row-major bytes via JNI)
   validator re-enforces it on native-reported digits. Verified by the host
   harness (`tools/msi-harness`, host-compiled, no device needed), JVM
   contract tests, and on-device sweeps (`DeviceMsiTest`).
-- **Fusion owns orientation**, engines own inversion/binarization: avoids N×M retry explosion.
-  Upside-down MSI resolves via the 180°-relative candidate and is flagged
-  through `DecodedBarcode.isUpsideDown` (same convention as ML Kit/zxing-cpp).
+- **Engines own orientation**, with no Kotlin orientation expansion to avoid an
+  N×M retry explosion: ML Kit and zxing rotate internally and MSI tries
+  orientations natively. Upside-down MSI resolves inside the native decoder
+  (confirmed against the opposite view) and is flagged through
+  `DecodedBarcode.isUpsideDown` (same convention as ML Kit/zxing-cpp).
 - **Domain references Android graphics types** (Bitmap/Rect) as an accepted v1 tradeoff: an Android
   library module pays less for Robolectric than for a FrameImage abstraction layer; revisit if a
   pure-JVM artifact is ever needed.

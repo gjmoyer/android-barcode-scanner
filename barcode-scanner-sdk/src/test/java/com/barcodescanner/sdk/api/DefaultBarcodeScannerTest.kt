@@ -35,7 +35,7 @@ class DefaultBarcodeScannerTest {
         ),
     )
 
-    private fun msiBar(value: String, engine: String = "MsiPlessey") = ScanResult.Success(
+    private fun msiBar(value: String, engine: String = "MsiNative") = ScanResult.Success(
         DecodedBarcode(
             rawValue = value,
             symbology = Symbology.MSI_PLESSEY,
@@ -44,12 +44,12 @@ class DefaultBarcodeScannerTest {
         ),
     )
 
-    private fun msiOcr(value: String) = ScanResult.Success(
+    private fun lowConfidenceMsi(value: String) = ScanResult.Success(
         DecodedBarcode(
             rawValue = value,
             symbology = Symbology.MSI_PLESSEY,
             confidence = 0.5f,
-            engineName = "MsiOcr",
+            engineName = "MsiNative",
         ),
     )
 
@@ -140,14 +140,14 @@ class DefaultBarcodeScannerTest {
     }
 
     @Test
-    fun stability_passesThroughOcrAndOtherSymbologies() {        val scanner = scanner(suppressionMillis = 0)
+    fun stability_passesThroughLowConfidenceAndOtherSymbologies() {        val scanner = scanner(suppressionMillis = 0)
         try {
-            // OCR text (0.5) and non-MSI symbologies emit on first sighting.
-            assertEquals(true, scanner.confirmLiveBarHit(msiOcr("0168971")))
+            // A low-confidence read (0.5) and non-MSI symbologies emit on first sighting.
+            assertEquals(true, scanner.confirmLiveBarHit(lowConfidenceMsi("0168971")))
             assertEquals(true, scanner.confirmLiveBarHit(success("QR")))
-            // Both ROI and full-frame MSI lanes are bar reads: gated alike.
-            assertEquals(false, scanner.confirmLiveBarHit(msiBar("X", engine = "MsiRoi")))
-            assertEquals(true, scanner.confirmLiveBarHit(msiBar("X", engine = "MsiRoi")))
+            // Every MSI bar read is gated alike.
+            assertEquals(false, scanner.confirmLiveBarHit(msiBar("X", engine = "MsiNative")))
+            assertEquals(true, scanner.confirmLiveBarHit(msiBar("X", engine = "MsiNative")))
         } finally {
             scanner.close()
         }
