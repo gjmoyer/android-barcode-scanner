@@ -9,8 +9,8 @@ inverted MSI remains out of scope.)
 |---|---|
 | EAN-8/13, UPC-A/E, Code 39/93/128, ITF, Codabar, QR, Aztec, PDF-417, Data Matrix | ML Kit (primary, fast) |
 | GS1 DataBar (Omni / Stacked / Limited / Expanded / Expanded Stacked) | zxing-cpp v3.1.1 prebuilt AAR (`io.github.zxing-cpp:android`) |
-| MSI Plessey (Mod10 / Mod11 / Mod1010 / Mod1110) | Custom native C++ scanline decoder (`src/main/cpp/`, via `MsiNativeDecoder`); full-frame `MsiNative` first, ML Kit isolation + deskew (`MsiRoi`) as the tilted-label backup |
-| Rotated / upside-down / blurred | Preprocessing + orientation fusion + signal-template correlation |
+| MSI Plessey (Mod10 / Mod11 / Mod1010 / Mod1110) | Custom native C++ scanline decoder (`src/main/cpp/`, via `MsiNativeDecoder`); one native-prepared frame per scan, with an in-decoder skew retry (±15°) for tilted labels |
+| Rotated / upside-down / blurred | Native frame prepare (rotate upright) + per-engine orientation + signal-template correlation |
 
 Why this exists: neither ML Kit nor zxing-cpp ships an MSI Plessey reader, so MSI is
 decoded by a custom engine (clean-room C++ signal-template correlation — no
@@ -120,18 +120,18 @@ val config = ScannerConfigBuilder()
     .msiChecksumPolicy(MsiChecksumPolicy.MOD_10)
     .msiMinPayloadDigits(6)                  // reject short lucky MSI parses (shelf SKUs)
     .msiSymbolLength(9)                      // grocery shelf tags: 7-digit item + 2 checks
-    .decodeTimeoutMillis(1500)               // whole frame budget (preprocessing + orientations + engines)
+    .decodeTimeoutMillis(1500)               // whole-frame budget (all engines under one deadline)
     .duplicateSuppressionMillis(1500)        // live-mode repeat suppression
     .minConfidence(0.5f)
     .build()
 ```
 
-- There is no fast/degraded mode: the pipeline is always thorough (4 lazy
-  orientations, multi-ROI MSI scanline voting with template correlation,
-  zxing `TryHarder`) with cheap-first ordering + confident early-exit, so easy
-  frames stay fast. `maxOrientationsTried` (default 4) only bounds the view count for
-  fixed-geometry hosts; `zxingTryHarder(false)` opts the native sweep out of
-  thorough mode.
+- There is no fast/degraded mode: the pipeline is always thorough (multi-ROI MSI
+  scanline voting with template correlation, zxing `TryHarder`) with
+  cheap-first ordering + confident early-exit, so easy frames stay fast.
+  `maxOrientationsTried` (default 4) bounds the MSI orientations tried natively
+  on stills (live frames always try 2); `zxingTryHarder(false)` opts the native
+  sweep out of thorough mode.
 - MSI results are re-validated strictly under `msiChecksumPolicy` and short or
   degenerate reads are withheld — a wrong policy yields `NotFound`, never a
   misread presented as valid. The policy is also pushed into the native
@@ -156,11 +156,11 @@ barcode-scanner-sdk/          # the reusable library (only depend on this)
     api/                      # public surface: facade, factory, config, result
     domain/model/             # Symbology, ScannerConfig, ScanFrame, DecodedBarcode
     domain/decoder/           # BarcodeDecoder strategy + DecoderRegistry
-    domain/pipeline/          # downscale/contrast/orientation preprocessing
+    data/frame/               # the one native-prepared LumaFrame per scan
     data/mlkit/               # primary engine
     data/zxingcpp/            # DataBar engine (prebuilt zxing-cpp AAR)
-    data/msi/                 # custom MSI engine (native decoder + ROI assist + gates)
-    data/fusion/              # multi-engine, multi-orientation voter
+    data/msi/                 # custom MSI engine (native decoder, vote gate, tables)
+    data/fusion/              # one LumaFrame read in place by every engine
     camera/                   # CameraX frame producer (single-flight, conflated)
     di/                       # manual DI (internal)
   src/test/                   # unit tests (Robolectric + JUnit)
@@ -170,18 +170,20 @@ docs/                         # ARCHITECTURE.md, MSI_PLESSEY_RESEARCH.md
 
 ## Robustness recipe (blur / rotation / upside-down)
 
-1. **Bounded scale + contrast normalization** per frame (downscale to ≤1280,
-   histogram stretch).
-2. **Orientation expansion** — upright first (sensor-compensated), then
-   upside-down, then sideways, materialized lazily so an early hit never
-   allocates unneeded rotations.
+1. **Native frame prepare** — the aim box (live) or the whole still is cropped,
+   gray-converted, contrast-stretched (live only) and rotated upright in one
+   native pass; stills above 16 MP are box-downscaled by the smallest integer
+   factor that fits. No Kotlin pixel work at all.
+2. **Per-engine orientation** — frames arrive upright; ML Kit and zxing resolve
+   rotation internally and MSI tries orientations natively (2 live, up to
+   `maxOrientationsTried` for stills).
 3. **Per-engine retries** — zxing `TryRotate`/`TryInvert`/`TryHarder`; MSI
     multi-ROI scanline voting with blurred digit-template correlation
     (shape matching, no binarization threshold), checksum gating, and
     small-module 1D/2D 2x retries.
-4. **Fusion voting** — hits pool across orientations (deduped on
-    value+symbology, max confidence kept); a hit at confidence ≥0.95 stops
-    the scan immediately. MSI hits additionally require ≥2 agreeing
+4. **Fusion voting** — every engine reads the same frame; hits are deduped on
+    value+symbology (max confidence kept), and a hit at confidence ≥0.95
+    stops the scan immediately. MSI hits additionally require ≥2 agreeing
     scanlines, the configured checksum policy, and a non-degenerate payload,
     and emit at confidence 1.0.
 
@@ -201,33 +203,25 @@ on-device full chain, Pixel 6a / emulator):
 Live-mode recipe (already wired, no host code needed):
 - Fusion tries engines in registration order with first-confident-wins: a pointed
   QR/EAN/Code128 resolves on ML Kit alone (~1 frame, no fallback cost).
-- One-shot and stale live frames run the full sweep: full-frame MSI first
-  (intact quiet zones win ties, and a confident hit skips localization work),
-  then ROI crops for tilted labels the scanlines cannot read, then the native
-  second opinions. Fresh live frames while results are recent skip the
-  expensive sweep (ML Kit isolation + native second opinion only, ~200ms for
-  an empty frame) and the next camera frame arrives — labels ML Kit cannot
-  isolate still resolve once aiming persists and the sweep re-enables.
-- Orientation work is routed per engine: ML Kit (rotation hint), zxing-cpp
-  (native `TryRotate`) and `MsiRoi` (deskew) resolve orientation themselves and
-  get the primary view once — physically rotated copies are never duplicate
-  work. Full-frame MSI still receives every candidate on sweep frames.
-- Orientation bitmaps materialize lazily — an upright hit never allocates rotations.
+- Every live frame and every still run the same engines on the one
+  native-prepared frame — there is no separate ROI sweep and no ML Kit
+  isolation pass. Live frames are already the aim-box crop; stills are read whole.
+- Orientation work is per engine: ML Kit and zxing-cpp resolve rotation
+  internally and MSI tries orientations natively, so no engine ever sees a
+  second, physically rotated copy of the frame.
 - `ZXingCppDecoder` runs `TryHarder` unless `ScannerConfig.zxingTryHarder(false)`
   opts out; rotation/inversion retries stay on either way.
-- `CameraScanManager` converts YUV→ARGB directly (no JPEG round-trip, so narrow
-  bars survive) and is single-flight (`STRATEGY_KEEP_ONLY_LATEST` + decode gate):
+- `CameraScanManager` crops, contrast-stretches and rotates the camera Y plane
+  natively (no JPEG round-trip and no Kotlin pixel loop, so narrow bars survive)
+  and is single-flight (`STRATEGY_KEEP_ONLY_LATEST` + decode gate):
   analysis runs at 1/latency fps instead of queueing — a slow frame delays the next
   attempt, never piles up work.
 - Per-frame worst case is capped by `ScannerConfig.decodeTimeoutMillis` (default
-  1500 ms; preprocessing + orientations + engines all run under it). Lower it
-  (~500 ms) if your live UI must never wait on a pathological frame.
-  `LastResortDecoder` is an extension seam (no last-resort engines ship by
-  default): any registered ones run at most once per frame, only after every
-  bar engine missed, inside a reserved slice of the frame budget.
+  1500 ms; every engine runs under it). Lower it (~500 ms) if your live UI must
+  never wait on a pathological frame.
 - Why a budget at all: the camera gate is single-flight, so a pathological frame
   that takes 8 s freezes live scanning for 8 s. "Exhaust every option" is the
-  intent — the sweep engines do all run on one-shot and stale frames — but
+  intent — the engines all run on one-shot and stale frames — but
   cheap-first ordering plus a deadline keeps point-and-scan usable.
 - `tools/msi-harness` pins the native contract on any dev machine (no device
   needed): spec-rendered vectors for all four checksum policies, degradation
@@ -244,10 +238,11 @@ only — accepted by the Kotlin validator but never emitted by the native
 engine, which tries only the four real schemes).
 Encoding table + guards verified against Wikipedia "MSI Barcode" + Morovia KB10637
 (see [`docs/MSI_PLESSEY_RESEARCH.md`](docs/MSI_PLESSEY_RESEARCH.md)); NCR Mod11
-(weights 2..9) and white-on-black MSI are documented limitations. Sideways views
-resolve through physical orientation candidates; upside-down reads are flagged
-via `DecodedBarcode.isUpsideDown`. Off-cardinal tilts (15°/30°/…) decode through
-the ML Kit ROI path (`MsiRoi`: isolate + deskew, then the same native decoder).
+(weights 2..9) and white-on-black MSI are documented limitations. Upside-down
+reads are flagged via `DecodedBarcode.isUpsideDown`. Off-cardinal tilts up to
+±15° decode through the native skew retry (projection-search deskew inside
+the decoder); steeper tilts need a straighter aim, since the ML Kit ROI
+assist was retired.
 
 **Retired: SKU text fallback.** An OCR fallback (`MsiOcr`, bundled ML Kit text
 recognition) used to read the printed SKU when bars failed. It was removed —
