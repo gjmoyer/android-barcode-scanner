@@ -40,11 +40,8 @@ data class ScannerConfig(
      */
     val msiMinPayloadDigits: Int,
     /**
-     * OCR text fallback (MsiOcr). False (default): emit the best plain 7+ digit
-     * run exactly as printed at confidence 0.5. Shelf labels print the SKU
-     * WITHOUT the check digit(s) (those live in the barcode), so validation is
-     * usually impossible; set true only when printed numbers carry their check.
-     * Bars stay strictly checksum-gated either way.
+     * Retired, no effect: gated the OCR text fallback (`MsiOcr`), which is gone.
+     * Kept for source compatibility, like `debugOcrFrameDump`; no code reads it.
      */
     val msiOcrRequireChecksum: Boolean,
     /** Minimum confidence to emit a result. NOTE: >0.9 disables ZXing, >0.95 disables ML Kit. */
@@ -56,8 +53,7 @@ data class ScannerConfig(
      * under [msiChecksumPolicy] (unvalidated windows never emit), but `rawValue`
      * carries the full codeword WITH check digits and `checksumStripped` is
      * false — e.g. double-Mod10 labels read under MOD_10 arrive as SKU+C1 and
-     * the host strips per its own label spec. OCR text reads are always
-     * as-printed either way.
+     * the host strips per its own label spec.
      */
     val msiStripChecksum: Boolean = true,
     /**
@@ -126,7 +122,7 @@ data class ScannerConfig(
         }
         require(minConfidence in 0f..1f) { "minConfidence must be 0..1" }
         // Silent footgun guard: fixed engine confidences are ML Kit 0.95 /
-        // ZXing 0.9 / MSI 1.0 / OCR 0.5-0.7, so a high floor silently disables
+        // ZXing 0.9 / MSI 1.0, so a high floor silently disables
         // engines instead of being "stricter". Warn, don't fail (hosts may
         // intend to isolate MSI at 1.0).
         if (minConfidence > 0.9f) {
@@ -205,6 +201,7 @@ data class ScannerConfig(
         fun msiSymbolLengths(range: IntRange?) = apply { msiSymbolLengths = range }
         /** Emit full MSI codewords with checks (see [ScannerConfig.msiStripChecksum]). */
         fun msiStripChecksum(v: Boolean) = apply { msiStripCheck = v }
+        /** Retired, no effect (see field). */
         fun msiOcrRequireChecksum(v: Boolean) = apply { msiOcrChecksum = v }
         fun minConfidence(v: Float) = apply { minConf = v }
         /** Decouple zxing-cpp TryHarder from the always-thorough default; null is thorough. */

@@ -19,17 +19,13 @@ import android.graphics.Rect
  *   upright frame the engines read: the aim-box crop for live scans, the
  *   upright (downscaled only above 16 MP) still for one-shots.
  * @param cornerPoints Corner points in the same coordinates, if known.
- * @param engineName Which decoder produced this ("MLKit", "ZXingCpp", "MsiPlessey", ...).
+ * @param engineName Which decoder produced this ("MLKit", "ZXingCpp", "MsiNative").
  * @param checksumStripped True if a trailing check digit was validated and removed.
  * @param isUpsideDown True if the barcode was decoded after 180° re-orientation.
- * @param gtin Paired GTIN for OCR shelf-tag reads (`engineName="MsiOcr"`): the
- *   dashed case/pack code printed next to the SKU (e.g. `000-42000-15121`),
- *   normalized to digits-only (e.g. `0004200015121`). Null when no GTIN-like
- *   run was found or the engine is not OCR. Hosts should validate the pair via
- *   record lookup (`sku ↔ gtin` must belong to the same record) — that join is
- *   the checksum the printed SKU lacks. Never set for bar decodes.
- * @param gtinRaw The GTIN exactly as printed (with dashes/slashes), or null.
- *   Prefer [gtin] for lookups; use this for display.
+ * @param gtin Retired, always null: the paired GTIN for the removed OCR
+ *   shelf-tag reads (`engineName="MsiOcr"` — that engine was deleted). Kept
+ *   for source compatibility; no shipped engine sets it.
+ * @param gtinRaw Retired, always null (see [gtin]).
  */
 data class DecodedBarcode(
     val rawValue: String,

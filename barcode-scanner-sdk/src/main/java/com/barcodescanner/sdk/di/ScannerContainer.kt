@@ -41,7 +41,7 @@ internal class ScannerContainer(
     }
 
     /**
-     * Native C++ MSI decoder (src/main/cpp). Replaces the pure-Kotlin
+     * Native C++ MSI decoder (src/main/cpp). Replaces the retired pure-Kotlin
      * MsiPlesseyDecoder: signal-template correlation survives the blur that
      * defeats run-length thresholding. 6/6 on the shelf-tag benchmark.
      *

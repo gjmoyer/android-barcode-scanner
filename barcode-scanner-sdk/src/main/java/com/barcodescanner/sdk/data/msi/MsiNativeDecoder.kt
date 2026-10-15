@@ -19,12 +19,12 @@ import java.nio.ByteBuffer
  * JNI wrapper for the clean-room C++ MSI Plessey decoder
  * (`src/main/cpp/msi_decoder.cpp`).
  *
- * Replaces the pure-Kotlin [MsiPlesseyDecoder]: the C++ engine uses
+ * Replaces the retired pure-Kotlin MSI decoder: the C++ engine uses
  * signal-template correlation instead of run-length thresholding, which
  * survives the blur that defeats width-based classification. Validated 6/6
  * on the shelf-tag benchmark set (3–7ms per frame).
  *
- * Checksum contract matches [MsiPlesseyDecoder]: [checksumPolicy] is pushed
+ * Checksum contract matches that Kotlin decoder: [checksumPolicy] is pushed
  * into the native engine (only strings valid under it compete for the
  * frame's winner; NONE lets it try MOD10/MOD11/MOD1010/MOD1110), then
  * re-validated here; [stripChecksum] (default true) strips the check
