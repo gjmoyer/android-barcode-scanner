@@ -463,9 +463,7 @@ class MainActivity : ComponentActivity() {
     private fun friendlyEngineSuffix(engineName: String): String = when (engineName) {
         "MLKit" -> " (Google ML Kit)"
         "ZXingCpp" -> " (ZXing C++ fallback — e.g. DataBar)"
-        "MsiPlessey" -> " (custom MSI scanline decoder)"
-        "MsiRoi" -> " (ML Kit ROI + MSI)"
-        "MsiOcr" -> " (OCR text fallback)"
+        "MsiNative" -> " (custom native MSI decoder)"
         else -> ""
     }
 
