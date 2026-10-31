@@ -140,7 +140,7 @@ class DeviceMsiTest {
                 org.junit.Assert.assertTrue(
                     "expected ${exp.sku} for $name, got $result",
                     result is ScanResult.Success &&
-                        (result as ScanResult.Success).barcode.rawValue == exp.sku,
+                        result.barcode.rawValue == exp.sku,
                 )
             } finally {
                 scanner.close()
@@ -194,7 +194,7 @@ class DeviceMsiTest {
                     org.junit.Assert.assertTrue(
                         "$name rep$rep: expected ${exp.sku} under ${exp.policy}, got $result",
                         result is ScanResult.Success &&
-                            (result as ScanResult.Success).barcode.rawValue == exp.sku,
+                            result.barcode.rawValue == exp.sku,
                     )
                 }
             } finally {
