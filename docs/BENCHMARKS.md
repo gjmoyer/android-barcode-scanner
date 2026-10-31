@@ -13,7 +13,8 @@ checked instead of taken on trust.
   frames**.
 - **129–133/162 reads at ±6°/±10° tilt**, with 0 wrong reads.
 - **133/133 host-harness assertions green** (152/152 with the local fixture photos); native decode averages
-  **0.74 ms** per 1280×720 synthetic frame (Apple M2 Max, Oct 2026).
+  **0.51 ms** per 1280×720 synthetic frame (Apple M2 Max, Oct 2026; was
+  0.74 ms before the digit-template vectorisation).
 
 ## Comparison
 
@@ -105,7 +106,7 @@ known far-field wrong reads on 8-digit fragments. The production policies
 
 | Path | Measurement |
 |---|---|
-| Native MSI decode, host | 0.74 ms mean / 0.76 ms worst per 1280×720 synthetic frame |
+| Native MSI decode, host | 0.51 ms mean / 0.58 ms worst per 1280×720 synthetic frame |
 | Native MSI decode, real shelf photo | ~0.7–1 ms (host, README bench) |
 | MSI still path, 116 real crops (Pixel 10a emulator, warmed) | 5.5 ms mean / 4 ms p50 / 14 ms p95 (local private run) |
 | 9-digit clutter frame, host | 9.3 ms mean / 31.6 ms p95 / 70.2 ms max |
