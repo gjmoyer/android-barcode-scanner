@@ -88,11 +88,18 @@ live-camera benchmark.
 |---|---|
 | Native MSI decode, host | 0.70 ms mean / 0.82 ms worst per 1280×720 synthetic frame |
 | Native MSI decode, real shelf photo | ~0.7–1 ms (host, README bench) |
+| MSI still path, 116 real crops (Pixel 10a emulator, warmed) | 5.5 ms mean / 4 ms p50 / 14 ms p95 |
 | 9-digit clutter frame, host | 9.3 ms mean / 31.6 ms p95 / 70.2 ms max |
 | On-device full chain, one-shot | ~15–60 ms typical (Pixel 6a / emulator) |
 
 The on-device figures are end-to-end and device-dependent; the host figures
 isolate the native MSI decoder.
+
+A faster still path is possible by skipping or cheapening the 180-degree
+confirmation (about 1.7 ms mean), but it returns wrong checksum-valid values
+on blurred upside-down tags (`891801110`, `900800087`). The harness now pins
+those cases, so full reverse-view retries are required; the reported 5.5 ms
+keeps the confirmation intact.
 
 ## Scope boundaries
 
