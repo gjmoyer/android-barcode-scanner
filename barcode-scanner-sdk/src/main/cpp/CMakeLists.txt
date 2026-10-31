@@ -10,13 +10,16 @@ add_library(msi_decoder SHARED
     msi_bitmap_jni.cpp
 )
 
-# C++17, optimize for speed, all warnings.
+# C++17, optimize for speed, all warnings. No -ffast-math: decode results
+# depend on exact IEEE float behaviour (stretch table, template scores).
 target_compile_features(msi_decoder PRIVATE cxx_std_17)
 target_compile_options(msi_decoder PRIVATE
-    -O2
+    -O3
     -Wall
     -Wextra
+    $<$<CONFIG:Release>:-flto>
 )
+target_link_options(msi_decoder PRIVATE $<$<CONFIG:Release>:-flto>)
 
 # Android log for diagnostics (optional; decoder itself doesn't log);
 # jnigraphics for AndroidBitmap_* (native still conversion).
