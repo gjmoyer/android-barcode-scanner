@@ -15,6 +15,36 @@ checked instead of taken on trust.
 - **133/133 host-harness assertions green** (152/152 with the local fixture photos); native decode averages
   **0.74 ms** per 1280×720 synthetic frame (Apple M2 Max, Oct 2026).
 
+## Comparison
+
+![MSI Plessey accuracy and still-image latency](assets/msi-comparison.svg)
+
+Same 116 real shelf-tag crops, same truth set, one still per crop. All three
+engines had **zero wrong values**; the misses differ. Still-image latency
+per crop (mean / p50 / p95; image-file load and UI excluded).
+
+| Engine | Platform | 116-crop SKU match | 15 strict truths | Mean | p50 | p95 |
+|---|---|---:|---:|---:|---:|---:|
+| This SDK | Pixel 10a emulator | 115/116 · 99.1% | 15/15 | 5.55 ms | 4 ms | 14 ms |
+| Leading commercial SDK (vendor withheld) | Pixel 10a emulator | 115/116 · 99.1% | 15/15 | 3.45 ms | 3 ms | 5 ms |
+| Apple Vision | macOS 27.2 / M2 Max host | 106/116 · 91.4% | 10/15 | 7.35 ms | 7.15 ms | 10.76 ms |
+
+The 116 crops are hand-isolated single-tag crops from the local 110-photo
+shelf set, not the 162-tag near/far/still sweep and not a held-out set. "SKU
+match" compares the 7-digit printed item; "strict truths" are full 9-digit
+codewords independently scanned for 15 tags. This SDK ran `MOD_10_10` with
+9-digit bounds; the commercial engine used the equivalent double-Mod10,
+9-digit configuration. Measured 2026-10-31 at SDK commit `ed7d039`.
+
+Timed region: this SDK's `scanBitmap` (native prepare + MSI decode), the
+commercial engine's `BitmapFrameSource` -> `BarcodeCapture` path, and Apple
+Vision's `VNDetectBarcodesRequest`; all three excluded image-file load/UI.
+Apple Vision ran on macOS, so its absolute latency is not directly
+comparable to the Pixel emulator numbers. This is still-image decoding, not
+a live-camera comparison. The commercial result is an anonymized aggregate
+published at the license holder's request; vendor name/version and raw rows
+remain private.
+
 ## Reproducible host harness
 
 ```sh
@@ -70,17 +100,6 @@ Checksum-less `NONE` is debug-only and is not the shelf-tag policy; it has two
 known far-field wrong reads on 8-digit fragments. The production policies
 (`MOD_10`, `MOD_10_10`) have zero wrong reads at 9-digit bounds.
 
-## Third-party comparison (private)
-
-A local head-to-head against a licensed commercial barcode SDK was run on the
-same 116 crops and device, under the same MSI policy. The custom decoder
-matched its SKU-level recall with zero wrong reads on the strict
-independently-scanned subset. The vendor's name, per-row data and exact
-tables are withheld because the license terms restrict public comparative
-claims; the private report is available from the project author on request.
-
-This is a still-image regression set used during development, not a held-out
-live-camera benchmark.
 
 ## Latency
 
@@ -106,16 +125,15 @@ keeps the confirmation intact.
 
 ## Scope boundaries
 
-- **Commercial-SDK comparison is private.** A licensed commercial barcode
+- **The commercial comparison is anonymized.** A licensed commercial barcode
   SDK was run on the same 116 crops and device, but the repository contains
   no commercial SDK dependency, license key or per-row comparison data.
-  Vendor terms restrict public comparative claims, so the named report is
-  kept private and is available from the project author on request.
+  The vendor name/version and raw rows stay private; only the aggregate
+  table and chart are published.
 - **The real-photo set is private.** A clean clone reproduces the synthetic
   and frame-path results, not the 110-photo table. The real-photo numbers
   come from the local regression described in the research note.
 - **Not a camera benchmark.** There are no fps, thermal, battery or
   time-to-first-scan measurements here.
-- **Apple Vision is a baseline, not a paid-SDK benchmark.** The research note
-  compares against macOS Vision's MSI detection on stills; it is not a
-  controlled live-camera comparison against a commercial barcode SDK.
+- **Apple Vision is a host baseline.** It was measured on macOS stills, not
+  on the Pixel emulator; its absolute latency is not directly comparable.

@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="580" viewBox="0 0 1100 580" role="img" aria-labelledby="title desc">
+  <title id="title">MSI Plessey comparison: accuracy and still-image latency</title>
+  <desc id="desc">116 real shelf-tag crops. This SDK and a leading commercial SDK both match 115 of 116 SKUs with zero wrong values; Apple Vision matches 106, also with zero wrong values. On the Pixel 10a emulator the commercial SDK is faster; Apple Vision was measured on a macOS host, so its latency is not directly comparable.</desc>
+  <rect width="1100" height="580" fill="#ffffff"/>
+  <text x="40" y="44" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="24" font-weight="700" fill="#111827">MSI Plessey: accuracy and still-image latency</text>
+  <text x="40" y="70" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="14" fill="#4b5563">116 real shelf-tag crops · SKU-level match vs corrected local truth · 0 wrong values for every engine</text>
+
+  <text x="40" y="118" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="16" font-weight="600" fill="#111827">Accuracy (116 crops)</text>
+  <text x="40" y="150" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="13" fill="#374151">This SDK</text>
+  <text x="40" y="184" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="13" fill="#374151">Leading commercial SDK</text>
+  <text x="40" y="218" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="13" fill="#374151">Apple Vision</text>
+  <rect x="260" y="138" width="420" height="14" rx="7" fill="#e5e7eb"/>
+  <rect x="260" y="172" width="420" height="14" rx="7" fill="#e5e7eb"/>
+  <rect x="260" y="206" width="420" height="14" rx="7" fill="#e5e7eb"/>
+  <rect x="260" y="138" width="416" height="14" rx="7" fill="#1b7f4b"/>
+  <rect x="260" y="172" width="416" height="14" rx="7" fill="#3d6fb4"/>
+  <rect x="260" y="206" width="384" height="14" rx="7" fill="#4b5563"/>
+  <text x="668" y="150" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="12" font-weight="600" fill="#ffffff">115/116 · 99.1%</text>
+  <text x="668" y="184" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="12" font-weight="600" fill="#ffffff">115/116 · 99.1%</text>
+  <text x="636" y="218" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="12" font-weight="600" fill="#ffffff">106/116 · 91.4%</text>
+
+  <text x="40" y="278" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="16" font-weight="600" fill="#111827">Still-image latency (ms, lower is better)</text>
+  <text x="40" y="310" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="13" fill="#374151">This SDK</text>
+  <text x="40" y="326" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="11" fill="#6b7280">Pixel 10a emulator</text>
+  <text x="40" y="360" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="13" fill="#374151">Leading commercial SDK</text>
+  <text x="40" y="376" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="11" fill="#6b7280">Pixel 10a emulator</text>
+  <text x="40" y="410" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="13" fill="#374151">Apple Vision</text>
+  <text x="40" y="426" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="11" fill="#6b7280">macOS 27.2 / M2 Max host</text>
+  <rect x="260" y="296" width="420" height="14" rx="7" fill="#e5e7eb"/>
+  <rect x="260" y="346" width="420" height="14" rx="7" fill="#e5e7eb"/>
+  <rect x="260" y="396" width="420" height="14" rx="7" fill="#e5e7eb"/>
+  <rect x="260" y="296" width="291" height="14" rx="7" fill="#1b7f4b"/>
+  <rect x="260" y="346" width="181" height="14" rx="7" fill="#3d6fb4"/>
+  <rect x="260" y="396" width="386" height="14" rx="7" fill="#4b5563"/>
+  <text x="543" y="308" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="12" font-weight="600" fill="#ffffff">5.55 ms</text>
+  <text x="433" y="358" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="12" font-weight="600" fill="#ffffff">3.45 ms</text>
+  <text x="638" y="408" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="12" font-weight="600" fill="#ffffff">7.35 ms</text>
+
+  <line x1="40" y1="456" x2="1060" y2="456" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="40" y="482" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="12" fill="#4b5563">15 independently scanned truths: This SDK 15/15 · leading commercial SDK 15/15 · Apple Vision 10/15.</text>
+  <text x="40" y="504" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="12" fill="#4b5563">Latency is one warmed still per crop. The first two were measured on the same Pixel 10a emulator; Apple Vision</text>
+  <text x="40" y="522" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="12" fill="#4b5563">was measured on a macOS host, so cross-platform absolute latency is not directly comparable.</text>
+  <text x="40" y="544" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="11" fill="#6b7280">Crops and truth are private and not committed; no vendor code or data is redistributed. Commercial SDK name/version withheld;</text>
+  <text x="40" y="560" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="11" fill="#6b7280">anonymized aggregate published at the license holder's request. Chart scales: accuracy 0-100%, latency 0-8 ms.</text>
+</svg>

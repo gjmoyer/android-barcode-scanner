@@ -201,8 +201,8 @@ on-device full chain, Pixel 6a / emulator):
 | Full-chain worst case | — | capped by `decodeTimeoutMillis` (default 1500 ms) |
 
 Methodology, the full real-photo accuracy/tilt tables and scope boundaries
-(including the private commercial-SDK comparison) are in
-[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
+(including the comparison chart with a leading commercial SDK and Apple
+Vision) are in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 
 Live-mode recipe (already wired, no host code needed):
 - Fusion tries engines in registration order with first-confident-wins: a pointed
