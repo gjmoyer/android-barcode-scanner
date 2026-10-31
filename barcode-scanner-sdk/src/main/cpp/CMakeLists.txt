@@ -10,16 +10,21 @@ add_library(msi_decoder SHARED
     msi_bitmap_jni.cpp
 )
 
-# C++17, optimize for speed, all warnings. No -ffast-math: decode results
-# depend on exact IEEE float behaviour (stretch table, template scores).
+# C++17, optimize for speed, all warnings. -O3 is unconditional and
+# deliberate: the host harness produces identical verdict lines at -O2 and
+# -O3, so Debug pays nothing for slower decode. -flto gates on every
+# non-Debug config: a $<$<CONFIG:Release>:...> gate is dead code because
+# AGP passes -DCMAKE_BUILD_TYPE=RelWithDebInfo for release variants.
+# No -ffast-math: decode results depend on exact IEEE float behaviour
+# (stretch table, template scores, float-bit cache keys).
 target_compile_features(msi_decoder PRIVATE cxx_std_17)
 target_compile_options(msi_decoder PRIVATE
     -O3
     -Wall
     -Wextra
-    $<$<CONFIG:Release>:-flto>
+    $<$<NOT:$<CONFIG:Debug>>:-flto>
 )
-target_link_options(msi_decoder PRIVATE $<$<CONFIG:Release>:-flto>)
+target_link_options(msi_decoder PRIVATE $<$<NOT:$<CONFIG:Debug>>:-flto>)
 
 # Android log for diagnostics (optional; decoder itself doesn't log);
 # jnigraphics for AndroidBitmap_* (native still conversion).
