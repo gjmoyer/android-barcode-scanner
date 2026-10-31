@@ -281,7 +281,8 @@ outvote it. Superseded by §8.3 before ever shipping. Leave it dead.
    the ranked winner reaches voting, so the true read is lost (a recall
    gap, not a wrong-read risk). A shorter read only drops a longer one that
    extends it when strictly stronger AND better bar-fitting — on ties the
-   longer read stays (every prefix of a Mod1010 codeword is Mod10-valid).
+   longer read stays (the 8-digit prefix ending at the first check is
+   Mod10-valid).
    Each digit window anchors to its own bar, so a dropped or extra bar can
    push one window off the symbol's uniform pitch onto a lucky template
    match that still closes the checksum. Checksum-valid hypotheses whose
@@ -549,7 +550,7 @@ hand decode of item 0115783 gives `011578333`. Non-39 counts were crop
 clipping or noise.
 
 Consequences:
-- Every prefix of a Mod1010 codeword is Mod10-valid, so an 8-digit
+- The 8-digit prefix ending at the first check is Mod10-valid, so that
   truncation (`01157833`) is indistinguishable from a real Mod10 code
   unless the policy is pushed down.
 - Luhn and Mod11 ignore leading zeros, so a dropped leading `0`

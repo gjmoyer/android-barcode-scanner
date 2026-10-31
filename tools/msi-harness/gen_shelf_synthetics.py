@@ -25,7 +25,9 @@ Independent implementation cross-checks (do NOT copy from these sources):
 
 Usage:
     ./gen_shelf_synthetics.py [out_dir]
-Default out_dir is ../../barcode-scanner-sdk/src/test/resources/msi-shelf.
+Default out_dir is ../../build/shelf-synthetics (git-ignored). Do not point
+it at src/test/resources/msi-shelf when real captures are present: the
+generated names match the private fixture names.
 
 Only the Python standard library is used (struct, zlib); output is 8-bit
 grayscale PNG. Deterministic — no randomness.
@@ -137,8 +139,20 @@ def main():
     assert mod10("8052") == 3, "Luhn Morovia vector"
     out_dir = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
-        "../../barcode-scanner-sdk/src/test/resources/msi-shelf",
+        "../../build/shelf-synthetics",
     )
+    test_resources = os.path.abspath(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "../../barcode-scanner-sdk/src/test/resources/msi-shelf",
+    ))
+    if os.path.abspath(out_dir) == test_resources and os.path.isdir(out_dir):
+        if any(
+            name.startswith("msi-") and name.endswith(".png")
+            for name in os.listdir(out_dir)
+        ):
+            raise SystemExit(
+                "refusing to overwrite private msi-*.png fixtures; use a different out_dir"
+            )
     os.makedirs(out_dir, exist_ok=True)
     for label, payload, policy in CASES:
         full = full_codeword(payload, policy)

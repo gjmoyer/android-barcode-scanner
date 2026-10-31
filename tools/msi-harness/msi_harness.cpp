@@ -1141,12 +1141,10 @@ static void shelfSuite(const std::string& dir) {
     // drop local msi-<label>-<sku>.png captures in the sweep dir and they are
     // swept here automatically. ABSENT FILES ARE SKIPPED, not failed, so a
     // public checkout (no photos) stays green on the committed suites above.
-    // (Why no committed photo-equivalent PNGs? Crisp renders of these SKUs
-    // cannot gate green: true and shifted alignments correlate ~0.96 alike
-    // on pixel-perfect input, so any fixed tiebreak just relocates the error
-    // — verified across scales/phases/blur/noise. Real captures separate
-    // properly via sensor texture. The committed equivalents are the
-    // generator script + JVM vectors + the runtime suite above.)
+    // (Why no committed photo-equivalent PNGs? Real captures are private.
+    // gen_shelf_synthetics.py can render full-codeword equivalents into a
+    // local directory; the suite consumes them by filename. The committed
+    // equivalents are the generator script + JVM vectors + runtime suite.)
     static const ShelfCase cases[] = {
         // Full 9-digit Mod1010 codewords (7-digit payload + two checks),
         // identical to what macOS Vision reports for these captures and

@@ -12,8 +12,8 @@ checked instead of taken on trust.
   must-not-misread negatives, and **0 false reads across 3,430 clutter
   frames**.
 - **129–133/162 reads at ±6°/±10° tilt**, with 0 wrong reads.
-- **127/127 host-harness assertions green**; native decode averages
-  **0.70 ms** per 1280×720 synthetic frame (Apple M2 Max, Oct 2026).
+- **133/133 host-harness assertions green** (152/152 with the local fixture photos); native decode averages
+  **0.74 ms** per 1280×720 synthetic frame (Apple M2 Max, Oct 2026).
 
 ## Reproducible host harness
 
@@ -31,8 +31,8 @@ Latest run (2026-10-31, macOS 27.2, Apple M2 Max):
 
 | Check | Result |
 |---|---|
-| Assertions | 127 pass, 0 fail |
-| Bench: 1280×720 synthetic MSI | 702 µs mean, 817 µs worst (20 iterations) |
+| Assertions | 133 pass, 0 fail (152 with the six local fixture photos) |
+| Bench: 1280×720 synthetic MSI | 742 µs mean, 756 µs worst (20 iterations) |
 | 1280×720 text-clutter negatives | 0 false positives (30 frames) |
 | Clutter sweep | 0 false reads (3,430 frames) |
 
@@ -86,17 +86,20 @@ live-camera benchmark.
 
 | Path | Measurement |
 |---|---|
-| Native MSI decode, host | 0.70 ms mean / 0.82 ms worst per 1280×720 synthetic frame |
+| Native MSI decode, host | 0.74 ms mean / 0.76 ms worst per 1280×720 synthetic frame |
 | Native MSI decode, real shelf photo | ~0.7–1 ms (host, README bench) |
-| MSI still path, 116 real crops (Pixel 10a emulator, warmed) | 5.5 ms mean / 4 ms p50 / 14 ms p95 |
+| MSI still path, 116 real crops (Pixel 10a emulator, warmed) | 5.5 ms mean / 4 ms p50 / 14 ms p95 (local private run) |
 | 9-digit clutter frame, host | 9.3 ms mean / 31.6 ms p95 / 70.2 ms max |
 | On-device full chain, one-shot | ~15–60 ms typical (Pixel 6a / emulator) |
 
-The on-device figures are end-to-end and device-dependent; the host figures
-isolate the native MSI decoder.
+The on-device full-chain figures are end-to-end and device-dependent; the
+host figures isolate the native MSI decoder. The 116-crop still row is a
+local private run (the crops are not committed), not reproducible from a
+clean clone.
 
 A faster still path is possible by skipping or cheapening the 180-degree
-confirmation (about 1.7 ms mean), but it returns wrong checksum-valid values
+confirmation (about 1.7 ms mean in a local A/B experiment), but it returns
+wrong checksum-valid values
 on blurred upside-down tags (`891801110`, `900800087`). The harness now pins
 those cases, so full reverse-view retries are required; the reported 5.5 ms
 keeps the confirmation intact.
