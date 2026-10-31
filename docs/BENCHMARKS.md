@@ -26,16 +26,19 @@ per crop (mean / p50 / p95; image-file load and UI excluded).
 
 | Engine | Platform | 116-crop SKU match | 15 strict truths | Mean | p50 | p95 |
 |---|---|---:|---:|---:|---:|---:|
-| This SDK | Pixel 10a emulator | 115/116 · 99.1% | 15/15 | 5.55 ms | 4 ms | 14 ms |
+| This SDK | Pixel 10a emulator | 115/116 · 99.1% | 15/15 | 4.68 ms | 4 ms | 12 ms |
 | Leading commercial SDK (vendor withheld) | Pixel 10a emulator | 115/116 · 99.1% | 15/15 | 3.45 ms | 3 ms | 5 ms |
 | Apple Vision | macOS 27.2 / M2 Max host | 106/116 · 91.4% | 10/15 | 7.35 ms | 7.15 ms | 10.76 ms |
 
 The 116 crops are hand-isolated single-tag crops from the local 110-photo
-shelf set, not the 162-tag near/far/still sweep and not a held-out set. "SKU
-match" compares the 7-digit printed item; "strict truths" are full 9-digit
+shelf set, not the 162-tag near/far/still sweep and not a held-out set.
+"SKU match" compares the 7-digit printed item; "strict truths" are full 9-digit
 codewords independently scanned for 15 tags. This SDK ran `MOD_10_10` with
 9-digit bounds; the commercial engine used the equivalent double-Mod10,
-9-digit configuration. Measured 2026-10-31 at SDK commit `ed7d039`.
+9-digit configuration. Measured 2026-10-31: this SDK at commit `b1a8fd1`
+(includes the digit-template vectorisation; the same-protocol run at
+`ed7d039` measured 5.55 ms / 4 ms / 14 ms), commercial and Vision rows as
+first measured.
 
 Timed region: this SDK's `scanBitmap` (native prepare + MSI decode), the
 commercial engine's `BitmapFrameSource` -> `BarcodeCapture` path, and Apple
@@ -108,7 +111,7 @@ known far-field wrong reads on 8-digit fragments. The production policies
 |---|---|
 | Native MSI decode, host | 0.51 ms mean / 0.58 ms worst per 1280×720 synthetic frame |
 | Native MSI decode, real shelf photo | ~0.7–1 ms (host, README bench) |
-| MSI still path, 116 real crops (Pixel 10a emulator, warmed) | 5.5 ms mean / 4 ms p50 / 14 ms p95 (local private run) |
+| MSI still path, 116 real crops (Pixel 10a emulator, warmed) | 4.7 ms mean / 4 ms p50 / 12 ms p95 after the digit-template vectorisation (5.5 ms before, local private run) |
 | 9-digit clutter frame, host | 9.3 ms mean / 31.6 ms p95 / 70.2 ms max |
 | On-device full chain, one-shot | ~15–60 ms typical (Pixel 6a / emulator) |
 
@@ -121,7 +124,7 @@ A faster still path is possible by skipping or cheapening the 180-degree
 confirmation (about 1.7 ms mean in a local A/B experiment), but it returns
 wrong checksum-valid values
 on blurred upside-down tags (`891801110`, `900800087`). The harness now pins
-those cases, so full reverse-view retries are required; the reported 5.5 ms
+those cases, so full reverse-view retries are required; the reported 4.7 ms
 keeps the confirmation intact.
 
 ## Scope boundaries

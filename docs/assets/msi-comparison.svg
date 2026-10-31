@@ -29,10 +29,10 @@
   <rect x="260" y="296" width="420" height="14" rx="7" fill="#e5e7eb"/>
   <rect x="260" y="346" width="420" height="14" rx="7" fill="#e5e7eb"/>
   <rect x="260" y="396" width="420" height="14" rx="7" fill="#e5e7eb"/>
-  <rect x="260" y="296" width="291" height="14" rx="7" fill="#1b7f4b"/>
+  <rect x="260" y="296" width="245" height="14" rx="7" fill="#1b7f4b"/>
   <rect x="260" y="346" width="181" height="14" rx="7" fill="#3d6fb4"/>
   <rect x="260" y="396" width="386" height="14" rx="7" fill="#4b5563"/>
-  <text x="543" y="308" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="12" font-weight="600" fill="#ffffff">5.55 ms</text>
+  <text x="503" y="308" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="12" font-weight="600" fill="#ffffff">4.68 ms</text>
   <text x="433" y="358" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="12" font-weight="600" fill="#ffffff">3.45 ms</text>
   <text x="638" y="408" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="12" font-weight="600" fill="#ffffff">7.35 ms</text>
 
