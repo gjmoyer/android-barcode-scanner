@@ -930,7 +930,7 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
         tmplLen = buildDigitTemplates(module, sigmaMul * module, tmpl);
         transposeTemplates(tmpl, tmplLen, cache.tmplT);
     }
-    const float (*tmplT)[10] = cache.tmplT;  // else — cache miss: rebuilt above
+    const float (*tmplT)[10] = cache.tmplT;
     // Publish the build for the next profile with an identical estimate.
     cache.moduleBits = bits;
     cache.sigmaBits = sbits;
