@@ -717,6 +717,7 @@ struct DigitTemplateCache {
     uint32_t moduleBits = 0;
     uint32_t sigmaBits = 0;
     float tmpl[10][96];
+    float tmplT[96][10];  // transpose of tmpl (correlateDigits)
     int tmplLen = 0;
     bool valid = false;
 };
@@ -770,6 +771,27 @@ int buildDigitTemplates(float module, float sigma, float (*tmpl)[96]) {
         if (v > 1e-6f) for (int i = 0; i < len; ++i) tmpl[d][i] /= v;
     }
     return len;
+}
+
+// Correlations of one normalised window against all 10 templates. tmplT is
+// the transpose of buildDigitTemplates' output (tmplT[i][d]). Each digit's
+// sum still accumulates over i = 0..len-1 in order with the same
+// multiply-add expression, so every c[d] is bit-identical to the scalar
+// per-digit loop; computing the 10 independent sums side by side lets the
+// compiler vectorise across digits instead of serialising one long
+// dependency chain per digit.
+inline void correlateDigits(const float* seg, const float (*tmplT)[10], int len, float* c) {
+    float acc[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    for (int i = 0; i < len; ++i) {
+        const float si = seg[i];
+        for (int d = 0; d < 10; ++d) acc[d] += si * tmplT[i][d];
+    }
+    for (int d = 0; d < 10; ++d) c[d] = acc[d];
+}
+
+inline void transposeTemplates(const float (*tmpl)[96], int len, float (*tmplT)[10]) {
+    for (int i = 0; i < len; ++i)
+        for (int d = 0; d < 10; ++d) tmplT[i][d] = tmpl[d][i];
 }
 
 // Start, Stop and trailing quiet-zone contrast of a decoded hypothesis, in
@@ -906,7 +928,9 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
         tmplLen = cache.tmplLen;
     } else {
         tmplLen = buildDigitTemplates(module, sigmaMul * module, tmpl);
-    }  // else — cache miss: rebuilt above
+        transposeTemplates(tmpl, tmplLen, cache.tmplT);
+    }
+    const float (*tmplT)[10] = cache.tmplT;  // else — cache miss: rebuilt above
     // Publish the build for the next profile with an identical estimate.
     cache.moduleBits = bits;
     cache.sigmaBits = sbits;
@@ -945,9 +969,10 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
                 v = sqrtf(v);
                 if (v < 1e-6f) continue;
                 for (int i = 0; i < tmplLen; ++i) seg[i] /= v;
+                float cs[10];
+                correlateDigits(seg, tmplT, tmplLen, cs);
                 for (int dig = 0; dig < 10; ++dig) {
-                    float c = 0;
-                    for (int i = 0; i < tmplLen; ++i) c += seg[i] * tmpl[dig][i];
+                    const float c = cs[dig];
                     if (c > mt.corr) { mt.corr = c; mt.digit = dig; mt.i0 = i0; }
                 }
             }
@@ -1195,6 +1220,22 @@ float spectralModule(const float* p, int n, float lo, float hi) {
     }
     return bestM;
 }
+// decodeByDigitGrid template cache: one round of (4 pitches x kGridSigmas)
+// fits, so a ROI whose scanlines agree on the pitch set rebuilds nothing.
+constexpr int kGridCacheSlots = 16;
+struct GridTemplateSlot {
+    uint32_t moduleBits = 0;
+    uint32_t sigmaBits = 0;
+    int len = 0;
+    bool valid = false;
+    float tmplT[96][10];
+};
+struct GridTemplateCache {
+    GridTemplateSlot slot[kGridCacheSlots];
+    int next = 0;
+};
+thread_local GridTemplateCache t_gridCache;
+
 void decodeByDigitGrid(const float* p, int n, int nVerify, int nHead, const Bar* bars, int nb,
                        float module, std::vector<Candidate>& cands) {
     if (module < 0.5f) return;
@@ -1210,8 +1251,28 @@ void decodeByDigitGrid(const float* p, int n, int nVerify, int nHead, const Bar*
     for (int mi = 0; mi < nMods; ++mi) {
         const float mod = mods[mi];
         for (int sgi = 0; sgi < kGridSigmas; ++sgi) {
-            float tmpl[10][96];
-            const int len = buildDigitTemplates(mod, kSigmaMul[sgi] * mod, tmpl);
+            // Templates are a pure function of (mod, sigma); successive
+            // scanlines of a ROI usually repeat the same pitches, so an
+            // exact float-bit match reuses a previous build bit-identically.
+            const float sigma = kSigmaMul[sgi] * mod;
+            uint32_t mbits = 0, sbits = 0;
+            memcpy(&mbits, &mod, sizeof(mbits));
+            memcpy(&sbits, &sigma, sizeof(sbits));
+            GridTemplateSlot* slot = nullptr;
+            for (GridTemplateSlot& g : t_gridCache.slot)
+                if (g.valid && g.moduleBits == mbits && g.sigmaBits == sbits) { slot = &g; break; }
+            if (slot == nullptr) {
+                slot = &t_gridCache.slot[t_gridCache.next];
+                t_gridCache.next = (t_gridCache.next + 1) % kGridCacheSlots;
+                float tmpl[10][96];
+                slot->len = buildDigitTemplates(mod, sigma, tmpl);
+                transposeTemplates(tmpl, slot->len, slot->tmplT);
+                slot->moduleBits = mbits;
+                slot->sigmaBits = sbits;
+                slot->valid = true;
+            }
+            const int len = slot->len;
+            const float (*tmplT)[10] = slot->tmplT;
             // Best digit template of the window starting within +/-0.5
             // module of pos (0.25-module steps).
             auto bestDigitNear = [&](float pos, int& bestDigit, float& bestCorr, float& bestPos) {
@@ -1226,10 +1287,10 @@ void decodeByDigitGrid(const float* p, int n, int nVerify, int nHead, const Bar*
                     for (int i = 0; i < len; ++i) { seg[i] -= m; v += seg[i] * seg[i]; }
                     v = sqrtf(v);
                     if (v < 1e-6f) continue;
+                    float cs[10];
+                    correlateDigits(seg, tmplT, len, cs);
                     for (int dg = 0; dg < 10; ++dg) {
-                        float c = 0;
-                        for (int i = 0; i < len; ++i) c += seg[i] * tmpl[dg][i];
-                        c /= v;
+                        const float c = cs[dg] / v;
                         if (c > bestCorr) { bestCorr = c; bestDigit = dg; bestPos = s; }
                     }
                 }
