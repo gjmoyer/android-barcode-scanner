@@ -47,8 +47,9 @@ emulator image and local fixture photos.
 
 - **Grocery shelf tags are 9-digit Mod1010**: 7-digit item + Mod10 check +
   Mod10 over (item + first check), 39 bars. Item 0115783 → `011578333`.
-  Every prefix of such a codeword is Mod10-valid and Luhn/Mod11 ignore
-  leading zeros, so 8-digit truncations and dropped leading zeros validate.
+  The 8-digit prefix ending at the first check is Mod10-valid, and
+  Luhn/Mod11 ignore leading zeros, so 8-digit truncations and dropped
+  leading zeros validate.
   Hosts scanning these tags should use `MsiChecksumPolicy.MOD_10_10` with
   `msiSymbolLengths` 9..9.
 - The host policy is pushed into native candidate selection
@@ -84,8 +85,8 @@ emulator image and local fixture photos.
   Each line's read must pass the checksum, the grid residual,
   `kGridMinScore` 0.7, `kGridMinReadCorr` 0.6 and its own guards, then the
   normal vote. The prefix rule must also drop an equal-strength prefix when
-  the longer read closes: an 8-digit prefix of a Mod1010 tag is
-  Mod1010-valid one time in ten. Moving it ahead of the skew retry lost
+  the longer read closes: an 8-digit prefix of a Mod1010 tag can be
+  Mod1010-valid by chance. Moving it ahead of the skew retry lost
   tilted reads. Pitches are the bar estimate ×1.0 plus `spectralModule`
   (bit-period DFT peak) ×`kGridSpecScales`: the bar estimate runs 10–14%
   high near 2px/module. Grid reads below 2.5px need 3 agreeing lines (the
@@ -133,8 +134,9 @@ emulator image and local fixture photos.
   the clearer leading quiet zone (`pickDirection`; `leadingQuiet` read from
   the verification head, `prependVerifyHead`). Live frames try 2
   orientations; never drop the confirm decode when raising orientations.
-- Fixture truth labels in `shelfSuite`/`DeviceMsiTest` that are 8-digit
-  `MOD_10` may be truncations of 9-digit tags (research doc §6 caveat).
+- Fixture truth labels now use the full 9-digit Mod1010 codewords. Under
+  `MOD_10` the SDK reports the 8-digit `payload + first check` truncation
+  (research doc §6); do not label that as the full codeword.
 
 ## Live camera invariants
 
