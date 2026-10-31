@@ -24,16 +24,14 @@ import java.io.File
  * here under `src/androidTest/assets/msi_samples/` — the assets copy is
  * git-ignored by default; `git add -f` it to run this suite in CI).
  * Ground truth (payload -> bars), verified with the host harness
- * (`tools/msi-harness`, 39/39 asserts green):
- * - yakult    0828147 -> 08281479    (MOD_10)
- * - quaker    0186477 -> 018647768   (MOD_10_10; matrix-logged only — full-res
- *   modules overshoot the template range on device, resolves at 0.75 scale)
- * - onedegree 0243523 -> 02435238    (MOD_10; KNOWN GAP — phantoms validate,
- *   true bars don't resolve; swept/logged, not hard-asserted)
- * - dixie     0087573 -> 00875732    (MOD_10)
+ * (`tools/msi-harness`, 133/133 asserts green; 152/152 with local photos):
+ * - yakult    0828147 -> 082814799   (MOD_10 -> 08281479; full Mod1010 bars)
+ * - quaker    0186477 -> 018647768   (host exact; device matrix-logged gap)
+ * - onedegree 0243523 -> 024352387   (host exact; device matrix-logged gap)
+ * - dixie     0087573 -> 008757320   (MOD_10 -> 00875732)
  * - starbucks 0168971 -> 016897100   (MOD_10_10)
- * - silk      0826593 -> 082659368   (bars read 8/9 digits; MOD_10 yields the
- *   payload, MOD_10_10 honestly misses)
+ * - silk      0826593 -> 082659368   (MOD_10 -> 08265936; MOD_10_10 device
+ *   full-resolution gap)
  *
  * Requires an emulator or device (API 28+):
  * `./gradlew :barcode-scanner-sdk:connectedDebugAndroidTest`.
@@ -60,21 +58,19 @@ class DeviceMsiTest {
         )
         val out = StringBuilder()
         out.appendLine("NATIVE_ZXING_AVAILABLE=${ZXingCppDecoder.isAvailable}")
-        // Known-exact expectations (correct per-label policy + payload).
-        // quakotml is matrix-logged only: its full-res modules overshoot the
-        // template range (truncated read, honestly gated to NotFound); it
-        // resolves at 0.75 scale on the host harness but the on-device ROI
-        // crops keep native resolution. ondeg is a phantom gap (see class KDoc).
-        // The three databar fixtures ARE committed, so they assert in CI too.
+        // Known-exact expectations (policy + payload). quakotml and ondeg are
+        // matrix-logged only on device: their full-res modules are a logged
+        // gap, while the host harness reads both exactly. The three databar
+        // fixtures are committed, so they assert in CI too.
         val expected = mapOf(
             "msi-yakult-0828147.png" to
-                Expectation(MsiChecksumPolicy.MOD_10, "0828147"),
+                Expectation(MsiChecksumPolicy.MOD_10, "08281479"),
             "msi-dixie-0087573.png" to
-                Expectation(MsiChecksumPolicy.MOD_10, "0087573"),
+                Expectation(MsiChecksumPolicy.MOD_10, "00875732"),
             "msi-starbucks-0168971.png" to
                 Expectation(MsiChecksumPolicy.MOD_10_10, "0168971"),
             "msi-silkalm-0826593.png" to
-                Expectation(MsiChecksumPolicy.MOD_10, "0826593"),
+                Expectation(MsiChecksumPolicy.MOD_10, "08265936"),
             "databar-omni.png" to
                 Expectation(MsiChecksumPolicy.MOD_10, "(01)01234567890128"),
             "databar-ltd.png" to
@@ -89,7 +85,7 @@ class DeviceMsiTest {
             MsiChecksumPolicy.MOD_10_11,
         )
         for (name in assetNames) {
-            val expectedSku = name.substringAfterLast("-").substringBeforeLast(".")
+            val exp = expected[name]
             val stream = instrumentation.context.assets.open("msi_samples/$name")
             val bmp = BitmapFactory.decodeStream(stream)
             stream.close()
@@ -106,10 +102,13 @@ class DeviceMsiTest {
                     val line = when (result) {
                         is ScanResult.Success -> {
                             val b = result.barcode
-                            val hit = b.rawValue == expectedSku ||
-                                b.rawValue == expectedSku.dropLast(1)
+                            val hit = if (exp != null && policy == exp.policy) {
+                                b.rawValue == exp.sku
+                            } else {
+                                null  // other policies are matrix evidence only
+                            }
                             "RESULT|$name|$policy|SUCCESS|${b.engineName}|${b.rawValue}|" +
-                                "${b.confidence}|${ms}ms|MATCH=$hit"
+                                "${b.confidence}|${ms}ms|MATCH=${hit ?: "UNKNOWN"}"
                         }
                         is ScanResult.NotFound -> "RESULT|$name|$policy|NOTFOUND|${ms}ms"
                         is ScanResult.Failure ->
@@ -140,7 +139,7 @@ class DeviceMsiTest {
                 org.junit.Assert.assertTrue(
                     "expected ${exp.sku} for $name, got $result",
                     result is ScanResult.Success &&
-                        (result as ScanResult.Success).barcode.rawValue == exp.sku,
+                        result.barcode.rawValue == exp.sku,
                 )
             } finally {
                 scanner.close()
@@ -150,8 +149,50 @@ class DeviceMsiTest {
     }
 
     /**
+     * The bars carry a full 9-digit Mod1010 codeword. Under MOD_10 the native
+     * engine reports the 8-digit payload (08281479), and the same value must
+     * come back when the pixels are fed upside-down; this exercises the
+     * reverse-view confirmation on the production chain.
+     */
+    @Test
+    fun yakult_upsideDown() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val appContext = instrumentation.targetContext
+        val name = "msi-yakult-0828147.png"
+        val have = (instrumentation.context.assets.list("msi_samples") ?: emptyArray()).contains(name)
+        assumeTrue("drop $name in src/androidTest/assets/msi_samples/ to run", have)
+        val upright = instrumentation.context.assets.open("msi_samples/$name").use {
+            BitmapFactory.decodeStream(it)
+        }
+        org.junit.Assert.assertNotNull("cannot decode asset $name", upright)
+        val flipped = Bitmap.createBitmap(
+            upright!!, 0, 0, upright.width, upright.height,
+            Matrix().apply { postRotate(180f) }, false,
+        )
+        val config = ScannerConfigBuilder()
+            .msiChecksumPolicy(MsiChecksumPolicy.MOD_10)
+            .msiSymbolLength(9)
+            .decodeTimeoutMillis(10_000)
+            .build()
+        val scanner = BarcodeScannerFactory.create(appContext, config)
+        try {
+            val result = runBlocking { scanner.scanBitmap(flipped) }
+            org.junit.Assert.assertTrue(
+                "expected 08281479 upside-down, got $result",
+                result is ScanResult.Success &&
+                    result.barcode.rawValue == "08281479" &&
+                    result.barcode.isUpsideDown,
+            )
+        } finally {
+            scanner.close()
+            upright.recycle()
+            flipped.recycle()
+        }
+    }
+
+    /**
      * Repeat-stability sweep over the shelf fixtures: each photo is scanned
-     * three times under its ground-truth policy and every repeat must return
+     * three times under its expected policy and every repeat must return
      * the same expected payload. Catches non-determinism (voting/tie-break
      * flips) that a single-shot assertion would miss. ondeg is swept in the
      * policy matrix above (logged) but excluded here — known gap.
@@ -162,13 +203,13 @@ class DeviceMsiTest {
         val appContext = instrumentation.targetContext
         val expected = mapOf(
             "msi-yakult-0828147.png" to
-                Expectation(MsiChecksumPolicy.MOD_10, "0828147"),
+                Expectation(MsiChecksumPolicy.MOD_10, "08281479"),
             "msi-dixie-0087573.png" to
-                Expectation(MsiChecksumPolicy.MOD_10, "0087573"),
+                Expectation(MsiChecksumPolicy.MOD_10, "00875732"),
             "msi-starbucks-0168971.png" to
                 Expectation(MsiChecksumPolicy.MOD_10_10, "0168971"),
             "msi-silkalm-0826593.png" to
-                Expectation(MsiChecksumPolicy.MOD_10, "0826593"),
+                Expectation(MsiChecksumPolicy.MOD_10, "08265936"),
         )
         val assetNames = (instrumentation.context.assets.list("msi_samples") ?: emptyArray())
             .filter { it.endsWith(".png") }
@@ -194,7 +235,7 @@ class DeviceMsiTest {
                     org.junit.Assert.assertTrue(
                         "$name rep$rep: expected ${exp.sku} under ${exp.policy}, got $result",
                         result is ScanResult.Success &&
-                            (result as ScanResult.Success).barcode.rawValue == exp.sku,
+                            result.barcode.rawValue == exp.sku,
                     )
                 }
             } finally {

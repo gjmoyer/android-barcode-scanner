@@ -21,8 +21,8 @@ measurement). See
 ## Requirements
 
 - Android Studio with **SDK 37** (compileSdk 37; sample app targetSdk 37)
-- AGP 9.4.1, Kotlin 2.4.21 (built-in — no kotlin-android plugin), Gradle 9.8.1, JDK 25 for the Gradle daemon (pinned by `gradle/gradle-daemon-jvm.properties`; Gradle downloads it if missing; app bytecode targets Java 17)
-- Android NDK + CMake 3.22.1 (the SDK compiles its own MSI decoder from
+- AGP 9.4.1, Kotlin 2.4.21 (built-in — no kotlin-android plugin), Gradle 9.8.2, JDK 25 for the Gradle daemon (pinned by `gradle/gradle-daemon-jvm.properties`; Gradle downloads it if missing; app bytecode targets Java 17)
+- Android NDK + CMake 4.1.2 (the SDK compiles its own MSI decoder from
   `src/main/cpp/`; zxing-cpp v3.1.1 arrives as a prebuilt Maven Central AAR —
   network fetch happens once via Gradle)
 - minSdk 28 (Android 9). Native libraries ship for `armeabi-v7a`,
@@ -195,10 +195,14 @@ on-device full chain, Pixel 6a / emulator):
 
 | Stage | Host (macOS, `tools/msi-harness` bench) | On-device, full chain (arm64) |
 |---|---|---|
-| Native MSI decode | ~2.1 ms mean (1280×720 synthetic), ~0.7–1 ms (shelf photo) | single-digit ms inside the scan below |
+| Native MSI decode | ~0.7 ms mean (1280×720 synthetic, Apple M2 Max), ~0.7–1 ms (shelf photo) | single-digit ms inside the scan below |
 | One-shot MSI `scanBitmap` | n/a (native absent on JVM) | ~15–60 ms typical |
 | DataBar via zxing-cpp (native TryRotate/TryHarder) | n/a (native absent on JVM) | ~35–55 ms |
 | Full-chain worst case | — | capped by `decodeTimeoutMillis` (default 1500 ms) |
+
+Methodology, the full real-photo accuracy/tilt tables and scope boundaries
+(including the comparison chart with a leading commercial SDK and Apple
+Vision) are in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 
 Live-mode recipe (already wired, no host code needed):
 - Fusion tries engines in registration order with first-confident-wins: a pointed

@@ -28,8 +28,18 @@ class MsiShelfVectorsTest {
     }
 
     @Test
-    fun yakult_mod10() {
+    fun yakult_full_codeword() {
         assertEquals(9, MsiChecksumValidator.mod10Check("0828147"))
+        // The bars carry the full 9-digit Mod1010 codeword. MOD_10 strips only
+        // its last check (08281479); MOD_10_10 strips both and returns the SKU.
+        checkFull("082814799", MsiChecksumPolicy.MOD_10, "08281479")
+        checkFull("082814799", MsiChecksumPolicy.MOD_10_10, "0828147")
+    }
+
+    @Test
+    fun yakult_mod10_prefix_is_valid_but_is_a_truncation() {
+        // The 8-digit prefix ending at the first check is Mod10-valid; pin the
+        // truncation caveat so a policy/length change cannot hide it.
         checkFull("08281479", MsiChecksumPolicy.MOD_10, "0828147")
     }
 
@@ -39,12 +49,24 @@ class MsiShelfVectorsTest {
     }
 
     @Test
-    fun oneDegree_mod10() {
+    fun oneDegree_full_codeword() {
+        checkFull("024352387", MsiChecksumPolicy.MOD_10, "02435238")
+        checkFull("024352387", MsiChecksumPolicy.MOD_10_10, "0243523")
+    }
+
+    @Test
+    fun oneDegree_mod10_prefix_is_a_truncation() {
         checkFull("02435238", MsiChecksumPolicy.MOD_10, "0243523")
     }
 
     @Test
-    fun dixie_mod10() {
+    fun dixie_full_codeword() {
+        checkFull("008757320", MsiChecksumPolicy.MOD_10, "00875732")
+        checkFull("008757320", MsiChecksumPolicy.MOD_10_10, "0087573")
+    }
+
+    @Test
+    fun dixie_mod10_prefix_is_a_truncation() {
         checkFull("00875732", MsiChecksumPolicy.MOD_10, "0087573")
     }
 
@@ -56,6 +78,7 @@ class MsiShelfVectorsTest {
     @Test
     fun silk_mod1010() {
         checkFull("082659368", MsiChecksumPolicy.MOD_10_10, "0826593")
+        checkFull("082659368", MsiChecksumPolicy.MOD_10, "08265936")
     }
 
     @Test

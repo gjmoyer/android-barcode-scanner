@@ -145,23 +145,25 @@ verdicts) plus the host harness at SDK-equivalent payload level. Ground truth
 is payload → bars; the native engine reports whichever scheme validates and
 Kotlin re-validates strictly under the configured policy before stripping.
 
-| File (SKU) | Result | Notes |
-|---|---|---|
-| yakult `0828147` | ✅ EXACT (`MOD_10` → `0828147`, 1.0, MsiNative) | Far-field tiny modules; rescued by the NN 2x upscale retry. Repeat-stable ×3 on device. |
-| dixie `0087573` | ✅ EXACT (`MOD_10` → `0087573`, 1.0, MsiRoi) | Glare-heavy; ROI crop isolates it where full-frame sees phantoms. Repeat-stable ×3. |
-| starbucks `0168971` | ✅ EXACT (`MOD_10_10` → `0168971`, 1.0) | Full 9-digit codeword `016897100`; note it also validates as Mod10 (every double-check codeword does by construction), so policy — not the reported scheme — decides the payload. Repeat-stable ×3. |
-| silkalm `0826593` | ✅ EXACT (`MOD_10` → `0826593`, 1.0, MsiNative) | Bars carry 8/9 digits; full-frame-first ordering fixed this (ROI crops phantomized). Repeat-stable ×3. |
-| quakotml `0186477` | ❌ honest NotFound | Full-res modules overshoot the template range (truncated read, policy-gated). Resolves at 0.75 scale on the host harness; tracked gap. |
-| ondeg `0243523` | ❌ phantoms validate | True bars never resolve; shifted windows checksum-validate by luck. Tracked gap; live stability gate is the remaining defense. |
+All six fixtures carry the full 9-digit Mod1010 codeword (7-digit item +
+Mod10 + Mod10). The host harness reads all six exactly; on-device hard
+assertions cover yakult, dixie, starbucks and silkalm, while quakotml and
+onedegree remain device-only gaps (matrix-logged, not asserted).
 
-> **Truth-label caveat (see §10).** These fixtures are not in the repo and
-> could not be re-verified. Real shelf tags encode 9 digits (item + Mod10 +
-> Mod10), and every 8-digit prefix of such a codeword is Mod10-valid, so the
-> 8-digit `MOD_10` labels above (yakult `08281479`, dixie `00875732`, ondeg
-> `02435238`) are most likely physical truncations that happen to strip to
-> the item under `MOD_10`. Yakult's item computes to `082814799` under
-> Mod1010; branch commit 3e51fb3 treated that full read as a phantom, which
-> is likely inverted. Re-label from the fixtures before trusting them.
+| File (SKU) | Full codeword | MOD_10 payload | MOD_10_10 payload | Notes |
+|---|---|---|---|---|
+| yakult `0828147` | `082814799` | `08281479` | `0828147` | Far-field tiny modules; rescued by the NN 2x upscale retry. Repeat-stable ×3 on device. |
+| dixie `0087573` | `008757320` | `00875732` | `0087573` | Glare-heavy; ROI crop isolates it where full-frame sees phantoms. Repeat-stable ×3. |
+| starbucks `0168971` | `016897100` | `01689710` | `0168971` | Double-check codeword; policy — not the reported scheme — decides the payload. Repeat-stable ×3. |
+| silkalm `0826593` | `082659368` | `08265936` | `0826593` | Host exact both policies; the device MOD_10_10 full-resolution path is a logged gap. |
+| quakotml `0186477` | `018647768` | `01864776` | `0186477` | Host exact; device full-res modules overshoot the template range (logged, not asserted). |
+| ondeg `0243523` | `024352387` | `02435238` | `0243523` | Host exact; device true bars still do not resolve (logged, not asserted). |
+
+> **Truth-label note.** The fixture filenames carry the 7-digit printed item.
+> Under `MOD_10` a 9-digit codeword strips only its last check and therefore
+> returns 8 digits (`08281479`, `00875732`, ...); those 8-digit values are
+> truncations, not the full codeword. Assertions that used the 7-digit item as
+> the `MOD_10` payload were corrected after re-checking the bars.
 
 No wrong-value emission inside the asserted set: truncated reads are gated to
 `NotFound` by policy revalidation, and blank areas (all-zeros windows that
@@ -185,20 +187,18 @@ adjacent rows, rescaled copies) must not each count as independent votes.
 Checksum census from the filename SKUs (machine-verified, not assumed).
 Remember the printed payload is NOT the codeword — the check digit(s) live
 only in the bars:
-- yakult `0828147`: Mod10 (check 9) — full codeword `08281479`, bars decode.
+- yakult `0828147`: Mod1010 (checks 9, 9) — full codeword `082814799`.
 - quakotml `0186477`: Mod1010 (checks 6, 8) — full codeword `018647768`.
-- ondeg `0243523`: Mod10 (check 8) — full codeword `02435238`.
-- dixie `0087573`: Mod10 (check 2) — full codeword `00875732`, bars decode.
-  (The old census note "validates under NO scheme" was about the bare
-  7-digit payload treated as a codeword — my arithmetic at the time, and a
-  good lesson: never hand-assert a check digit; verify the full codeword.)
-- starbucks `0168971`: Mod1010 (checks 0, 0) — full codeword `016897100`,
-  bars decode.
+- ondeg `0243523`: Mod1010 (checks 8, 7) — full codeword `024352387`.
+- dixie `0087573`: Mod1010 (checks 2, 0) — full codeword `008757320`.
+- starbucks `0168971`: Mod1010 (checks 0, 0) — full codeword `016897100`.
 - silkalm `0826593`: Mod1010 (checks 6, 8) — full codeword `082659368`.
 
-Scoreboard with correct per-label policies: bars 4/6 exact (yakult, dixie,
-starbucks, silkalm), 2 honest gaps (quakotml, ondeg), zero wrong-value
-emissions in the asserted set.
+Scoreboard: host harness 6/6 exact full codewords; on-device hard assertions
+4/6 (yakult, dixie, starbucks, silkalm) with quakotml and ondeg matrix-logged
+gaps; zero wrong-value emissions in the asserted set. Under `MOD_10` the
+9-digit codewords report their 8-digit truncation (`payload + first check`),
+which is expected policy behaviour, not a full read.
 
 The OCR SKU-text fallback (`OcrSkuDecoder`, retired) used to read printed
 digits as a last resort when bars failed. It was removed: the native bar
@@ -281,7 +281,8 @@ outvote it. Superseded by §8.3 before ever shipping. Leave it dead.
    the ranked winner reaches voting, so the true read is lost (a recall
    gap, not a wrong-read risk). A shorter read only drops a longer one that
    extends it when strictly stronger AND better bar-fitting — on ties the
-   longer read stays (every prefix of a Mod1010 codeword is Mod10-valid).
+   longer read stays (the 8-digit prefix ending at the first check is
+   Mod10-valid).
    Each digit window anchors to its own bar, so a dropped or extra bar can
    push one window off the symbol's uniform pitch onto a lucky template
    match that still closes the checksum. Checksum-valid hypotheses whose
@@ -519,9 +520,10 @@ landscape mixed — distinct labels matter, repeats are free in-test.
    `8052`→3 as sanity anchors):
    Mod10 = Luhn; Mod11 = IBM weights 2..7 from the right, `(11-sum%11)%11`;
    Mod1010 = Mod10 then Mod10 over payload+first check; Mod1110 = Mod11
-   then Mod10. Reference pairs: `0828147`→`08281479`,
-   `0186477`→`018647768`, `0243523`→`02435238`, `0087573`→`00875732`,
-   `0168971`→`016897100`, `0826593`→`082659368`. A SKU validating under NO
+   then Mod10. Reference full codewords: `0828147`→`082814799`,
+   `0186477`→`018647768`, `0243523`→`024352387`, `0087573`→`008757320`,
+   `0168971`→`016897100`, `0826593`→`082659368`. The 8-digit
+   `payload + first check` forms are truncations. A SKU validating under NO
    scheme is data, not an error — record it as such (do not hand-invent a
    check digit; that exact mistake is documented in §7).
 3. **Where files go (all git-ignored, all auto-consumed):** harness sweep dir
@@ -548,7 +550,7 @@ hand decode of item 0115783 gives `011578333`. Non-39 counts were crop
 clipping or noise.
 
 Consequences:
-- Every prefix of a Mod1010 codeword is Mod10-valid, so an 8-digit
+- The 8-digit prefix ending at the first check is Mod10-valid, so that
   truncation (`01157833`) is indistinguishable from a real Mod10 code
   unless the policy is pushed down.
 - Luhn and Mod11 ignore leading zeros, so a dropped leading `0`

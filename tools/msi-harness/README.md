@@ -23,7 +23,7 @@ SKIPs and stays green; the committed coverage is the runtime synthetic suite
 + bench above it. Drop local `msi-<label>-<sku>.png` captures in any dir and
 pass it as argv[1] to sweep those (the six-SKU ground truth + policies live
 in `shelfSuite`, and `gen_shelf_synthetics.py` regenerates equivalent
-spec-rendered vectors locally).
+full-codeword PNGs in `build/shelf-synthetics` by default).
 Exit code = number of asserted failures (0 = green).
 
 ## What it runs
@@ -44,10 +44,10 @@ Exit code = number of asserted failures (0 = green).
    8-digit truncations and dropped leading zeros (base 4c9be3b failed 9 of
    15). Also pins the required-policy contract (unsatisfied scheme =
    NotFound, satisfied scheme reported as required).
-3. **Shelf-photo sweeps**: each of the 6 committed shelf photos decoded
-   across scales {1.0, 0.75, 0.5} × photometric variants × 3 repeats.
-   Pristine + mild variants are ASSERTED; harsh scale+photometric combos are
-   reported as recall signal (not gates).
+3. **Shelf-photo sweeps**: each local `msi-<label>-<sku>.png` shelf photo
+   (absent in a clean checkout) decoded across scales {1.0, 0.75, 0.5} ×
+   photometric variants × 3 repeats. Pristine + mild variants are ASSERTED;
+   harsh scale+photometric combos are reported as recall signal (not gates).
 4. **Native frame path** (`frameSuite`, ASSERTED): `msi_frame`'s one-pass
    crop + contrast stretch + rotate-upright is byte-identical to the Kotlin
    `ContrastNormalizationTransform` semantics (mirrored by `contrastStretch`)
@@ -87,3 +87,18 @@ the `digits|policy|votes|relativeRotation` result format. The Java stubs under
 and `MsiNativeDecoder` — update both together (JNI binds by name only, so a
 signature drift is silent undefined behaviour, not a link error). Needs a JDK
 (`JAVA_HOME`, else Android Studio's JBR) and an Android NDK (for `jni.h`).
+
+## Apple Vision baseline (macOS only)
+
+`vision_bench.swift` measures `VNDetectBarcodesRequest` per image (median of
+three requests, image load excluded) and prints `file<TAB>ms<TAB>payload`.
+Compile and run on a local shelf crop dir:
+
+```sh
+swiftc -O vision_bench.swift -o vision_bench
+./vision_bench /path/to/msi-tags/*.png > vision.tsv
+```
+
+The 116-crop comparison in `docs/BENCHMARKS.md` used the same local crops and
+truth set; the images/truth are not committed. Apple Vision runs on macOS, so
+its latency is not directly comparable to the Pixel-emulator rows.

@@ -2,8 +2,9 @@
 """Generate public-safe synthetic MSI barcode fixtures for the six shelf SKUs.
 
 The real shelf photos stay OUT of the repo (private labels, store policy,
-bulk-collection concerns). These PNGs encode the SAME full codewords
-(payload + check digits) rendered from the MSI spec.
+bulk-collection concerns). These PNGs encode the SAME full 9-digit Mod1010
+codewords (7-digit item + two checks) rendered from the MSI spec, and use the
+`msi-<label>-<payload>.png` names the host shelf suite consumes.
 
 Render choice (verified by measurement, not aesthetics): crisp 3px modules,
 no blur, no gradient. Rationale, all confirmed with the host harness:
@@ -13,9 +14,9 @@ no blur, no gradient. Rationale, all confirmed with the host harness:
   renders OUT of the template model's sweet spot and drops leading narrow
   digits or invents phantoms — real captures carry sensor texture the
   renderer cannot cheaply fake, so crisp-deterministic is the honest choice;
-- at 3px, yakult/dixie/starbucks read EXACT full codewords; quakotml/silkalm
-  truncate and ondeg honest-misses — the same profile as the real photos,
-  so the fixtures pin floor behavior instead of baking misparses.
+- the fixture table now uses the full 9-digit Mod1010 codewords verified from
+  the bars. Under MOD_10 the decoder reports the 8-digit payload+first-check
+  truncation; that is policy behaviour, not the full codeword.
 
 Independent implementation cross-checks (do NOT copy from these sources):
 - module spec: Wikipedia "MSI Barcode" (START 110, bit 1 -> 110, bit 0 ->
@@ -24,7 +25,9 @@ Independent implementation cross-checks (do NOT copy from these sources):
 
 Usage:
     ./gen_shelf_synthetics.py [out_dir]
-Default out_dir is ../../barcode-scanner-sdk/src/test/resources/msi-shelf.
+Default out_dir is ../../build/shelf-synthetics (git-ignored). Do not point
+it at src/test/resources/msi-shelf when real captures are present: the
+generated names match the private fixture names.
 
 Only the Python standard library is used (struct, zlib); output is 8-bit
 grayscale PNG. Deterministic — no randomness.
@@ -37,10 +40,10 @@ import zlib
 
 # (label, payload, policy) — ground truth, checksum-verified below.
 CASES = [
-    ("yakult", "0828147", "mod10"),
+    ("yakult", "0828147", "mod1010"),
     ("quakotml", "0186477", "mod1010"),
-    ("ondeg", "0243523", "mod10"),
-    ("dixie", "0087573", "mod10"),
+    ("ondeg", "0243523", "mod1010"),
+    ("dixie", "0087573", "mod1010"),
     ("starbucks", "0168971", "mod1010"),
     ("silkalm", "0826593", "mod1010"),
 ]
@@ -136,8 +139,20 @@ def main():
     assert mod10("8052") == 3, "Luhn Morovia vector"
     out_dir = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
-        "../../barcode-scanner-sdk/src/test/resources/msi-shelf",
+        "../../build/shelf-synthetics",
     )
+    test_resources = os.path.abspath(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "../../barcode-scanner-sdk/src/test/resources/msi-shelf",
+    ))
+    if os.path.abspath(out_dir) == test_resources and os.path.isdir(out_dir):
+        if any(
+            name.startswith("msi-") and name.endswith(".png")
+            for name in os.listdir(out_dir)
+        ):
+            raise SystemExit(
+                "refusing to overwrite private msi-*.png fixtures; use a different out_dir"
+            )
     os.makedirs(out_dir, exist_ok=True)
     for label, payload, policy in CASES:
         full = full_codeword(payload, policy)
@@ -146,7 +161,7 @@ def main():
         width = len(mods) * 3 + 2 * 12 * 3
         px, w, h = render_gray(full, module_px=3, bar_h=110, width=width,
                                height=300, top_y=95)
-        name = "syn-msi-%s-%s.png" % (label, payload)
+        name = "msi-%s-%s.png" % (label, payload)
         write_png_gray(os.path.join(out_dir, name), px, w, h)
         print("%s: full=%s policy=%s %dx%d" % (name, full, policy, w, h))
 
