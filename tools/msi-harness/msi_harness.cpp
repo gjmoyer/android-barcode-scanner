@@ -528,6 +528,49 @@ static void frameSuite() {
     assertTrue("frame upright tag: 2 orientations (reverse confirmed) -> relativeRotation 0",
                f0.decode.ok && f0.decode.digits == "12345674" && f0.relativeRotation == 0);
 
+    // 5a. Reversed-phantom regression. The 180-degree view of a blurred,
+    // low-contrast tag can decode to a checksum-valid 9-digit phantom, so
+    // decodeFrame must confirm the opposite view instead of trusting a
+    // strong-looking first read. These are the reproductions that a fixed
+    // "leading quiet zone >= 1.8" fast path got wrong (reversed phantom
+    // lead 1.90). Keep the reverse confirmation mandatory here.
+    {
+        struct RevCase {
+            const char* full;
+            msi::ChecksumPolicy policy;
+            int w, h, top, barH, blur;
+            float contrast;
+            int brightness;
+        };
+        const RevCase reversed[] = {
+            {"800091001", msi::ChecksumPolicy::MOD10, 800, 400, 150, 120, 2, 0.5f, 0},
+            {"900180100", msi::ChecksumPolicy::MOD10, 800, 400, 150, 120, 2, 0.5f, 0},
+            {"809000011", msi::ChecksumPolicy::MOD10, 800, 400, 150, 120, 2, 0.5f, 0},
+            // Forward 1x phantom, true reverse rescued only by a failure-path
+            // retry. Disabling retries on the reverse confirmation made these
+            // return the phantom, so they guard the confirmation contract.
+            {"891801110", msi::ChecksumPolicy::MOD1010, 1100, 500, 150, 200, 3, 0.8f, 0},
+            {"900800087", msi::ChecksumPolicy::MOD10, 800, 400, 150, 120, 3, 0.9f, -20},
+        };
+        msi::FrameOptions ro;
+        ro.maxOrientations = 2;
+        ro.scanTopFraction = 0.0f;
+        ro.minDigits = 9;
+        ro.maxDigits = 9;
+        for (const RevCase& rc : reversed) {
+            Gray g = renderMsi(rc.full, 3, rc.w, rc.h, rc.top, rc.barH);
+            boxBlur(g, rc.blur);
+            photometric(g, rc.contrast, rc.brightness);
+            Gray flip = rotateCw(g, 180);
+            ro.required = rc.policy;
+            msi::FrameResult fr = msi::decodeFrame(flip.px.data(), flip.w, flip.h, ro);
+            const std::string name =
+                std::string("frame reversed phantom ") + rc.full + " -> true 180-degree read";
+            assertTrue(name.c_str(),
+                       fr.decode.ok && fr.decode.digits == rc.full && fr.relativeRotation == 180);
+        }
+    }
+
     // 5b. Leading quiet zone (direction arbitration evidence). A 9px module
     //     puts its 6 quiet modules (54px) past the 20px the ROI keeps before
     //     its first column: without the verification head only a window
@@ -552,6 +595,15 @@ static void frameSuite() {
     msi::DecodeResult el = msi::decode(edge.px.data(), edge.w, edge.h, lo);
     assertTrue("frame leadingQuiet unseen when the Start bar touches the frame edge",
                el.ok && el.digits == "12345674" && el.leadingQuiet < -1e8f);
+    // The same edge-cut tag through decodeFrame must still read with an
+    // unseen lead. This covers the unseen-lead branch; it is not a guard for
+    // the retry/reverse-confirmation contract above.
+    msi::FrameOptions eo;
+    eo.maxOrientations = 2;
+    eo.scanTopFraction = 0.0f;
+    msi::FrameResult ef = msi::decodeFrame(edge.px.data(), edge.w, edge.h, eo);
+    assertTrue("frame edge-cut tag (unseen lead) still confirms and reads",
+               ef.decode.ok && ef.decode.digits == "12345674" && ef.relativeRotation == 0);
 
     // 6. Aim-box crops put the tag anywhere, including the top quarter the
     //    full-frame band search skips (kScanTopFraction).
@@ -1037,7 +1089,11 @@ static void checkSdk(const std::string& name, const Gray& g, const ShelfCase& sc
     auto t1 = std::chrono::steady_clock::now();
     long us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
     std::string payload = r.ok ? kValidate(r.digits, sc.policy) : "";
-    bool ok = r.ok && payload == sc.payload;
+    // Assert the full codeword too (when the table supplies one); the old
+    // table only checked the stripped payload, so a wrong check digit could
+    // hide behind a valid payload.
+    bool fullOk = sc.full[0] == '\0' || (r.ok && r.digits == sc.full);
+    bool ok = fullOk && r.ok && payload == sc.payload;
     const char* verdict = ok ? (asserted ? "PASS" : "pass(info)") : (asserted ? "FAIL" : "fail(info)");
     printf("%s %-34s %dx%d want=%s got=%s/%s votes=%d %ldus\n", verdict, name.c_str(), g.w, g.h,
            sc.payload, payload.empty() ? "(none)" : payload.c_str(),
@@ -1095,9 +1151,9 @@ static void shelfSuite(const std::string& dir) {
         // Full 9-digit Mod1010 codewords (7-digit payload + two checks),
         // identical to what macOS Vision reports for these captures and
         // consistent with the printed SKUs. The old table pinned 8-digit
-        // Mod10 codewords; the decoder now reads the full symbol, and any
-        // 8-digit prefix of a Mod1010 codeword is Mod10-valid, so asserting
-        // both is the strong form.
+        // Mod10 codewords; the decoder now reads the full symbol, and the
+        // 8-digit prefix ending at the first check is Mod10-valid, so
+        // asserting both is the strong form.
         {"msi-yakult-0828147.png", "082814799", 2, "0828147", false},
         {"msi-quakotml-0186477.png", "018647768", 2, "0186477", false},
         {"msi-ondeg-0243523.png", "024352387", 2, "0243523", false},

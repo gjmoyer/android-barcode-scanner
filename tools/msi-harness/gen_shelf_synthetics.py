@@ -2,8 +2,9 @@
 """Generate public-safe synthetic MSI barcode fixtures for the six shelf SKUs.
 
 The real shelf photos stay OUT of the repo (private labels, store policy,
-bulk-collection concerns). These PNGs encode the SAME full codewords
-(payload + check digits) rendered from the MSI spec.
+bulk-collection concerns). These PNGs encode the SAME full 9-digit Mod1010
+codewords (7-digit item + two checks) rendered from the MSI spec, and use the
+`msi-<label>-<payload>.png` names the host shelf suite consumes.
 
 Render choice (verified by measurement, not aesthetics): crisp 3px modules,
 no blur, no gradient. Rationale, all confirmed with the host harness:
@@ -13,9 +14,9 @@ no blur, no gradient. Rationale, all confirmed with the host harness:
   renders OUT of the template model's sweet spot and drops leading narrow
   digits or invents phantoms — real captures carry sensor texture the
   renderer cannot cheaply fake, so crisp-deterministic is the honest choice;
-- at 3px, yakult/dixie/starbucks read EXACT full codewords; quakotml/silkalm
-  truncate and ondeg honest-misses — the same profile as the real photos,
-  so the fixtures pin floor behavior instead of baking misparses.
+- the fixture table now uses the full 9-digit Mod1010 codewords verified from
+  the bars. Under MOD_10 the decoder reports the 8-digit payload+first-check
+  truncation; that is policy behaviour, not the full codeword.
 
 Independent implementation cross-checks (do NOT copy from these sources):
 - module spec: Wikipedia "MSI Barcode" (START 110, bit 1 -> 110, bit 0 ->
@@ -37,10 +38,10 @@ import zlib
 
 # (label, payload, policy) — ground truth, checksum-verified below.
 CASES = [
-    ("yakult", "0828147", "mod10"),
+    ("yakult", "0828147", "mod1010"),
     ("quakotml", "0186477", "mod1010"),
-    ("ondeg", "0243523", "mod10"),
-    ("dixie", "0087573", "mod10"),
+    ("ondeg", "0243523", "mod1010"),
+    ("dixie", "0087573", "mod1010"),
     ("starbucks", "0168971", "mod1010"),
     ("silkalm", "0826593", "mod1010"),
 ]
@@ -146,7 +147,7 @@ def main():
         width = len(mods) * 3 + 2 * 12 * 3
         px, w, h = render_gray(full, module_px=3, bar_h=110, width=width,
                                height=300, top_y=95)
-        name = "syn-msi-%s-%s.png" % (label, payload)
+        name = "msi-%s-%s.png" % (label, payload)
         write_png_gray(os.path.join(out_dir, name), px, w, h)
         print("%s: full=%s policy=%s %dx%d" % (name, full, policy, w, h))
 
