@@ -481,7 +481,10 @@ float deskewSharpness(const uint8_t* g, int W, const Rect& roi, float slope) {
     const int n = roi.x1 - roi.x0;
     if (n < 3) return 0;
     const float yc = 0.5f * (roi.y0 + roi.y1);
-    std::vector<float> acc(n, 0.0f);
+    // Reused across the 33 angle probes per ROI; deskewSharpness is on the
+    // failure path and allocator jitter showed up in the max-latency tail.
+    static thread_local std::vector<float> acc;
+    acc.assign(n, 0.0f);
     int cnt = 0;
     for (int y = roi.y0; y < roi.y1; y += kSkewSearchRowStep) {
         const int x0 = roi.x0 + (int)std::lround(-slope * (y - yc));
@@ -1771,14 +1774,24 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
         // lengthen band runs; the column pass already samples every pixel).
         const int W2 = width * 2, H2 = height * 2;
         std::vector<uint8_t> up((size_t)W2 * (size_t)H2);
-        for (int y = 0; y < H2; ++y) {
-            const uint8_t* srcRow = gray + (size_t)(y / 2) * width;
-            uint8_t* dstRow = &up[(size_t)y * W2];
-            for (int x = 0; x < W2; ++x) {
-                int sx = (x + 1) / 2;
-                if (sx >= width) sx = width - 1;
-                dstRow[x] = srcRow[sx];
+        // Expand each source row once, then copy it to the two destination
+        // rows. The old loop re-expanded the same row twice and did a divide
+        // per output pixel; this is the same +1px-shift nearest-neighbour
+        // mapping (row[2i-1]=row[2i]=src[i], ends clamped) with 4x fewer
+        // expansion iterations.
+        std::vector<uint8_t> expanded((size_t)W2);
+        for (int y = 0; y < height; ++y) {
+            const uint8_t* srcRow = gray + (size_t)y * width;
+            expanded[0] = srcRow[0];
+            for (int i = 1; i < width; ++i) {
+                expanded[(size_t)2 * i - 1] = srcRow[i];
+                expanded[(size_t)2 * i] = srcRow[i];
             }
+            expanded[(size_t)W2 - 1] = srcRow[width - 1];
+            uint8_t* dst0 = &up[(size_t)(2 * y) * W2];
+            uint8_t* dst1 = dst0 + W2;
+            memcpy(dst0, expanded.data(), (size_t)W2);
+            memcpy(dst1, expanded.data(), (size_t)W2);
         }
         return decodeImpl(up.data(), W2, H2, /*allowUpscale=*/false, scanTopFraction);
     }
