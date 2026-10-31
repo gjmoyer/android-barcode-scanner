@@ -87,3 +87,18 @@ the `digits|policy|votes|relativeRotation` result format. The Java stubs under
 and `MsiNativeDecoder` — update both together (JNI binds by name only, so a
 signature drift is silent undefined behaviour, not a link error). Needs a JDK
 (`JAVA_HOME`, else Android Studio's JBR) and an Android NDK (for `jni.h`).
+
+## Apple Vision baseline (macOS only)
+
+`vision_bench.swift` measures `VNDetectBarcodesRequest` per image (median of
+three requests, image load excluded) and prints `file<TAB>ms<TAB>payload`.
+Compile and run on a local shelf crop dir:
+
+```sh
+swiftc -O vision_bench.swift -o vision_bench
+./vision_bench /path/to/msi-tags/*.png > vision.tsv
+```
+
+The 116-crop comparison in `docs/BENCHMARKS.md` used the same local crops and
+truth set; the images/truth are not committed. Apple Vision runs on macOS, so
+its latency is not directly comparable to the Pixel-emulator rows.
