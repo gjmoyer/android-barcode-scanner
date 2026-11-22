@@ -31,6 +31,15 @@
 #include "msi_decoder.h"
 #include "msi_frame.h"
 
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(undefined_behavior_sanitizer)
+#define MSI_SANITIZER_BUILD 1
+#endif
+#endif
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define MSI_SANITIZER_BUILD 1
+#endif
+
 // ------------------------------------------------------------ test context
 static int g_assertFails = 0;
 static int g_assertPass = 0;
@@ -674,6 +683,31 @@ static void frameSuite() {
                            : "still 181-degree fallback: no wrong 9-digit read",
                        !pr.decode.ok ||
                            (pr.decode.digits == "900800087" &&
+                            pr.relativeRotation == 180));
+        }
+    }
+
+    // 5a-3b. Second near-180 phantom (846639722) from the stretched sweep.
+    {
+        Gray g = renderMsi("846639722", 3, 800, 400, 150, 120);
+        photometric(g, 0.40f, 0);
+        boxBlur(g, 3);
+        Gray tilted = rotateAny(g, 181.0f);
+        msi::FrameOptions po;
+        po.maxOrientations = 4;
+        po.scanTopFraction = 0.25f;
+        po.stretchRetry = true;
+        po.required = msi::ChecksumPolicy::MOD10;
+        for (int bounds : {0, 9}) {
+            po.minDigits = bounds;
+            po.maxDigits = bounds;
+            msi::FrameResult pr = msi::decodeFrame(tilted.px.data(), tilted.w,
+                                                   tilted.h, po);
+            assertTrue(bounds == 0
+                           ? "still 181-degree sweep phantom: no wrong open read"
+                           : "still 181-degree sweep phantom: no wrong 9-digit read",
+                       !pr.decode.ok ||
+                           (pr.decode.digits == "846639722" &&
                             pr.relativeRotation == 180));
         }
     }
@@ -1438,7 +1472,13 @@ static void perfSuite() {
         auto t1 = std::chrono::steady_clock::now();
         const long ms = (long)std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
         printf("PERF %-24s %dx%d %ldms (budget %ldms)\n", name, w, h, ms, budgetMs);
+#ifdef MSI_SANITIZER_BUILD
+        // Sanitizer instrumentation makes wall-clock budgets meaningless;
+        // keep the all-failure correctness assertion only.
+        assertTrue(name, !r.decode.ok);
+#else
         assertTrue(name, !r.decode.ok && ms <= budgetMs);
+#endif
     };
     one("perf 16MP blank", 4000, 4000, false, 1000);
     one("perf 4MP noise", 2000, 2000, true, 2000);

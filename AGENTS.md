@@ -94,14 +94,14 @@ emulator image and local fixture photos.
     NN mapping. If both read they must agree. A single-scale read needs
     score ≥0.70. Nested angle fallback is limited to derived planes ≤1 MP,
     and the scale legs honor the caller's `allowUpscale`. Stretched-sweep
-    reads whose reverse view fails are rejected below score 0.55.
+    reads whose paired reverse view fails are rejected below score 0.55.
   Default open-length stills get only the direction-safe angle fallback;
   sharpened/scale retries are shelf-configuration only.
   Recursion guards are `t_sharpenDepth` and `t_scaleEnsembleDepth`, held by
   RAII `DepthGuard`s so `bad_alloc` cannot poison a worker thread. Do not
   widen these gates without re-running the full augmented suite, the negative
-  sets (currently 408 ms mean / 595 ms p95 / 728 ms max per all-failure
-  frame on the host) and the harness (168 assertions). The safety pass holds
+  sets (currently 412 ms mean / 596 ms p95 / 743 ms max per all-failure
+  frame on the host) and the harness (170 assertions). The safety pass holds
   2,286/2,440 augmented positives with no new wrong reads.
 - The orientation regressor is the only learned MSI component: a 32x32 →
   128 → 64 → 1 MLP in `msi_angle_model.h`, trained offline on synthetic

@@ -144,8 +144,8 @@ Grayscale frame (row-major bytes via JNI)
   4 MP; the angle fallback's 2× stage needs a long edge ≥330 px and caps its
   output at 4 MP, and the ensemble runs only at ≤400 px. Stills always force
   at least two orientation attempts so 0/180 arbitration is never skipped.
-  A stretched-sweep read whose reverse view fails is rejected below score
-  0.55.
+  A stretched-sweep read whose paired reverse view fails is rejected below
+  score 0.55.
   The sharpened retry is deliberately before the ensemble: the ensemble is
   the dominant cost on all-failure frames. Recursion guards are RAII
   `DepthGuard`s; sharpened frame decodes disable their own upscale, the

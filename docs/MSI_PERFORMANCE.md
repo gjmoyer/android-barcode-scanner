@@ -39,9 +39,9 @@ run these retries (`stretchRetry=false`).
 | `scale075` (122) | 18.04 | 35.19 | 624.52 | 624.5 | 1 |
 | `scale050` (122) | 23.71 | 109.04 | 402.88 | 321.4 | 3 |
 | `scale035` (122) | 119.67 | 378.03 | 813.16 | 211.9 | 43 |
-| `negative` (244, all fail) | **408.38** | **595.27** | **727.80** | **408.4** | 244 |
+| `negative` (244, all fail) | **411.93** | **595.54** | **743.01** | **411.9** | 244 |
 
-Total decode time over the 23-set suite: **27.1 s baseline, 171.8 s final**
+Total decode time over the 23-set suite: **27.1 s baseline, 172.4 s final**
 (the pre-safety fallback stack was 358.3 s). The all-failure negative frame
 now fits the 1.5 s still budget with ~0.76 s headroom on this host.
 
@@ -83,13 +83,13 @@ honor the caller's `allowUpscale`. A 550×550 all-failure frame dropped from
 |---|---:|---:|---:|---:|
 | Angle fallback only (historical) | 23.9 ms | 17.5 ms | 455 ms | 2,097 |
 | Full stack, pre-safety (historical) | 22.8 ms | 15.3 ms | 865 ms | 2,319 |
-| Full stack, final | 28.3 ms | 25.9 ms | 408 ms | **2,286** |
+| Full stack, final | 28.3 ms | 25.9 ms | 412 ms | **2,286** |
 
 The final stack spends more time per difficult positive because fallback
 reads are reverse-confirmed and weak single-view candidates are rejected.
 That safety pass costs 33 positives (2,319 → 2,286) but removes the
 reproducible wrong-read paths and cuts the worst all-failure frame from
-1,323 ms to 728 ms.
+1,323 ms to 743 ms.
 
 ## Conclusions
 
@@ -102,7 +102,7 @@ reproducible wrong-read paths and cuts the worst all-failure frame from
 - Derived-frame decodes disable their own far-field upscale; the scale legs
   honor the caller's `allowUpscale`. A single derived-scale read needs
   score ≥0.70.
-- The current host all-failure cost is **408 ms mean / 595 ms p95 / 728 ms
+- The current host all-failure cost is **412 ms mean / 596 ms p95 / 743 ms
   max**, within the 1.5 s still budget; device thermal/slower-CPU behavior
   is still unmeasured.
 - Full-resolution stills are deliberately outside the heavy fallback stack;

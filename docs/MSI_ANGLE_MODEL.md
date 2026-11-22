@@ -32,7 +32,7 @@ those numbers are not training labels or implementation inputs.
   read must clear score ≥0.70 (no vote escape). Stills also force at least
   two orientations, so the ordinary sweep confirms the reverse view even
   when a caller asks for one orientation. A stretched-sweep read whose
-  reverse view fails is rejected below score 0.55.
+  paired reverse view fails is rejected below score 0.55.
 - It runs only after the normal plain/stretch orientation sweeps fail, only
   on the still path (`FrameOptions::stretchRetry`). Live frames keep the old
   behavior. The 2× stage needs a long edge ≥330 px, caps the rotated long
@@ -86,7 +86,7 @@ phantom.
 
 ## Guardrails
 
-- `tools/msi-harness`: **168 assertions pass, 0 fail** (149 public, 168 with
+- `tools/msi-harness`: **170 assertions pass, 0 fail** (151 public, 170 with
   the local fixture photos).
 - Fast path: 486 µs mean / 494 µs worst synthetic 1280×720; 524 µs / 631 µs
   on the fixture shelf photo (Apple M2 Max).
@@ -106,8 +106,8 @@ phantom.
   regenerating, and do not train on the local augmented evaluation sets.
 - Failure-path cost is measured separately in
   [`MSI_PERFORMANCE.md`](MSI_PERFORMANCE.md): the full fallback stack is
-  ~0.408 s mean per all-failure negative still on the host (p95 0.60 s,
-  max 0.73 s), against a 1.5 s still budget. A 16 MP all-failure still costs
+  ~0.412 s mean per all-failure negative still on the host (p95 0.60 s,
+  max 0.74 s), against a 1.5 s still budget. A 16 MP all-failure still costs
   ~59 ms / 34 MB because the 4 MP gate skips the heavy retries; 4 MP noise
   costs ~0.16 s / 35 MB, 1000×1000 ~0.35 s / 21 MB, 550×550 ~0.30 s / 7 MB,
   and the worst 400 px ensemble case ~0.64 s / 22 MB. The angle path peaks

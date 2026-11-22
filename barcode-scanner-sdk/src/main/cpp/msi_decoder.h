@@ -97,8 +97,8 @@ DecodeResult decode(const uint8_t* gray, int width, int height,
 #if MSI_ANGLE_MODEL
 // Experimental fallback: predict tag rotation, rotate the original frame,
 // and retry the normal decoder. Used only after both decodeFrame sweeps.
-// Every accepted candidate is checked against its own 180-degree view, so a
-// reversed phantom is never returned as an upright read. `relativeRotation`
+// Every accepted candidate is checked against its own 180-degree view; a
+// reverse-failing candidate below the score gate is rejected. `relativeRotation`
 // is 180 when that reverse view wins, otherwise 0.
 DecodeResult decodeAngleFallback(const uint8_t* gray, int width, int height,
                                  const DecodeOptions& options,

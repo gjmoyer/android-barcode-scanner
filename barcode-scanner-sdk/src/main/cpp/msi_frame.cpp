@@ -32,9 +32,11 @@ struct DepthGuard {
 // photo can cost hundreds of MB and seconds without helping a tag that is
 // only a few percent of the frame; the normal orientation sweep still runs.
 constexpr int64_t kMaxFallbackPixels = 4'000'000;
+#if MSI_ANGLE_MODEL
 // The angle fallback is the most allocation-heavy stage. Keep it to crop-scale
 // frames; the 4 MP cap still allows the sharpened retry on larger stills.
 constexpr int64_t kMaxAngleFallbackPixels = 3'500'000;
+#endif
 // Derived 2x/3x frames are not allowed to run the angle fallback above this
 // area. Keeps a 550x550 all-failure still from generating 2x/3x rotations
 // while still covering the 0.35/0.50 shelf-scale sets.
@@ -476,6 +478,8 @@ FrameResult decodeFrame(const uint8_t* gray, int width, int height, const FrameO
                     continue;
                 }
             }
+            if (k % 2 == 1 && options.stretchRetry && lut != nullptr && r.score < 0.55f)
+                continue;
             result.decode = std::move(r);
             result.relativeRotation = relative;
             return true;

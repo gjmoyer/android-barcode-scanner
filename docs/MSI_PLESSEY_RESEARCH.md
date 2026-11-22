@@ -466,7 +466,8 @@ outvote it. Superseded by §8.3 before ever shipping. Leave it dead.
      needs long edge ≥330 px and rotated long edge ≤1800 px, and its output
      is capped at 4 MP. Every accepted candidate is confirmed against its
      own 180° view; a reverse-failing read needs score ≥0.70 (no vote escape).
-     A stretched-sweep read whose reverse view fails is rejected below 0.55.
+     A stretched-sweep read whose paired reverse view fails is rejected
+     below 0.55.
    - **Sharpened retry.** Requires `minDigits>=9`; autocontrast (1–99%) plus
      unsharp mask (radius 2, amount 1.8, threshold 2), then `decodeFrame`
      with two orientations plus the angle fallback, with its own upscale
@@ -483,8 +484,8 @@ outvote it. Superseded by §8.3 before ever shipping. Leave it dead.
      compound.
    These fallbacks add no new wrong reads on the local augmented suite and
    hold it at 2,286/2,440 positives (reference 2,211); native stays
-   122/122. Host all-failure negatives cost 408 ms mean / 595 ms p95 /
-   728 ms max, so they fit the 1.5 s still budget. Live frames never run
+   122/122. Host all-failure negatives cost 412 ms mean / 596 ms p95 /
+   743 ms max, so they fit the 1.5 s still budget. Live frames never run
    them. Default open-length stills get only the angle fallback. Full
    timing: `docs/MSI_PERFORMANCE.md`.
 9. Direction arbitration, outside `msi::decode`. `decodeFrame` pairs each

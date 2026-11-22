@@ -1685,6 +1685,7 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
 // internal retries can choose whether the far-field upscale compounds.
 static DecodeResult decodeScoped(const uint8_t* gray, int width, int height,
                                  const DecodeOptions& options, bool allowUpscale) {
+    if (gray == nullptr || width <= 0 || height <= 0) return DecodeResult{};
     struct RequiredScope {
         ChecksumPolicy prev;
         int prevMin, prevMax;
