@@ -47,8 +47,9 @@ constexpr int kMaxBars = 128;        // max bar centers per scanline
 constexpr int kMaxScanlines = 9;     // profiles tried per image
 constexpr int kMinDigits = 7;   // shelf SKUs are 7-digit + 1-2 checks; shorter
                               // candidates are texture false positives that pass
-                              // Mod10 by 1-in-10 chance (verified vs commercial
-                              // truth 2026-10-11: 75 short FPs, zero real <7).
+                              // Mod10 by 1-in-10 chance (verified against
+                              // reference shelf labels 2026-10-11: 75 short
+                              // FPs, zero real <7).
 constexpr int kMaxDigits = 10;   // real MSI payloads + checks top out here
                                // (7-digit SKU + 2 checks = 9; meat 6+2 = 8).
                                // Longer "valid" strings are template noise
@@ -897,7 +898,7 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
                             float& outFirstStart, float& outLastEnd) {
     // Multi-sigma templates: real shelf blur varies per shot/row, and a
     // fixed 0.4*module assumption misranks digits under heavier blur
-    // (commercial truth: correct string found once at 0.916, outvoted by
+    // (reference case: correct string found once at 0.916, outvoted by
     // phantoms at 0.924). Each sigma rebuilds templates and contributes
     // hypotheses; selection below picks across the pooled set. Template
     // build is ~0.5% of correlation cost, so rebuilds are cheap; the
@@ -995,13 +996,13 @@ bool decodeByDigitTemplates(const float* p, int n, const Bar* bars, int nb,
     // try both narrow-bar (0.5 mod) and wide-bar (1.0 mod) offsets.
     // Start-guard prefilter: bars[sIdx] must be a WIDE bar (MSI Start is a
     // double-width bar). Shifted hypotheses that begin inside the digit
-    // field usually start on a narrow bar — commercial truth shows the
+    // field usually start on a narrow bar — reference cases show the
     // winners then drop a real leading 0 and append a phantom digit
     // (02990356 -> 29903564). Threshold is soft (1.2 modules) to survive
     // blur, which shrinks measured width ratios.
     // Selection prefers the LONGEST checksum-valid candidate: a shorter valid
     // string that is a strict prefix of a longer valid one is almost always a
-    // truncated read (commercial truth: 02739407 vs true 027394071/mod1010).
+    // truncated read (reference case: 02739407 vs true 027394071/mod1010).
     // Ties break by score.
     for (int sIdx = 0; sIdx < nb; ++sIdx) {
         // No shortest symbol fits in the remaining bars (upper tolerance
@@ -1158,7 +1159,7 @@ const char* guardFailure(const GuardEvidence& g, int nd);
 // decode above pins digit d's window to bar sIdx+1+4d, so one bar lost to
 // blur (two thin bars merged) shifts every later window and the symbol never
 // closes its checksum (shelf 0452-1: 35 of 39 bars found on its best lines,
-// no template read on any line; a commercial scanner reads it). Here each
+// no template read on any line; the reference reads it). Here each
 // window is placed one digit pitch (12 modules) after the previous window's
 // best match, with +/-0.5 module of slack, so the bars only seed the Start.
 // The bar-spacing module estimate is quantised (3.00 for a true 2.85), and
@@ -1812,7 +1813,7 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
     }
     // Still nothing. Skew retry (top level only, like the 1D retry): a
     // tilted symbol defeats horizontal scanlines (shelf 0540-1, about 7
-    // degrees, read by a commercial scanner, missed in every mode). Per ROI,
+    // degrees, read by the reference, missed in every mode). Per ROI,
     // estimateSkew finds the bar angle; ROIs below kSkewMinDegrees or
     // kSkewMinGain skip. Scanlines then run along the symbol axis, over the
     // deskewed extent first (the horizontal extent cuts a tilted symbol's

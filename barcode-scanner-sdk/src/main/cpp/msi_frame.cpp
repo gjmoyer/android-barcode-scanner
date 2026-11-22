@@ -482,17 +482,19 @@ FrameResult decodeFrame(const uint8_t* gray, int width, int height, const FrameO
         sweep(lut))
         return result;
     // Fallbacks operate on the sensor-upright frame so rotationDegrees=90/270
-    // stills are not decoded in a different orientation from the sweeps.
+    // stills are not decoded in a different orientation from the sweeps. The
+    // size cap is rotation-invariant, so check it before materializing the
+    // full-resolution upright copy.
+    const bool fallbackSize = fallbackSizeOk(width, height);
     std::vector<uint8_t> upright;
     const uint8_t* fallbackGray = gray;
     int fallbackW = width, fallbackH = height;
-    if (sensor != 0) {
+    if (fallbackSize && sensor != 0) {
         upright.resize((size_t)width * (size_t)height);
         rotateInto(gray, width, width, height, sensor, nullptr, upright.data());
         fallbackGray = upright.data();
         if (sensor == 90 || sensor == 270) std::swap(fallbackW, fallbackH);
     }
-    const bool fallbackSize = fallbackSizeOk(fallbackW, fallbackH);
 #if MSI_ANGLE_MODEL
     if (options.stretchRetry && !result.decode.ok && fallbackSize &&
         options.allowAngleFallback) {
