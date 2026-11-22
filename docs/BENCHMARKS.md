@@ -133,11 +133,13 @@ keeps the confirmation intact.
 
 ## Scope boundaries
 
-- **The commercial comparison is anonymized.** A licensed commercial barcode
-  SDK was run on the same 116 crops and device, but the repository contains
-  no commercial SDK dependency, license key or per-row comparison data.
-  The vendor name/version and raw rows stay private; only the aggregate
-  table and chart are published.
+- **The commercial comparison is anonymized and evaluation-only.** A licensed
+  commercial barcode SDK was run on finished builds over the same 116 crops
+  and device, but the repository contains no commercial SDK dependency,
+  license key or per-row comparison data. The vendor name/version and raw
+  rows stay private; only the aggregate table and chart are published. No
+  commercial SDK code, weights, model outputs, or per-read data are used in
+  the decoder, its tests, or training.
 - **The real-photo set is private.** A clean clone reproduces the synthetic
   and frame-path results, not the 110-photo table. The real-photo numbers
   come from the local regression described in the research note; the

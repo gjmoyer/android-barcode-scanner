@@ -91,9 +91,10 @@ emulator image and local fixture photos.
   host) and the harness.
 - The orientation regressor is the only learned MSI component: a 32x32 →
   128 → 64 → 1 MLP in `msi_angle_model.h`, trained offline on synthetic
-  rotations. No commercial SDK weights are used, and the local augmented
-  evaluation sets are not training data. Bars, templates, checksums, voting,
-  sharpening and scale agreement are deterministic C++ logic.
+  rotations. No commercial SDK code, weights, model outputs, or training data
+  are used, and the local augmented evaluation sets are not training data.
+  Bars, templates, checksums, voting, sharpening and scale agreement are
+  deterministic C++ logic.
 - Skew retry (`estimateSkew`, top level only): projection search over ±15°
   for the angle that sharpens the deskewed band average; gated by
   |angle| ≥1.5° and gain ≥1.5, first gated ROI only (`kSkewMaxRois`; more

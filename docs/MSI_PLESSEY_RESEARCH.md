@@ -17,11 +17,18 @@ and the spec sources behind the implementation. Code: `data/msi/`.
   code) behind a thin JNI wrapper (`MsiNativeDecoder`), host-compiled and
   testable via `tools/msi-harness` with no device needed.
 
+**Clean-room provenance.** The decoder and its orientation model are derived
+from the public MSI specification, the public references listed below, and
+local captures. No commercial SDK code, model weights, model outputs, or
+training data are used by the implementation or by model training. Any
+commercial-SDK figures in this repository are black-box benchmarks of
+finished builds, kept anonymous; they are not implementation inputs.
+
 ## 2. Symbology spec (ground truth)
 
 Sources: Wikipedia "MSI Barcode" (tables + Luhn/Mod11 sections, fetched 2026-10-06),
 Morovia KB10637 (Mod10 worked example "8052"→3), Seagull BarTender guide (usage context),
-Scandit checksum enum (Mod10/1010/11/1110 naming), tc-lib-barcode (family context).
+commercial-decoder checksum vocabulary (Mod10/1010/11/1110 naming), tc-lib-barcode (family context).
 
 - Charset: digits 0–9 only. Variable length, continuous, NOT self-checking, no ISO standard
   (vendor conventions; readers must gate on checksum + length + votes).
@@ -136,7 +143,7 @@ Scandit checksum enum (Mod10/1010/11/1110 naming), tc-lib-barcode (family contex
 - zxing-cpp `core/src/BarcodeFormat.h` @master (DataBar variants; absence of MSI) + README
   (DataBar Omnidirectional/Stacked/Limited/Expanded support) + Ubuntu 2.3.0 package manifest
 - ZXing.Net `BarcodeFormat.cs` (MSI/PLESSEY exist in .NET port; excluded from All_1D as FP-prone)
-- Scandit `Checksum` enum (Mod10/1010/11/1110 vocabulary), Seagull MSI guide (warehouse context)
+- Commercial MSI checksum vocabulary (Mod10/1010/11/1110), Seagull MSI guide (warehouse context)
 
 ## 6. Shelf-photo evaluation (6 user-supplied labels, Oct 2026)
 
@@ -213,7 +220,7 @@ undetectable without the check digit). Its config knobs
 - zxing-cpp `core/src/BarcodeFormat.h` @master (DataBar variants; absence of MSI) + README
   (DataBar Omnidirectional/Stacked/Limited/Expanded support) + Ubuntu 2.3.0 package manifest
 - ZXing.Net `BarcodeFormat.cs` (MSI/PLESSEY exist in .NET port; excluded from All_1D as FP-prone)
-- Scandit `Checksum` enum (Mod10/1010/11/1110 vocabulary), Seagull MSI guide (warehouse context)
+- Commercial MSI checksum vocabulary (Mod10/1010/11/1110), Seagull MSI guide (warehouse context)
 
 
 ## 8. Logic approaches: what was tried, what won, and why

@@ -8,7 +8,9 @@ augmentations.
 The regressor is the **only** learned part of MSI decoding. Bars, digit
 templates, checksums, scanline voting, contrast stretching, unsharp masking
 and 2x/3x agreement are all deterministic hand-written C++. No commercial
-SDK weights are used.
+SDK code, weights, outputs, or training data are used. The validation table
+includes an anonymized commercial-scanner benchmark as evaluation context;
+those numbers are not training labels or implementation inputs.
 
 ## Runtime
 
@@ -42,7 +44,7 @@ handles larger rotations and the combined blur+tilt cases.
 
 Host baseline, 122 native crops and the local augmented suite:
 
-| Set | Before | After | External reference |
+| Set | Before | After | Anonymized commercial baseline |
 |---|---:|---:|---:|
 | Native 122 | 121 | **122** | 120 |
 | Main blur+skew (5×122) | 450 | **599** | 575 |
@@ -55,8 +57,8 @@ Host baseline, 122 native crops and the local augmented suite:
 | `scale075/050/035` | 227 | **324** | 305 |
 
 Totals: **122/122 native** and **2,319/2,440 augmented positives** versus
-2,211 for the external reference. Every augmented family now matches or
-exceeds the reference; the only wrong read is the pre-existing
+2,211 for the anonymized commercial baseline. Every augmented family now
+matches or exceeds the baseline; the only wrong read is the pre-existing
 `clutter-seed71` target-selection case.
 
 No new wrong reads were introduced by the fallback. The one wrong read on
