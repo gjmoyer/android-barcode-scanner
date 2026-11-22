@@ -69,6 +69,31 @@ emulator image and local fixture photos.
   the 2D recursion it compounds to 4x and bred phantoms), then the skew
   retry, then the grid retry, then the 2D NN 2x frame retry. 2D bilinear and per-ROI 2D upscales
   were measured and rejected: they re-detect ROIs and bred confident phantoms.
+  After every plain/stretched orientation misses, frame-level still fallbacks
+  run in this order: learned-angle rotation (`decodeAngleFallback`), then the
+  autocontrast + unsharp retry, then the 2x/3x agreement ensemble. That order
+  is load-bearing: sharpening is much cheaper than the ensemble, and the
+  ensemble dominates all-failure latency.
+- Still-only fallbacks are gated by `FrameOptions::stretchRetry` (set by
+  `NativeFrame.prepareStill`), never by live frames:
+  - Angle fallback: predicted angle outside ±60° treated as 0°, rotated
+    canvas capped at 64 MP; tries the predicted angle,
+    ±0.35/0.7/1.0/1.4° offsets, a 2%/98% stretch and a 2x retry (the 2x
+    stage needs long edge ≥330 px and rotated long edge ≤1800 px).
+  - Sharpened retry: fixed 9-digit stills, long edge ≥330 px; one decode plus
+    angle fallback on the sharpened frame, not a recursive `decodeFrame`.
+  - 2x/3x ensemble: fixed 9-digit stills, frame ≤1000 px; if both scales
+    read they must match (disagreement yields no read), while a read at only
+    one scale is accepted.
+  Recursion guards are `t_sharpenDepth` and `t_scaleEnsembleDepth`. Do not
+  widen these gates without re-running the full augmented suite, the negative
+  sets (currently 865 ms mean / 1,122 ms p95 per all-failure frame on the
+  host) and the harness.
+- The orientation regressor is the only learned MSI component: a 32x32 →
+  128 → 64 → 1 MLP in `msi_angle_model.h`, trained offline on synthetic
+  rotations. No commercial SDK weights are used, and the local augmented
+  evaluation sets are not training data. Bars, templates, checksums, voting,
+  sharpening and scale agreement are deterministic C++ logic.
 - Skew retry (`estimateSkew`, top level only): projection search over ±15°
   for the angle that sharpens the deskewed band average; gated by
   |angle| ≥1.5° and gain ≥1.5, first gated ROI only (`kSkewMaxRois`; more

@@ -93,11 +93,11 @@ Scandit checksum enum (Mod10/1010/11/1110 naming), tc-lib-barcode (family contex
 - Small tilt (up to ±15°) is handled natively by the skew retry (§8.3 step
   7b): scanlines along the measured bar angle. Before it, horizontal
   scanlines tolerated about ±5–7°.
-- Larger tilt (15°, 30°, …) smears diagonal runs past scanlines: the ROI
-  path (`MlKitRegionLocalizer` isolation → padded crop → affine deskew in
-  `MsiRegionCropper`, no OpenCV) rectifies the strip before the shared native
-  decoder. Full-frame MSI runs first (intact quiet zones win ties); ROI is
-  the tilted-label backup.
+- Larger tilt (15°, 30°, …) smears diagonal runs past scanlines. On stills,
+  a clean-room orientation regressor predicts the in-plane angle and retries
+  the rotated frame (§8.3 step 8b); the retired ML Kit ROI assist no longer
+  provides a second-chance ROI path, so live frames still need a straighter
+  aim beyond ±15°.
 
 **Inversion (white-on-black).**
 - zxing-cpp path sets TryInvert; the MSI scanline path assumes dark-bars-on-light.
@@ -445,6 +445,30 @@ outvote it. Superseded by §8.3 before ever shipping. Leave it dead.
    separate helped from unhelped photos (177–237 levels in both groups), so
    there is no skip threshold. Live aim-box crops are stretched up front
    and never retry.
+8b. Stills only, after step 8 misses, in this order:
+   - **Orientation fallback.** A 32×32 → 128 → 64 → 1 MLP regressor
+     (`msi_angle_model.h`, clean-room, trained offline on synthetic
+     rotations) predicts the in-plane tag angle from a 32×32 area average.
+     `decodeAngleFallback` rotates the frame upright (PIL-compatible
+     reverse-affine nearest neighbour) and retries the predicted angle
+     ±0.35/0.7/1.0/1.4°, then a 2%/98% stretch and a 2× retry. Predicted
+     angles outside ±60° are treated as 0° and the rotated canvas is capped
+     at 64 MP; the 2× stage needs long edge ≥330 px and rotated long edge
+     ≤1800 px.
+   - **Sharpened retry.** Autocontrast (1–99%) plus unsharp mask (radius 2,
+     amount 1.8, threshold 2), then one normal decode plus the angle
+     fallback. Not a recursive `decodeFrame` sweep: that nested the full
+     orientation/ensemble path and turned one blurred frame into a
+     multi-minute stall.
+   - **2×/3× agreement ensemble.** 2× and 3× nearest-neighbour upscales are
+     decoded; if both read they must agree, otherwise the read is accepted
+     at one scale. Limited to frames ≤1000 px because the ensemble dominates
+     all-failure latency.
+   These fallbacks add no new wrong reads on the local augmented suite and
+   raise it to 2,319/2,440 positives (reference 2,211); native stays
+   122/122. Host all-failure negatives cost 865 ms mean / 1,122 ms p95, so
+   they fit the 1.5 s still budget with limited headroom. Live frames never
+   run them. Full timing: `docs/MSI_PERFORMANCE.md`.
 9. Direction arbitration, outside `msi::decode`. `decodeFrame` pairs each
    view with its reverse (0/180, 90/270). When the first view of a pair
    reads and the reverse is within `maxOrientations`, the reverse is decoded

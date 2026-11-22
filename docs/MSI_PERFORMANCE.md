@@ -36,8 +36,8 @@ run these retries (`stretchRetry=false`).
 
 Total decode time over the 23-set suite: **27.1 s before, 358.3 s after**.
 The old ordering (ensemble before sharpening) was 688.6 s; moving sharpening
-first and capping the ensemble at 1000 px removed most of that cost without
-losing the positive reads.
+first and capping the ensemble at 1000 px removed most of that cost, at a
+4-read accuracy difference (2,319 vs 2,323 positives).
 
 ## Where the time goes
 

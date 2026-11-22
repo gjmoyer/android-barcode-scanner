@@ -9,7 +9,7 @@ inverted MSI remains out of scope.)
 |---|---|
 | EAN-8/13, UPC-A/E, Code 39/93/128, ITF, Codabar, QR, Aztec, PDF-417, Data Matrix | ML Kit (primary, fast) |
 | GS1 DataBar (Omni / Stacked / Limited / Expanded / Expanded Stacked) | zxing-cpp v3.1.1 prebuilt AAR (`io.github.zxing-cpp:android`) |
-| MSI Plessey (Mod10 / Mod11 / Mod1010 / Mod1110) | Custom native C++ scanline decoder (`src/main/cpp/`, via `MsiNativeDecoder`); one native-prepared frame per scan, with an in-decoder skew retry (±15°) for tilted labels |
+| MSI Plessey (Mod10 / Mod11 / Mod1010 / Mod1110) | Custom native C++ scanline decoder (`src/main/cpp/`, via `MsiNativeDecoder`); one native-prepared frame per scan, with an in-decoder skew retry (±15°) and still-only rotation, sharpened and multi-scale fallbacks |
 | Rotated / upside-down / blurred | Native frame prepare (rotate upright) + per-engine orientation + signal-template correlation |
 
 Why this exists: neither ML Kit nor zxing-cpp ships an MSI Plessey reader, so MSI is
@@ -179,8 +179,9 @@ docs/                         # ARCHITECTURE.md, MSI_PLESSEY_RESEARCH.md
    `maxOrientationsTried` for stills).
 3. **Per-engine retries** — zxing `TryRotate`/`TryInvert`/`TryHarder`; MSI
     multi-ROI scanline voting with blurred digit-template correlation
-    (shape matching, no binarization threshold), checksum gating, and
-    small-module 1D/2D 2x retries.
+    (shape matching, no binarization threshold), checksum gating,
+    small-module 1D/2D 2x retries, and still-only rotation, sharpened and
+    multi-scale agreement fallbacks.
 4. **Fusion voting** — every engine reads the same frame; hits are deduped on
     value+symbology (max confidence kept), and a hit at confidence ≥0.95
     stops the scan immediately. MSI hits additionally require ≥2 agreeing
@@ -195,14 +196,17 @@ on-device full chain, Pixel 6a / emulator):
 
 | Stage | Host (macOS, `tools/msi-harness` bench) | On-device, full chain (arm64) |
 |---|---|---|
-| Native MSI decode | ~0.7 ms mean (1280×720 synthetic, Apple M2 Max), ~0.7–1 ms (shelf photo) | single-digit ms inside the scan below |
+| Native MSI decode | ~0.5 ms mean (1280×720 synthetic, Apple M2 Max), ~0.55 ms (fixture shelf photo) | single-digit ms inside the scan below |
 | One-shot MSI `scanBitmap` | n/a (native absent on JVM) | ~15–60 ms typical |
 | DataBar via zxing-cpp (native TryRotate/TryHarder) | n/a (native absent on JVM) | ~35–55 ms |
 | Full-chain worst case | — | capped by `decodeTimeoutMillis` (default 1500 ms) |
 
 Methodology, the full real-photo accuracy/tilt tables and scope boundaries
 (including the comparison chart with a leading commercial SDK and Apple
-Vision) are in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
+Vision) are in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md). The still-path
+fallbacks run only after the fast path fails; measured failure-path cost
+(including the all-failure negative case) is in
+[`docs/MSI_PERFORMANCE.md`](docs/MSI_PERFORMANCE.md).
 
 Live-mode recipe (already wired, no host code needed):
 - Fusion tries engines in registration order with first-confident-wins: a pointed
@@ -245,8 +249,11 @@ Encoding table + guards verified against Wikipedia "MSI Barcode" + Morovia KB106
 (weights 2..9) and white-on-black MSI are documented limitations. Upside-down
 reads are flagged via `DecodedBarcode.isUpsideDown`. Off-cardinal tilts up to
 ±15° decode through the native skew retry (projection-search deskew inside
-the decoder); steeper tilts need a straighter aim, since the ML Kit ROI
-assist was retired.
+the decoder). On stills, a clean-room orientation regressor plus rotated,
+sharpened and multi-scale retries extends that to the larger tilts measured
+in the local augmented suite; live frames still rely on the ±15° skew retry,
+so steeper tilts need a straighter aim (the ML Kit ROI assist was retired).
+Model details and limitations: [`docs/MSI_ANGLE_MODEL.md`](docs/MSI_ANGLE_MODEL.md).
 
 **Retired: SKU text fallback.** An OCR fallback (`MsiOcr`, bundled ML Kit text
 recognition) used to read the printed SKU when bars failed. It was removed —

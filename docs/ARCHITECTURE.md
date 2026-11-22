@@ -108,6 +108,13 @@ Grayscale frame (row-major bytes via JNI)
     then the original extent; same vote and guard gates
   → single 2x NN upscale retry if still nothing, on a small frame (<800px
     edge) or on small modules with checksum-valid evidence
+  → stills only, after all orientation sweeps: learned-angle fallback:
+    predict the tag rotation from a 32x32 view, rotate upright, retry the
+    predicted angle ±0.35/0.7/1.0/1.4°, then a 2%/98% stretch and a 2x retry
+  → stills only: autocontrast (1%) + unsharp (radius 2, amount 1.8) retry on
+    the sharpened frame (single decode + angle fallback, no recursive sweep)
+  → stills only, frame ≤1000px: 2x/3x nearest-neighbour agreement retry;
+    when both scales read they must match, otherwise no read
   → Kotlin: re-validate reported digits strictly under `msiChecksumPolicy`,
     strip check digits, reject degenerate (single-digit) payloads
 ```
@@ -115,13 +122,27 @@ Grayscale frame (row-major bytes via JNI)
 - **One frame per scan, no ROI pass.** The live frame is already the aim-box
   crop; a still is read whole, and the MSI band search skips the top quarter
   (`LumaFrame.scanTopFraction`). The retired ML Kit isolation assist left no
-  second-chance ROI path for tilts beyond the native skew retry's ±15°,
-  so widen the aim box instead.
+  second-chance ROI path for tilts beyond the native skew retry's ±15° on
+  live frames; stills use the orientation fallback below. Widen the aim box
+  for live tilt beyond ±15°.
 - **Stills retry contrast-stretched**: `decodeFrame` sweeps every orientation
   plain, then (`FrameOptions.stretchRetry`, stills only) once more through the
   2%/98% stretch. Stills are never stretched up front: a whole-photo
   stretch clips bars that already read. Live aim-box crops are stretched
   once in the native prepare and never retry.
+- **Stills then run three fallbacks**, in this order: a clean-room orientation
+  regressor rotates the frame by its predicted in-plane angle and retries
+  small angle offsets, contrast stretch and 2x; an autocontrast + unsharp
+  retry targets blur and low contrast; a 2x/3x agreement retry targets
+  small modules. All three run only on stills; the sharpened and ensemble
+  retries are additionally gated to fixed 9-digit frames. The angle
+  fallback's 2× stage needs a long edge ≥330 px, and the ensemble only runs
+  at ≤1000 px.
+  The sharpened retry is deliberately before the ensemble: the ensemble is
+  the dominant cost on all-failure frames. Recursion guards prevent either
+  derived frame from re-entering its own fallback. Details:
+  [`MSI_ANGLE_MODEL.md`](MSI_ANGLE_MODEL.md); failure-path timing:
+  [`MSI_PERFORMANCE.md`](MSI_PERFORMANCE.md).
 - **The MSI decoder owns a synchronized `MsiVoteGate`**, so scanline agreement
   is counted per decoder instance. Live MSI bar reads additionally pass the
   facade's 2-sighting stability gate (`DefaultBarcodeScanner.confirmLiveBarHit`).
