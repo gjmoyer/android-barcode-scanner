@@ -1634,7 +1634,7 @@ static void rotateGrayExpanded(const uint8_t* src, int W, int H, float deg,
 
 
 // Predict the in-plane rotation of the tag from a 32x32 area-averaged view.
-static float predictAngle(const uint8_t* src, int W, int H) {
+float predictAngle(const uint8_t* src, int W, int H) {
     float x[kAngleInput];
     int k = 0;
     for (int oy = 0; oy < 32; ++oy) {
@@ -1963,7 +1963,11 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
 }
 
 #if MSI_ANGLE_MODEL
-static void stretchGray(std::vector<uint8_t>& img) {
+// Contrast-stretches `img` in place (2%/98%, the same table the frame decoder
+// builds). Returns false when the histogram is too flat to stretch, leaving
+// `img` untouched: the caller must then skip the retry instead of re-decoding
+// a byte-identical copy.
+static bool stretchGray(std::vector<uint8_t>& img) {
     uint32_t hist[256] = {0};
     for (uint8_t v : img) ++hist[v];
     const float n = (float)img.size();
@@ -1973,21 +1977,13 @@ static void stretchGray(std::vector<uint8_t>& img) {
         if (acc < 0.02f) lo = i;
         if (acc <= 0.98f) hi = i;
     }
-    if (hi - lo < 12) return;
+    if (hi - lo < 12) return false;
     uint8_t lut[256];
     const float sc = 255.0f / (float)(hi - lo);
     for (int i = 0; i < 256; ++i)
         lut[i] = (uint8_t)std::min(255, std::max(0, (int)((i - lo) * sc + 0.5f)));
     for (uint8_t& v : img) v = lut[v];
-}
-
-static int pickDirectionLocal(const DecodeResult& first, const DecodeResult& reverse) {
-    constexpr float kSeen = -1e8f;
-    if (first.leadingQuiet < kSeen || reverse.leadingQuiet < kSeen) return 0;
-    const float d = first.leadingQuiet - reverse.leadingQuiet;
-    if (d >= 0.3f) return 1;
-    if (d <= -0.3f) return -1;
-    return 0;
+    return true;
 }
 
 // Decode one derived image, then its exact 180-degree view. A fallback has
@@ -2019,10 +2015,10 @@ static DecodeResult decodeViewSafe(const uint8_t* img, int w, int h,
         // template-correlation bar. Votes are not enough here: clean
         // reversed phantoms can agree on 10 rows with score ~0.68, while
         // true angle-fallback reads measured 0.79-0.89.
-        if (r.score < 0.70f) return DecodeResult{};
+        if (r.score < kFallbackScoreGate) return DecodeResult{};
     }
     if (rr.ok && rr.digits != r.digits) {
-        const int pick = pickDirectionLocal(r, rr);
+        const int pick = pickDirection(r, rr);
         if (pick == 0) return DecodeResult{};
         if (pick < 0) {
             if (relativeRotation != nullptr) *relativeRotation = 180;
@@ -2058,12 +2054,15 @@ DecodeResult decodeAngleFallback(const uint8_t* gray, int width, int height,
             return r;
         }
         std::vector<uint8_t> stretched = rot;
-        stretchGray(stretched);
-        const DecodeResult rs = decodeViewSafe(stretched.data(), rw, rh, options,
-                                               options.allowUpscale, &rel);
-        if (rs.ok) {
-            if (relativeRotation != nullptr) *relativeRotation = rel;
-            return rs;
+        // A too-flat histogram leaves `stretched` byte-identical to `rot`;
+        // re-decoding it would buy nothing, so the retry is skipped.
+        if (stretchGray(stretched)) {
+            const DecodeResult rs = decodeViewSafe(stretched.data(), rw, rh, options,
+                                                   options.allowUpscale, &rel);
+            if (rs.ok) {
+                if (relativeRotation != nullptr) *relativeRotation = rel;
+                return rs;
+            }
         }
         if (options.allowUpscale &&
             std::max(width, height) >= 330 && std::max(rw, rh) <= 1800) {
@@ -2080,16 +2079,109 @@ DecodeResult decodeAngleFallback(const uint8_t* gray, int width, int height,
                 if (relativeRotation != nullptr) *relativeRotation = rel;
                 return ru;
             }
-            stretchGray(up2);
-            const DecodeResult rus = decodeViewSafe(up2.data(), W2, H2, options, false, &rel);
-            if (rus.ok) {
-                if (relativeRotation != nullptr) *relativeRotation = rel;
-                return rus;
+            if (stretchGray(up2)) {
+                const DecodeResult rus = decodeViewSafe(up2.data(), W2, H2, options, false, &rel);
+                if (rus.ok) {
+                    if (relativeRotation != nullptr) *relativeRotation = rel;
+                    return rus;
+                }
             }
         }
     }
     return DecodeResult{};
 }
 #endif
+
+// Bicubic (Catmull-Rom) whole-frame rotation with an expanded canvas, same
+// geometry as rotateGrayExpanded. Used only by the live deskew rescue: the
+// nearest-neighbour path aliases the 5-8 px bars of a camera crop enough to
+// lose the read, while the still path's NN rotation still works on a full
+// label (larger modules, cleaner capture).
+static void rotateGrayBicubic(const uint8_t* src, int W, int H, float deg,
+                              std::vector<uint8_t>& out, int& ow, int& oh) {
+    const float a = -deg * kDegToRad;
+    const float m0 = cosf(a), m1 = sinf(a), m3 = -sinf(a), m4 = cosf(a);
+    const float cx = 0.5f * W, cy = 0.5f * H;
+    float m2 = -cx * m0 - cy * m1 + cx;
+    float m5 = -cx * m3 - cy * m4 + cy;
+    float minx = 1e30f, miny = 1e30f, maxx = -1e30f, maxy = -1e30f;
+    for (int k = 0; k < 4; ++k) {
+        const float x = (k == 1 || k == 2) ? (float)W : 0.0f;
+        const float y = (k >= 2) ? (float)H : 0.0f;
+        const float u = m0 * x + m1 * y + m2;
+        const float v = m3 * x + m4 * y + m5;
+        minx = std::min(minx, u); maxx = std::max(maxx, u);
+        miny = std::min(miny, v); maxy = std::max(maxy, v);
+    }
+    ow = (int)ceilf(maxx) - (int)floorf(minx);
+    oh = (int)ceilf(maxy) - (int)floorf(miny);
+    if (ow <= 0 || oh <= 0 || (int64_t)ow * (int64_t)oh > (int64_t)16000000) {
+        out.clear(); ow = 0; oh = 0; return;
+    }
+    const float tx = -(ow - W) * 0.5f, ty = -(oh - H) * 0.5f;
+    m2 = m0 * tx + m1 * ty + m2;
+    m5 = m3 * tx + m4 * ty + m5;
+    out.assign((size_t)ow * (size_t)oh, 255);
+    const auto wt = [](float x) {
+        const float A = -0.5f;
+        x = std::fabs(x);
+        if (x <= 1.0f) return (A + 2) * x * x * x - (A + 3) * x * x + 1;
+        if (x < 2.0f) return A * x * x * x - 5 * A * x * x + 8 * A * x - 4 * A;
+        return 0.0f;
+    };
+    for (int y = 0; y < oh; ++y) {
+        for (int x = 0; x < ow; ++x) {
+            const float sx = m0 * x + m1 * y + m2;
+            const float sy = m3 * x + m4 * y + m5;
+            if (sx < 0 || sy < 0 || sx >= W - 1 || sy >= H - 1) continue;
+            const int ix = (int)sx, iy = (int)sy;
+            float sum = 0, wsum = 0;
+            for (int dy = -1; dy <= 2; ++dy) {
+                const int yy = std::min(H - 1, std::max(0, iy + dy));
+                const float wy = wt(sy - (iy + dy));
+                for (int dx = -1; dx <= 2; ++dx) {
+                    const int xx = std::min(W - 1, std::max(0, ix + dx));
+                    const float w = wy * wt(sx - (ix + dx));
+                    sum += src[(size_t)yy * W + xx] * w;
+                    wsum += w;
+                }
+            }
+            out[(size_t)y * ow + x] =
+                (uint8_t)std::min(255.0f, std::max(0.0f, sum / wsum + 0.5f));
+        }
+    }
+}
+
+DecodeResult decodeDeskew(const uint8_t* gray, int width, int height,
+                          const DecodeOptions& options) {
+    if (gray == nullptr || width < 64 || height < 32) return DecodeResult{};
+    if ((int64_t)width * (int64_t)height > 4000000) return DecodeResult{};
+    // Reject clutter before paying for rotations: the projection gain is the
+    // same signal the in-ROI skew retry uses (a clean tilted crop measured
+    // 1.40 here; random band structure stays flatter).
+    const Rect all{0, width, 0, height};
+    float gain = 0;
+    const float estimate = estimateSkew(gray, width, all, gain);
+    if (g_debug) printf("[deskew] estimate %.1f gain %.2f\n", estimate, gain);
+    if (gain < 1.3f || std::fabs(estimate) < 2.0f) return DecodeResult{};
+    // Coarse 2-degree sweep: the live crop's predictor is unreliable and the
+    // projection can sit several degrees off (measured -14 estimate vs a
+    // -6/-5 successful rotation), so do not refine around the estimate only.
+    // Small tilts first: they are the common live case, and the first read
+    // exits the sweep. 0 is skipped (the normal live decode already tried it).
+    static const float kAngles[] = {-2.f, 2.f, -4.f, 4.f, -6.f, 6.f, -8.f, 8.f,
+                                    -10.f, 10.f, -12.f, 12.f, -14.f, 14.f};
+    for (float angle : kAngles) {
+        std::vector<uint8_t> rot;
+        int rw = 0, rh = 0;
+        rotateGrayBicubic(gray, width, height, angle, rot, rw, rh);
+        if (rw <= 0 || rh <= 0) continue;
+        const DecodeResult r = decode(rot.data(), rw, rh, options);
+        if (g_debug) printf("[deskew] angle %.1f ok=%d score=%.2f votes=%d\n",
+                            angle, r.ok, r.score, r.votes);
+        if (r.ok && r.score >= kFallbackScoreGate) return r;
+    }
+    return DecodeResult{};
+}
 
 } // namespace msi

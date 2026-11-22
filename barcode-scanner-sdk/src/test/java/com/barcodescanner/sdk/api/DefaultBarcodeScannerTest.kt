@@ -3,6 +3,7 @@ package com.barcodescanner.sdk.api
 import android.graphics.Bitmap
 import android.os.Looper
 import androidx.camera.core.SurfaceOrientedMeteringPointFactory
+import com.barcodescanner.sdk.camera.PreparedLiveFrame
 import com.barcodescanner.sdk.data.frame.LumaFrame
 import com.barcodescanner.sdk.data.frame.NativeFrame
 import com.barcodescanner.sdk.di.ScannerContainer
@@ -168,7 +169,7 @@ class DefaultBarcodeScannerTest {
         // droppable; only one-shots throw. No engine touched the buffer.
         val scanner = scanner(suppressionMillis = 0)
         scanner.close()
-        assertTrue(scanner.handleLiveFrame(blankFrame()))
+        assertTrue(scanner.handleLiveFrame(PreparedLiveFrame(blankFrame(), null)))
     }
 
     @Test
@@ -179,7 +180,7 @@ class DefaultBarcodeScannerTest {
         val received = mutableListOf<ScanResult>()
         val job = launch(Dispatchers.Unconfined) { scanner.results.collect { received += it } }
         try {
-            scanner.handleLiveFrame(blankFrame())
+            scanner.handleLiveFrame(PreparedLiveFrame(blankFrame(), null))
             yield()
             assertEquals(emptyList<ScanResult>(), received)
             job.cancel()
@@ -221,7 +222,7 @@ class DefaultBarcodeScannerTest {
             val oldSession = scanner.currentCameraSession()
             scanner.stopCamera()
             // Skipped before any engine runs: the buffer stays reusable.
-            assertTrue(scanner.handleLiveFrame(blankFrame(), oldSession))
+            assertTrue(scanner.handleLiveFrame(PreparedLiveFrame(blankFrame(), null), oldSession))
         } finally {
             scanner.close()
         }

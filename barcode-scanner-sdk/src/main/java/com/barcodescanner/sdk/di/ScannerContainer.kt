@@ -60,6 +60,7 @@ internal class ScannerContainer(
             // the native >=2-vote checksum gate + policy gate.
             requireConsecutiveFrames = 1,
             symbolLengths = config.msiSymbolLengths,
+            stillFallbacks = config.msiStillFallbacks,
         )
     }
 

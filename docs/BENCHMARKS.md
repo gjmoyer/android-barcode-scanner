@@ -12,7 +12,7 @@ checked instead of taken on trust.
   must-not-misread negatives, and **0 false reads across 3,430 clutter
   frames**.
 - **129–133/162 reads at ±6°/±10° tilt**, with 0 wrong reads.
-- **151/151 host-harness assertions green** (170/170 with the local fixture photos); native decode averages
+- **166/166 host-harness assertions green** (185/185 with the local fixture photos); native decode averages
   **0.49 ms** per 1280×720 synthetic frame (Apple M2 Max, Nov 2026; was
   0.74 ms before the digit-template vectorisation).
 

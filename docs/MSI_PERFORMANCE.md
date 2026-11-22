@@ -4,6 +4,12 @@ Host measurements, macOS M2 Max, `validation/tools/msi_baseline`; 122
 crops per set. Times are `decodeFrame` only (PNG I/O excluded). Device
 timings will differ.
 
+Shared CI/VMs are routinely 2–4× slower than this host, and mid-tier phone
+cores vary more still. The `tools/msi-harness` still-fallback budgets are
+therefore advisory by default (overruns print WARN and keep the exit code
+green); set `MSI_PERF_STRICT=1` to enforce them on controlled hardware.
+These tables are regression baselines, not device latency guarantees.
+
 The accuracy baseline is the shelf configuration used by the local suite:
 `MOD1010`, exact 9-digit bounds, `scanTopFraction=0`, `maxOrientations=4`,
 `stretchRetry=true`. The default SDK still configuration is narrower: open

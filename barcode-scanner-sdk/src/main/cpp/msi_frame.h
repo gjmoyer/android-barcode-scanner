@@ -123,6 +123,13 @@ struct FrameOptions {
     // Allow the frame-level angle fallback. Derived 2x/3x frames disable it
     // above a small area cap so nested rotations cannot blow the budget.
     bool allowAngleFallback = true;
+    // Master switch for the whole still fallback stack: the learned-angle
+    // rotation, the autocontrast+unsharp retry and the 2x/3x agreement
+    // ensemble. Implies nothing about allowAngleFallback (that one is also
+    // the per-frame area cap); setting this false skips all three stages
+    // after the plain/stretch sweeps, restoring the pre-fallback latency
+    // profile. Wired from ScannerConfig.msiStillFallbacks.
+    bool allowStillFallbacks = true;
 };
 
 // Orientation-aware decode of a contiguous gray buffer (stride = width).

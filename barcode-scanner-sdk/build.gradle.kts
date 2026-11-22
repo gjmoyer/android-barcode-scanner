@@ -7,9 +7,13 @@ plugins {
 
 android {
     namespace = "com.barcodescanner.sdk"
-    // 37: core-ktx 1.19.x AAR metadata requires compiling against API 37+.
-    // (No API-37 calls are used, so behavior on older devices is unchanged.)
+    // 37.2 (Android 17, Cinnamon Bun extension): core-ktx 1.19.x AAR metadata
+    // requires compiling against API 37+. compileSdkMinor selects the
+    // android-37.2 platform (base API 37 + minor 2); the manifest still records
+    // the base level. (No 37.x calls are used, so behavior on older devices is
+    // unchanged.)
     compileSdk = 37
+    compileSdkMinor = 2
 
     defaultConfig {
         // Android 9 (API 28). Nothing in the SDK needs newer: CameraX/ML Kit need

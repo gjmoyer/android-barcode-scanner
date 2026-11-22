@@ -3,7 +3,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
+#include <limits>
 #include <new>
 #include <vector>
 
@@ -58,10 +60,10 @@ bool fallbackDigitsAllowed(const FrameOptions& options) {
     return minD >= 9 && (maxD == 0 || maxD >= minD);
 }
 
-// Autocontrast at 1% + unsharp mask (radius 2, amount 1.8, threshold 2),
-// matching the strongest preprocessing retry in the local suite. The
-// horizontal blur is stored as one float plane; the vertical/unsharp pass
-// runs row by row from it, so peak memory is one float plane plus output
+// Autocontrast at 1% + unsharp mask (Gaussian radius 4, sigma 2, amount 1.8,
+// threshold 2), matching the strongest preprocessing retry in the local
+// suite. The horizontal blur is stored as one float plane; the vertical/unsharp
+// pass runs row by row from it, so peak memory is one float plane plus output
 // instead of two float planes.
 bool sharpenGray(const uint8_t* src, int w, int h, std::vector<uint8_t>& out) {
     if (src == nullptr || w <= 0 || h <= 0) {
@@ -122,14 +124,34 @@ bool sharpenGray(const uint8_t* src, int w, int h, std::vector<uint8_t>& out) {
 
 // Nearest-neighbour upscale with a +1 source-pixel shift on both axes. A
 // plain 2x mapping duplicates every adjacent pair, and findRoiCandidates
-// samples with xstep=2: every pair would be identical and the 2x image would
-// never yield an ROI. Reading src[(x+1)/f] / src[(y+1)/f] puts a real source
-// boundary inside each sampled pair. For f=2 this is the same mapping the
-// decoder's existing 2D retry uses.
+// samples with xstep=2: every pair would be identical and the upscaled image
+// would never yield an ROI. Reading src[(x+1)/f] / src[(y+1)/f] moves each
+// source boundary off the duplicated run. For f=2 a boundary lands inside
+// every sampled pair (and this is the same mapping the decoder's existing 2D
+// retry uses). For f=3 boundaries repeat every 3 columns against a 2-column
+// sample, so only ~1 in 3 sampled pairs differs — impossible to do better with
+// a monotone mapping, and still far ahead of plain 3x, where none do.
+//
+// Positive `w`, `h`, `f` are required. Output dimensions are ints: inputs
+// whose upscaled size cannot be represented yield an empty image
+// (ow = oh = 0) instead of overflowing. The still ensemble currently calls
+// this only with w,h <= 400, but it is a reusable helper.
 void upscaleNNShifted(const uint8_t* src, int w, int h, int f,
                       std::vector<uint8_t>& out, int& ow, int& oh) {
-    ow = w * f; oh = h * f;
-    out.resize((size_t)ow * (size_t)oh);
+    const int64_t ow64 = static_cast<int64_t>(w) * f;
+    const int64_t oh64 = static_cast<int64_t>(h) * f;
+    if (src == nullptr || w <= 0 || h <= 0 || f <= 0 ||
+        ow64 > std::numeric_limits<int>::max() ||
+        oh64 > std::numeric_limits<int>::max() ||
+        ow64 * oh64 > static_cast<int64_t>(std::numeric_limits<std::ptrdiff_t>::max())) {
+        ow = 0;
+        oh = 0;
+        out.clear();
+        return;
+    }
+    ow = static_cast<int>(ow64);
+    oh = static_cast<int>(oh64);
+    out.resize(static_cast<size_t>(ow) * static_cast<size_t>(oh));
     std::vector<uint8_t> expanded((size_t)ow);
     for (int y = 0; y < oh; ++y) {
         const int sy = std::min(h - 1, (y + 1) / f);
@@ -314,22 +336,10 @@ void grayInto(const PixelView& src, int scale, int outW, int outH, uint8_t* out)
 // open lengths gave 5 near + 1 far wrong reads, each accepted in the first
 // view before the right one was tried. A read and a different read of the
 // opposite (180-degree) view cannot both be true, and the true one has the
-// clearer quiet zone before its Start (DecodeResult::leadingQuiet): over the
-// shelf still crops at 0/+-6/+-10 degrees, MOD10 open lengths, all 17
-// conflicts had true reads at 1.91-3.04 vs reversed phantoms at 0.85-1.66,
-// each pair by >= 0.61. Votes and template score do not separate them. A
-// near tie or an unmeasured zone rejects the frame.
-constexpr float kMinReverseLeadMargin = 0.3f;
-
-// 1 keeps `first`, -1 keeps `reverse`, 0 is undecidable.
-int pickDirection(const DecodeResult& first, const DecodeResult& reverse) {
-    constexpr float kSeen = -1e8f;
-    if (first.leadingQuiet < kSeen || reverse.leadingQuiet < kSeen) return 0;
-    const float d = first.leadingQuiet - reverse.leadingQuiet;
-    if (d >= kMinReverseLeadMargin) return 1;
-    if (d <= -kMinReverseLeadMargin) return -1;
-    return 0;
-}
+// clearer quiet zone before its Start (DecodeResult::leadingQuiet). Votes and
+// template score do not separate them. See msi::pickDirection and
+// msi::kMinReverseLeadMargin in msi_decoder.h for the rule and the measured
+// margin (shared with the angle fallback's decodeViewSafe).
 
 } // namespace
 
@@ -460,25 +470,31 @@ FrameResult decodeFrame(const uint8_t* gray, int width, int height, const FrameO
                 continue;
             }
             int relative = kOrder[k];
+            // A read is confirmed only when its paired opposite view also
+            // decoded: same digits, or a conflict resolved by pickDirection.
+            // Unpaired reads get no confirmation — attempts == 3 (a legal
+            // still config: 0, 180, 90) leaves 90 without its 270 reverse.
+            bool confirmed = false;
             if (k % 2 == 0 && k + 1 < attempts) {
                 DecodeResult reverse = decodeAt(k + 1, lut);
-                if (reverse.ok && reverse.digits != r.digits) {
-                    const int pick = pickDirection(r, reverse);
-                    if (pick == 0) return true;
-                    if (pick < 0) {
-                        r = std::move(reverse);
-                        relative = kOrder[k + 1];
+                if (reverse.ok) {
+                    if (reverse.digits != r.digits) {
+                        const int pick = pickDirection(r, reverse);
+                        if (pick == 0) return true;
+                        if (pick < 0) {
+                            r = std::move(reverse);
+                            relative = kOrder[k + 1];
+                        }
                     }
-                } else if (!reverse.ok && options.stretchRetry && lut != nullptr &&
-                           r.score < 0.55f) {
-                    // Stretched stills can turn a low-contrast reversed
-                    // phantom into the first read. If the opposite view does
-                    // not confirm it, a weak template score is not enough;
-                    // continue to the next orientation/fallback.
-                    continue;
+                    confirmed = true;
                 }
             }
-            if (k % 2 == 1 && options.stretchRetry && lut != nullptr && r.score < 0.55f)
+            // Any stretched-sweep read without a reverse confirmation must
+            // clear the score gate: a low-contrast phantom must not win
+            // merely because its opposite view was not attempted (odd k, or
+            // the unpaired 90-degree view at attempts == 3).
+            if (options.stretchRetry && lut != nullptr && !confirmed &&
+                r.score < kStretchedScoreGate)
                 continue;
             result.decode = std::move(r);
             result.relativeRotation = relative;
@@ -513,8 +529,8 @@ FrameResult decodeFrame(const uint8_t* gray, int width, int height, const FrameO
         if (sensor == 90 || sensor == 270) std::swap(fallbackW, fallbackH);
     }
 #if MSI_ANGLE_MODEL
-    if (options.stretchRetry && !result.decode.ok && angleSize &&
-        options.allowAngleFallback) {
+    if (options.stretchRetry && options.allowStillFallbacks && !result.decode.ok &&
+        angleSize && options.allowAngleFallback) {
         int relative = 0;
         DecodeResult r = decodeAngleFallback(fallbackGray, fallbackW, fallbackH,
                                              decodeOptions, &relative);
@@ -528,8 +544,8 @@ FrameResult decodeFrame(const uint8_t* gray, int width, int height, const FrameO
     // recovery for blurred/low-contrast tags (10-13 extra reads per local
     // blur/contrast set). Decode it through decodeFrame with two orientations
     // so the sharpened view gets the same 0/180 arbitration as the original.
-    if (options.stretchRetry && !result.decode.ok && t_sharpenDepth == 0 &&
-        fallbackDigitsAllowed(options) && fallbackSize &&
+    if (options.stretchRetry && options.allowStillFallbacks && !result.decode.ok &&
+        t_sharpenDepth == 0 && fallbackDigitsAllowed(options) && fallbackSize &&
         std::max(fallbackW, fallbackH) >= 330) {
         std::vector<uint8_t> sharp;
         if (sharpenGray(fallbackGray, fallbackW, fallbackH, sharp)) {
@@ -566,9 +582,9 @@ FrameResult decodeFrame(const uint8_t* gray, int width, int height, const FrameO
     // from the original frame, so text-only stills skip the expensive scales.
     const bool scaleEvidence = sawCandidate ||
                                (minModuleSeen > 0.5f && minModuleSeen < 3.5f);
-    if (options.stretchRetry && !result.decode.ok && t_scaleEnsembleDepth == 0 &&
-        fallbackDigitsAllowed(options) && fallbackSize && scaleEvidence &&
-        std::max(fallbackW, fallbackH) <= 400) {
+    if (options.stretchRetry && options.allowStillFallbacks && !result.decode.ok &&
+        t_scaleEnsembleDepth == 0 && fallbackDigitsAllowed(options) && fallbackSize &&
+        scaleEvidence && std::max(fallbackW, fallbackH) <= 400) {
         FrameOptions scaleOptions = options;
         scaleOptions.rotationDegrees = 0;
         scaleOptions.stretchRetry = true;
@@ -599,7 +615,7 @@ FrameResult decodeFrame(const uint8_t* gray, int width, int height, const FrameO
         }
         const bool ok2 = r2.decode.ok, ok3 = r3.decode.ok;
         const auto strong = [](const FrameResult& r) {
-            return r.decode.score >= 0.70f;
+            return r.decode.score >= kFallbackScoreGate;
         };
         if (ok2 && ok3) {
             // Two scales must agree.

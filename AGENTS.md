@@ -78,30 +78,41 @@ emulator image and local fixture photos.
   `NativeFrame.prepareStill`), never by live frames. Stills force at least
   two orientation attempts even when the caller asks for one, so the normal
   sweep always has 0/180 arbitration:
-  - Angle fallback: source frame capped at 3.5 MP; predicted angle outside ±60°
-    treated as 0°, rotated canvas capped at 64 MP, explicit 2x plane capped
-    at 4 MP; tries the predicted angle, ±0.35/0.7/1.0/1.4° offsets, a
-    2%/98% stretch and a 2x retry (the 2x stage needs long edge ≥330 px and
-    rotated long edge ≤1800 px). Every accepted candidate is confirmed
-    against its 180° view; a reverse-failing read needs score ≥0.70 (no
-    vote escape).
+  - Angle fallback: source frame capped at 3.5 MP (the operative bound; the
+    64 MP rotated-canvas guard is defense-in-depth, only reachable for
+    extreme-aspect strips); predicted angle outside ±60° treated as 0°,
+    explicit 2x plane capped at 4 MP. For each offset (predicted, then
+    ±0.35/0.7/1.0/1.4°) it tries four views in order: the rotated frame, its
+    2%/98% stretch, a 2x upscale, and the stretched 2x frame (the 2x stage
+    needs long edge ≥330 px and rotated long edge ≤1800 px). The offset loop
+    wraps all four variants, so this is not four global sweeps. Every
+    accepted candidate is confirmed against its 180° view; a reverse-failing
+    read needs score ≥0.70 (no vote escape).
   - Sharpened retry: stills with `minDigits>=9`, long edge ≥330 px, ≤4 MP;
-    decodeFrame with two orientations plus the angle fallback on the
-    sharpened frame, with its own upscale disabled. Degenerate histograms
-    return an identity copy and skip the retry.
+    decodeFrame with two orientations on the sharpened frame, with upscale
+    disabled for that leg; the explicit angle pass on the sharpened frame
+    re-enables the caller's `allowUpscale` (matching the scale ensemble).
+    Degenerate histograms return an identity copy and skip the retry.
   - 2x/3x ensemble: stills with `minDigits>=9`, ≤4 MP, source frame ≤400 px,
     with checksum/small-module evidence; both scales use the +1px shifted
     NN mapping. If both read they must agree. A single-scale read needs
     score ≥0.70. Nested angle fallback is limited to derived planes ≤1 MP,
-    and the scale legs honor the caller's `allowUpscale`. Stretched-sweep
-    reads whose paired reverse view fails are rejected below score 0.55.
+    and the scale legs honor the caller's `allowUpscale`. Any stretched-sweep
+    read without a reverse confirmation (failed paired reverse, odd view, or
+    the unpaired 90° view at `maxOrientations=3`) is rejected below score 0.55.
+  - Live tilt rescue: on by default via `ScannerConfig.msiLiveDeskew` (set false to disable).
+    On a live MSI miss, the same aim-box crop is re-prepared unstretched and
+    run through `msi::decodeDeskew`: projection estimate (gain ≥1.3), coarse
+    bicubic rotation sweep, fallback score ≥0.70. Successful live frames and
+    the still path are untouched. Measured on a 972x252 Pixel crop: the MLP
+    predicted +17.9° for a ~-6° tilt; the projection/bicubic sweep read it.
   Default open-length stills get only the direction-safe angle fallback;
   sharpened/scale retries are shelf-configuration only.
   Recursion guards are `t_sharpenDepth` and `t_scaleEnsembleDepth`, held by
   RAII `DepthGuard`s so `bad_alloc` cannot poison a worker thread. Do not
   widen these gates without re-running the full augmented suite, the negative
   sets (currently 412 ms mean / 596 ms p95 / 743 ms max per all-failure
-  frame on the host) and the harness (170 assertions). The safety pass holds
+  frame on the host) and the harness (185 assertions). The safety pass holds
   2,286/2,440 augmented positives with no new wrong reads.
 - The orientation regressor is the only learned MSI component: a 32x32 →
   128 → 64 → 1 MLP in `msi_angle_model.h`, trained offline on synthetic

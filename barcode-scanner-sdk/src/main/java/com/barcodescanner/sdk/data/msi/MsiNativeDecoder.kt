@@ -68,6 +68,13 @@ class MsiNativeDecoder(
      * reported codeword here.
      */
     private val symbolLengths: IntRange? = null,
+    /**
+     * Run the still-only native fallback stack (learned-angle rotation,
+     * autocontrast+unsharp retry, 2x/3x ensemble); wired from
+     * [ScannerConfig.msiStillFallbacks]. Live frames never reach those
+     * stages, so this only changes `scanBitmap`/`scanFrame` cost.
+     */
+    private val stillFallbacks: Boolean = true,
 ) : BarcodeDecoder {
 
     override val name: String = NAME
@@ -83,6 +90,21 @@ class MsiNativeDecoder(
         minDigits: Int,
         maxDigits: Int,
         stretchRetry: Boolean,
+        stillFallbacks: Boolean,
+    ): String?
+
+    /**
+     * Live tilt rescue entry point: whole-frame projection deskew + bicubic
+     * sweep on an unstretched live crop. Same return contract as
+     * [nativeDecodeLuma] (`digits|policy|votes|0`).
+     */
+    private external fun nativeDecodeDeskew(
+        gray: ByteBuffer,
+        width: Int,
+        height: Int,
+        requiredPolicy: Int,
+        minDigits: Int,
+        maxDigits: Int,
     ): String?
 
     private val requiredNativePolicy: Int = nativePolicyCode(checksumPolicy)
@@ -145,6 +167,34 @@ class MsiNativeDecoder(
         }
     }
 
+    /**
+     * Live tilt rescue: decodes an **unstretched** live crop with the
+     * projection deskew sweep. Only called by the live path after the normal
+     * [decodeLuma] misses and [ScannerConfig.msiLiveDeskew] is enabled.
+     * Same validation, vote gate and payload contract as [decode].
+     */
+    internal suspend fun decodeDeskewLuma(frame: LumaFrame): DecodeOutcome = withContext(dispatcher) {
+        try {
+            if (!nativeAvailable) {
+                return@withContext DecodeOutcome.NotFound("MSI native library not loaded")
+            }
+            val raw = nativeDecodeDeskew(
+                frame.buffer,
+                frame.width,
+                frame.height,
+                requiredNativePolicy,
+                nativeMinDigits,
+                nativeMaxDigits,
+            )
+            acceptNativeRead(raw, upsideDown = false)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (t: Throwable) {
+            android.util.Log.w(NAME, "decodeDeskewLuma failed: ${t.javaClass.simpleName}: ${t.message}")
+            DecodeOutcome.Error(DecoderException("MSI deskew decode failed", t), recoverable = true)
+        }
+    }
+
     /** One native read of [frame] in place, then [acceptNativeRead]. */
     private fun decodeLumaRaw(frame: LumaFrame, upsideDown: Boolean): DecodeOutcome {
         val raw = try {
@@ -158,6 +208,7 @@ class MsiNativeDecoder(
                 nativeMinDigits,
                 nativeMaxDigits,
                 frame.stretchRetry,
+                stillFallbacks,
             )
         } catch (e: UnsatisfiedLinkError) {
             return DecodeOutcome.Error(

@@ -33,12 +33,22 @@ import com.barcodescanner.sdk.data.frame.LumaBufferPool
 import com.barcodescanner.sdk.data.frame.LumaFrame
 import com.barcodescanner.sdk.data.frame.NativeFrame
 import com.barcodescanner.sdk.domain.model.ScannerConfig
+import com.barcodescanner.sdk.domain.model.Symbology
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+
+/**
+ * One live frame prepared for both paths: [frame] is the production
+ * contrast-stretched crop every engine reads; [deskew] is the same crop
+ * without the stretch, prepared only when [ScannerConfig.msiLiveDeskew] is on
+ * for the MSI tilt rescue. Null [deskew] means the rescue is off (or its
+ * buffer could not be prepared).
+ */
+internal class PreparedLiveFrame(val frame: LumaFrame, val deskew: LumaFrame?)
 
 /**
  * CameraX live-scan manager (internal; host apps use startCamera on the facade).
@@ -74,11 +84,13 @@ internal class CameraScanManager(
     private val config: ScannerConfig,
     private val scope: CoroutineScope,
     /**
-     * Decodes one prepared frame. Returns true when [LumaFrame.buffer] may be
-     * rewritten afterwards; false when an engine may still be reading it (a
-     * timed-out ML Kit task), in which case the buffer is dropped from the pool.
+     * Decodes one prepared frame. Returns true when [PreparedLiveFrame.frame]'s
+     * buffer may be rewritten afterwards; false when an engine may still be
+     * reading it (a timed-out ML Kit task), in which case the buffer is dropped
+     * from the pool. The deskew buffer, when present, is used only by the
+     * synchronous MSI rescue and is always released by the manager.
      */
-    private val onFrame: suspend (LumaFrame) -> Boolean,
+    private val onFrame: suspend (PreparedLiveFrame) -> Boolean,
     /**
      * Called (on the main thread) when camera binding fails — e.g. no back
      * camera, camera in use, or the lifecycle is already destroyed. Without
@@ -115,6 +127,16 @@ internal class CameraScanManager(
 
     /** Prepared-frame buffers; an in-use (timed-out) buffer is never released. */
     private val pool = LumaBufferPool()
+
+    /**
+     * Unstretched copies for the live tilt rescue. A separate pool keeps the
+     * production buffer lifecycle untouched; it is only fed when the rescue
+     * is enabled and MSI is one of the enabled symbologies (otherwise the
+     * deskew copy would never be used).
+     */
+    private val deskewPool = LumaBufferPool()
+    private val liveDeskewWanted: Boolean =
+        config.msiLiveDeskew && Symbology.MSI_PLESSEY in config.enabledSymbologies
 
     /** CameraX LiveData registrations; added and removed on the main thread only. */
     @Volatile
@@ -382,7 +404,7 @@ internal class CameraScanManager(
                 proxy.close()
                 return@setAnalyzer
             }
-            val frame = try {
+            val prepared = try {
                 prepare(proxy)
             } catch (t: Throwable) {
                 android.util.Log.w(TAG, "frame prepare failed", t)
@@ -392,18 +414,21 @@ internal class CameraScanManager(
                 // now, not after the decode.
                 proxy.close()
             }
-            if (frame == null) {
+            if (prepared == null) {
                 decodeInFlight.set(false)
                 return@setAnalyzer
             }
             scope.launch {
                 var reusable = false
                 try {
-                    reusable = stopped || onFrame(frame)
+                    reusable = stopped || onFrame(prepared)
                 } finally {
                     // Return to the pool BEFORE opening the gate so the next
                     // frame finds it; an in-use (or cancelled) buffer is dropped.
-                    if (reusable) pool.release(frame.buffer)
+                    if (reusable) pool.release(prepared.frame.buffer)
+                    // The deskew copy is read only by the synchronous MSI
+                    // rescue inside onFrame: always reusable afterwards.
+                    prepared.deskew?.let { deskewPool.release(it.buffer) }
                     decodeInFlight.set(false)
                 }
             }
@@ -414,9 +439,11 @@ internal class CameraScanManager(
     /**
      * The one pixel pass of a live frame: aim-box geometry in Kotlin (a few
      * float ops), then [NativeFrame.prepare] reads the box straight out of the
-     * Y plane into a pooled buffer. Null when the frame is unusable.
+     * Y plane into a pooled buffer. When the live tilt rescue is enabled, the
+     * same box is prepared a second time without the contrast stretch; that
+     * copy is used only after a miss. Null when the frame is unusable.
      */
-    private fun prepare(proxy: ImageProxy): LumaFrame? {
+    private fun prepare(proxy: ImageProxy): PreparedLiveFrame? {
         if (proxy.format != ImageFormat.YUV_420_888) return null
         val luma = proxy.planes.firstOrNull() ?: return null
         // YUV_420_888 guarantees pixelStride 1 for Y; the native pass relies on it.
@@ -447,7 +474,27 @@ internal class CameraScanManager(
             pool.release(buffer)
             return null
         }
-        return LumaFrame(buffer, width, height, maxOrientations = LIVE_ORIENTATIONS, scanTopFraction = 0f)
+        val live = LumaFrame(buffer, width, height,
+                             maxOrientations = LIVE_ORIENTATIONS, scanTopFraction = 0f)
+        val deskew = if (liveDeskewWanted) {
+            val rawBuffer = deskewPool.take(width, height)
+            val rawOk = NativeFrame.prepare(
+                luma.buffer, proxy.width, proxy.height, luma.rowStride,
+                crop.left, crop.top, crop.right, crop.bottom,
+                rotation, false, rawBuffer,
+            )
+            if (rawOk) {
+                LumaFrame(rawBuffer, width, height,
+                          maxOrientations = LIVE_ORIENTATIONS, scanTopFraction = 0f)
+            } else {
+                android.util.Log.w(TAG, "deskew prepare failed")
+                deskewPool.release(rawBuffer)
+                null
+            }
+        } else {
+            null
+        }
+        return PreparedLiveFrame(live, deskew)
     }
 
     companion object {

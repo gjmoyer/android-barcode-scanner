@@ -459,19 +459,22 @@ outvote it. Superseded by §8.3 before ever shipping. Leave it dead.
      (`msi_angle_model.h`, clean-room, trained offline on synthetic
      rotations) predicts the in-plane tag angle from a 32×32 area average.
      `decodeAngleFallback` rotates the frame upright (PIL-compatible
-     reverse-affine nearest neighbour) and retries the predicted angle
-     ±0.35/0.7/1.0/1.4°, then a 2%/98% stretch and a 2× retry. Predicted
-     angles outside ±60° are treated as 0° and the rotated canvas is capped
-     at 64 MP; the angle path is capped at a 3.5 MP source, the 2× stage
+     reverse-affine nearest neighbour); for each offset from the predicted
+     angle (±0.35/0.7/1.0/1.4°) it tries the rotated frame, its 2%/98%
+     stretch, a 2× upscale and the stretched 2× frame (interleaved per
+     offset, not four global sweeps). Predicted angles outside ±60° are
+     treated as 0°. The rotated canvas has a 64 MP defense-in-depth guard;
+     the operative bound is the 3.5 MP angle-path source cap. The 2× stage
      needs long edge ≥330 px and rotated long edge ≤1800 px, and its output
      is capped at 4 MP. Every accepted candidate is confirmed against its
      own 180° view; a reverse-failing read needs score ≥0.70 (no vote escape).
-     A stretched-sweep read whose paired reverse view fails is rejected
-     below 0.55.
+     Any stretched-sweep read without reverse confirmation (failed pair, odd
+     view, or unpaired 90° at `maxOrientations=3`) is rejected below 0.55.
    - **Sharpened retry.** Requires `minDigits>=9`; autocontrast (1–99%) plus
-     unsharp mask (radius 2, amount 1.8, threshold 2), then `decodeFrame`
-     with two orientations plus the angle fallback, with its own upscale
-     disabled. Degenerate histograms return an identity copy and skip the
+     unsharp mask (Gaussian radius 4, sigma 2, amount 1.8, threshold 2), then
+     `decodeFrame` with two orientations on the sharpened frame, with upscale
+     disabled for that leg; the explicit angle pass restores the caller's
+     `allowUpscale`. Degenerate histograms return an identity copy and skip the
      retry. Not a recursive full-stack sweep: that nested the
      orientation/ensemble path and turned one blurred frame into a
      multi-minute stall.

@@ -24,7 +24,9 @@ SKIPs and stays green; the committed coverage is the runtime synthetic suite
 pass it as argv[1] to sweep those (the six-SKU ground truth + policies live
 in `shelfSuite`, and `gen_shelf_synthetics.py` regenerates equivalent
 full-codeword PNGs in `build/shelf-synthetics` by default).
-Exit code = number of asserted failures (0 = green).
+Exit code = number of asserted failures (0 = green). Still-fallback
+wall-clock budgets are advisory by default (see item 6), so they never
+change the exit code unless explicitly enforced.
 
 ## What it runs
 
@@ -60,6 +62,19 @@ Exit code = number of asserted failures (0 = green).
    full-frame band search skips.
 5. **Bench**: 20 timed iterations on a 1280×720 synthetic + the largest
    photo; fails over a 500 ms mean (devices do this in single-digit ms).
+6. **Still-fallback budgets** (`perfSuite`, correctness ASSERTED, wall-clock
+   ADVISORY): one-shot all-failure cost for 16 MP blank, 4 MP/1000 px/550 px
+   noise and the 400 px ensemble. These catch the old 1.5 s/565 MB class of
+   regression on the reference host, but absolute budgets do not transfer to
+   shared CI or slower dev machines (2–4× slower is routine). An overrun
+   prints `WARN` and a summary count, and the exit code stays green. Set
+   `MSI_PERF_STRICT=1` to turn overruns into failures where the hardware is
+   controlled. The all-failure correctness assertion (no read) is always
+   enforced.
+7. **Live tilt rescue** (`liveDeskewSuite`): a 972×252 5 px/module crop
+   rotated 10° must read through `msi::decodeDeskew`; flat and noise crops
+   must decline. Exercises the live path
+   (`ScannerConfig.msiLiveDeskew`, default on; set false to disable).
 
 ## A/B behavior checks
 

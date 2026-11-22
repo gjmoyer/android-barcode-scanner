@@ -5,15 +5,20 @@ plugins {
 
 android {
     namespace = "com.barcodescanner.sample"
-    // 37: required by core-ktx 1.19.x AAR metadata (compile only).
+    // 37.2 (Android 17 minor release): required by core-ktx 1.19.x AAR
+    // metadata (compile only). compileSdkMinor selects android-37.2.
     compileSdk = 37
+    compileSdkMinor = 2
 
     defaultConfig {
         applicationId = "com.barcodescanner.sample"
         // Android 9 (API 28), same as the SDK: nothing used needs newer.
         minSdk = 28
         // Android 17 (API 37), the current stable level; Play has required
-        // API 36+ for new apps and updates since Aug 2026.
+        // API 36+ for new apps and updates since Aug 2026. targetSdk is a
+        // manifest integer and AGP's TargetSdkVersion has no minor field, so
+        // unlike compileSdk it cannot carry a .2 minor — 37 is the level that
+        // actually takes effect at runtime.
         targetSdk = 37
         versionCode = 1
         versionName = "1.0.0"

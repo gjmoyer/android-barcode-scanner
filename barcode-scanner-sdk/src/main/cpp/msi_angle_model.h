@@ -1,5 +1,11 @@
 // Generated clean-room MSI orientation regressor (area-resize features).
 #pragma once
+
+// Scoped to msi: the generated names (aw0, ab2, kAngleH0, ...) are terse and
+// would otherwise land in the global namespace of every includer. The training
+// generator must keep emitting this wrapper — see docs/MSI_ANGLE_MODEL.md.
+namespace msi {
+
 static const int kAngleInput = 1024;
 static const float aw0[131072] = {
 -0.04492611f,0.05607531f,-0.04811792f,0.06494947f,-0.00629912f,-0.00020251f,0.05799354f,0.00717301f,
@@ -17430,3 +17436,5 @@ static const float aw2[64] = {
 static const float ab2[1] = {
 0.17835125f};
 static const int kAngleH0=128, kAngleH1=64;
+
+} // namespace msi

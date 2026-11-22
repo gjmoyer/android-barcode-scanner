@@ -21,7 +21,15 @@ data class ScannerConfig(
      * (ML Kit and zxing still resolve rotation themselves).
      */
     val maxOrientationsTried: Int,
-    /** Per-frame decode timeout; fusion returns best-so-far after this. */
+    /**
+     * Per-frame decode timeout; fusion returns best-so-far after this.
+     *
+     * Cooperative: it is checked between engines (and at engine suspension
+     * points), so a single blocking native MSI still decode runs to
+     * completion past the deadline. The still fallback stack is bounded by
+     * its own pixel caps; set [msiStillFallbacks] false to remove its
+     * worst-case cost entirely.
+     */
     val decodeTimeoutMillis: Long,
     /** Suppress identical results within this window (live mode dedup). */
     val duplicateSuppressionMillis: Long,
@@ -105,6 +113,25 @@ data class ScannerConfig(
      * applies to the emitted payload.
      */
     val msiSymbolLengths: IntRange? = null,
+    /**
+     * Run the still-only native fallbacks: the learned-angle rotation, the
+     * autocontrast+unsharp retry and the 2x/3x agreement ensemble. True
+     * (default) keeps still recall; false restores the plain orientation
+     * sweep (+ contrast stretch) latency profile. Live camera frames never
+     * run these stages (the still-only `stretchRetry` gates them), so this
+     * only affects `scanBitmap`/`scanFrame`.
+     */
+    val msiStillFallbacks: Boolean = true,
+    /**
+     * Live tilt rescue (default true). On a live MSI miss, re-prepare the
+     * same aim-box crop without the camera contrast stretch, deskew it with a
+     * bicubic sweep around the projection angle, and decode once. Only runs
+     * after the normal live decode misses; successful frames take exactly
+     * today's path. The still path is unaffected. Set false to keep the
+     * strict pre-fallback live profile (e.g. on a device whose latency budget
+     * cannot absorb the miss-only sweep).
+     */
+    val msiLiveDeskew: Boolean = true,
 ) {
     init {
         require(enabledSymbologies.isNotEmpty()) { "At least one symbology must be enabled" }
@@ -172,6 +199,8 @@ data class ScannerConfig(
         private var msiMinDigits = 3
         private var msiSymbolLengths: IntRange? = null
         private var msiStripCheck = true
+        private var msiStillFallbacksEnabled = true
+        private var msiLiveDeskewEnabled = true
         private var msiOcrChecksum = false
         private var minConf = 0.5f
         private var zxingHarder: Boolean? = null
@@ -201,6 +230,10 @@ data class ScannerConfig(
         fun msiSymbolLengths(range: IntRange?) = apply { msiSymbolLengths = range }
         /** Emit full MSI codewords with checks (see [ScannerConfig.msiStripChecksum]). */
         fun msiStripChecksum(v: Boolean) = apply { msiStripCheck = v }
+        /** Run the still-only native fallback stack (see [ScannerConfig.msiStillFallbacks]). */
+        fun msiStillFallbacks(v: Boolean) = apply { msiStillFallbacksEnabled = v }
+        /** Disable/enable the live tilt rescue (see [ScannerConfig.msiLiveDeskew]). */
+        fun msiLiveDeskew(v: Boolean) = apply { msiLiveDeskewEnabled = v }
         /** Retired, no effect (see field). */
         fun msiOcrRequireChecksum(v: Boolean) = apply { msiOcrChecksum = v }
         fun minConfidence(v: Float) = apply { minConf = v }
@@ -234,6 +267,8 @@ data class ScannerConfig(
                 debugOcrFrameDump = ocrDump,
                 scanRegion = region,
                 msiSymbolLengths = msiSymbolLengths,
+                msiStillFallbacks = msiStillFallbacksEnabled,
+                msiLiveDeskew = msiLiveDeskewEnabled,
             )
         }
     }

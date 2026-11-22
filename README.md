@@ -145,6 +145,15 @@ val config = ScannerConfigBuilder()
   checksum policy. Enforced in native candidate selection before voting, so a
   phantom of another length can't outvote the true read. Grocery shelf tags are
   9 digits; set it whenever your labels have a fixed length.
+- `msiStillFallbacks` (default true): run the still-only native retries
+  (learned-angle rotation, autocontrast+unsharp, 2x/3x agreement ensemble).
+  Set false to bound one-shot latency at the cost of tilted/blurred still
+  recall; live frames never run these stages.
+- `msiLiveDeskew` (default true): on a live MSI miss, re-prepare the same
+  aim-box crop without the camera contrast stretch and retry MSI with a
+  projection-deskew bicubic sweep. Only runs after a miss; successful live
+  frames and the still path are unchanged. Set false to keep the strict
+  pre-fallback live profile if a device cannot absorb the miss-only sweep.
 - Duplicate suppression only affects the live `results` flow; one-shot
   `scanBitmap`/`scanFrame` always return the decode result.
 
@@ -200,7 +209,7 @@ on-device full chain, Pixel 6a / emulator):
 | MSI still fallback stack, all-failure frame | 412 ms mean / 596 ms p95 / 743 ms max; 3.5 MP angle / 4 MP sharpen source cap | not used on live frames |
 | One-shot MSI `scanBitmap` | n/a (native absent on JVM) | ~15–60 ms typical |
 | DataBar via zxing-cpp (native TryRotate/TryHarder) | n/a (native absent on JVM) | ~35–55 ms |
-| Full-chain worst case | — | capped by `decodeTimeoutMillis` (default 1500 ms) |
+| Full-chain worst case | — | live frames bounded by `decodeTimeoutMillis` (default 1500 ms); see the still caveat below |
 
 Methodology, the full real-photo accuracy/tilt tables and scope boundaries
 (including the comparison chart with a leading commercial SDK and Apple
@@ -225,9 +234,12 @@ Live-mode recipe (already wired, no host code needed):
   and is single-flight (`STRATEGY_KEEP_ONLY_LATEST` + decode gate):
   analysis runs at 1/latency fps instead of queueing — a slow frame delays the next
   attempt, never piles up work.
-- Per-frame worst case is capped by `ScannerConfig.decodeTimeoutMillis` (default
-  1500 ms; every engine runs under it). Lower it (~500 ms) if your live UI must
-  never wait on a pathological frame.
+- Per-frame live decode is bounded by `ScannerConfig.decodeTimeoutMillis`
+  (default 1500 ms; checked between engines, best-so-far on expiry). Lower it
+  (~500 ms) if your live UI must never wait on a pathological frame. A
+  one-shot still is one blocking native MSI call, so it can overrun the
+  budget; `msiStillFallbacks(false)` removes the expensive still-only retries
+  (angle, sharpen, 2x/3x ensemble) for a fixed cheap-path profile.
 - Why a budget at all: the camera gate is single-flight, so a pathological frame
   that takes 8 s freezes live scanning for 8 s. "Exhaust every option" is the
   intent — the engines all run on one-shot and stale frames — but

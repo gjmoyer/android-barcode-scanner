@@ -39,14 +39,18 @@ CameraX / Bitmap
   → LumaFusion: engines in REGISTRY order (MLKit → MsiNative → ZXingCpp) read
   that one buffer in place; nothing converts, crops, rotates or copies pixels,
   and no engine ever sees a second variant of the frame
-  → whole frame under one decodeTimeoutMillis budget, best-so-far on expiry;
-  hits below minConfidence or outside the enabled set are dropped
+  → whole frame under one decodeTimeoutMillis budget, best-so-far on expiry
+  (checked between engines: a single blocking native still decode can overrun
+  it); hits below minConfidence or outside the enabled set are dropped
   → pool deduped on (value, symbology) keeping max confidence; a hit at
   CONFIDENT_THRESHOLD (0.95) stops the frame
   → per-engine timings + final result go to logcat under `LumaFusion`
   (always emitted at DEBUG; filter with `adb logcat -s LumaFusion`)
   → live path: MSI bar stability gate (2 consecutive sightings) → per-key
   duplicate suppression → ScanResult.Success
+  → live only, default on (`ScannerConfig.msiLiveDeskew`): after an all-engine
+  miss, retry the unstretched aim-box crop through MSI's projection-deskew
+  bicubic sweep; successful frames never take this path
   → one-shot path: pure return, never touches the results Flow
 ```
 
@@ -110,13 +114,14 @@ Grayscale frame (row-major bytes via JNI)
   → single 2x NN upscale retry if still nothing, on a small frame (<800px
     edge) or on small modules with checksum-valid evidence
   → stills only, after all orientation sweeps, ≤3.5 MP: learned-angle fallback:
-    predict the tag rotation from a 32x32 view, rotate upright, retry the
-    predicted angle ±0.35/0.7/1.0/1.4°, then a 2%/98% stretch and a 2x retry;
-    every accepted candidate is confirmed against its 180° view
-  → stills only, ≤4 MP: autocontrast (1%) + unsharp (radius 2, amount 1.8)
-    retry on the sharpened frame (decodeFrame with two orientations + angle
-    fallback, no recursive sweep; degenerate histograms return an identity
-    copy and skip the retry)
+    predict the tag rotation from a 32x32 view; for each offset (predicted,
+    then ±0.35/0.7/1.0/1.4°) rotate upright and try the rotated frame, its
+    2%/98% stretch, a 2x upscale and the stretched 2x frame (all four nested
+    per offset); every accepted candidate is confirmed against its 180° view
+  → stills only, ≤4 MP: autocontrast (1%) + unsharp (Gaussian radius 4,
+    sigma 2, amount 1.8) retry on the sharpened frame (decodeFrame with two
+    orientations + angle fallback, no recursive sweep; degenerate histograms
+    return an identity copy and skip the retry)
   → stills only, frame ≤400px: shifted 2x/3x agreement retry; both scales
     must match when both read, and a single scale needs score ≥0.70
   → Kotlin: re-validate reported digits strictly under `msiChecksumPolicy`,
