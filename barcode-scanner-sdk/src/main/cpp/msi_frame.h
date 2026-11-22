@@ -114,6 +114,10 @@ struct FrameOptions {
     // buffer. For stills, which are never stretched up front; live aim-box
     // crops are already stretched and leave this off.
     bool stretchRetry = false;
+    // Allow the decoder's far-field 2x retry inside this frame decode.
+    // Derived-frame fallbacks (sharpened, 2x/3x) set this false so scales
+    // cannot compound; the top-level still path leaves it true.
+    bool allowUpscale = true;
 };
 
 // Orientation-aware decode of a contiguous gray buffer (stride = width).

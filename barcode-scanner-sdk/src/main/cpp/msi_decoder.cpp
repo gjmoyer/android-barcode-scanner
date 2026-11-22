@@ -26,7 +26,7 @@
 #include <string>
 #include <vector>
 
-#ifdef MSI_ANGLE_MODEL
+#if MSI_ANGLE_MODEL
 #include "msi_angle_model.h"
 #endif
 
@@ -1592,7 +1592,7 @@ void upsampleProfile2x(std::vector<float>& pr, int head, int n) {
 
 } // namespace
 
-#ifdef MSI_ANGLE_MODEL
+#if MSI_ANGLE_MODEL
 // Rotate an 8-bit image about its centre into an expanded white canvas.
 static void rotateGrayExpanded(const uint8_t* src, int W, int H, float deg,
                         std::vector<uint8_t>& out, int& ow, int& oh) {
@@ -1680,14 +1680,10 @@ static float predictAngle(const uint8_t* src, int W, int H) {
 DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUpscale,
                         float scanTopFraction);
 
-DecodeResult decode(const uint8_t* gray, int width, int height, ChecksumPolicy required) {
-    DecodeOptions options;
-    options.required = required;
-    return decode(gray, width, height, options);
-}
-
-DecodeResult decode(const uint8_t* gray, int width, int height, const DecodeOptions& options) {
-    // Scope the requirement to this call, restoring on every exit path.
+// Scopes the caller's checksum/length policy around one decodeImpl call so
+// internal retries can choose whether the far-field upscale compounds.
+static DecodeResult decodeScoped(const uint8_t* gray, int width, int height,
+                                 const DecodeOptions& options, bool allowUpscale) {
     struct RequiredScope {
         ChecksumPolicy prev;
         int prevMin, prevMax;
@@ -1701,7 +1697,17 @@ DecodeResult decode(const uint8_t* gray, int width, int height, const DecodeOpti
     t_minDigits = std::max(options.minDigits, 0);
     t_maxDigits = std::max(options.maxDigits, 0);
     const float top = std::min(std::max(options.scanTopFraction, 0.0f), 0.9f);
-    return decodeImpl(gray, width, height, /*allowUpscale=*/true, top);
+    return decodeImpl(gray, width, height, allowUpscale, top);
+}
+
+DecodeResult decode(const uint8_t* gray, int width, int height, ChecksumPolicy required) {
+    DecodeOptions options;
+    options.required = required;
+    return decode(gray, width, height, options);
+}
+
+DecodeResult decode(const uint8_t* gray, int width, int height, const DecodeOptions& options) {
+    return decodeScoped(gray, width, height, options, options.allowUpscale);
 }
 
 // Far-field fallback, factored so the success path is untouched.
@@ -1761,6 +1767,7 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
             res.policy = v.best.second;
             res.votes = v.votes;
             res.leadingQuiet = v.guard.lead;
+            res.score = v.avgScore;
             if (g_debug) printf("[dbg] ROI %d succeeded: %s (avg score %.3f)\n",
                                 ri, res.digits.c_str(), v.avgScore);
             return res;
@@ -1798,6 +1805,7 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
             res.policy = v.best.second;
             res.votes = v.votes;
             res.leadingQuiet = v.guard.lead;
+            res.score = v.avgScore;
             if (g_debug) printf("[dbg] 1D 2x retry succeeded: %s\n", res.digits.c_str());
             return res;
         }
@@ -1861,6 +1869,7 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
                     res.policy = v.best.second;
                     res.votes = v.votes;
                     res.leadingQuiet = v.guard.lead;
+                    res.score = v.avgScore;
                     if (g_debug) printf("[dbg] skew retry succeeded: %s (%.1f deg, pass %d)\n",
                                         res.digits.c_str(), deg, pass);
                     return res;
@@ -1883,6 +1892,7 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
             res.policy = v.best.second;
             res.votes = v.votes;
             res.leadingQuiet = v.guard.lead;
+            res.score = v.avgScore;
             if (g_debug) printf("[dbg] grid retry succeeded: %s\n", res.digits.c_str());
             return res;
         }
@@ -1945,10 +1955,12 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
         DecodeResult r2 = decodeImpl(up.data(), W2, H2, /*allowUpscale=*/false, scanTopFraction);
         if (r2.ok) return r2;
     }
+    res.sawCandidate = sawCandidate;
+    res.minModule = minModuleSeen;
     return res;
 }
 
-#ifdef MSI_ANGLE_MODEL
+#if MSI_ANGLE_MODEL
 static void stretchGray(std::vector<uint8_t>& img) {
     uint32_t hist[256] = {0};
     for (uint8_t v : img) ++hist[v];
@@ -1967,8 +1979,66 @@ static void stretchGray(std::vector<uint8_t>& img) {
     for (uint8_t& v : img) v = lut[v];
 }
 
+static int pickDirectionLocal(const DecodeResult& first, const DecodeResult& reverse) {
+    constexpr float kSeen = -1e8f;
+    if (first.leadingQuiet < kSeen || reverse.leadingQuiet < kSeen) return 0;
+    const float d = first.leadingQuiet - reverse.leadingQuiet;
+    if (d >= 0.3f) return 1;
+    if (d <= -0.3f) return -1;
+    return 0;
+}
+
+// Decode one derived image, then its exact 180-degree view. A fallback has
+// already rotated the frame by an arbitrary angle, so the outer sweep's
+// 0/180 arbitration is not enough: resolve the direction here and report
+// 180 when the reverse view wins. A different read with no clear quiet-zone
+// winner is a conflict and yields no read.
+static DecodeResult decodeViewSafe(const uint8_t* img, int w, int h,
+                                   const DecodeOptions& options, bool allowUpscale,
+                                   int* relativeRotation) {
+    if (relativeRotation != nullptr) *relativeRotation = 0;
+    if (img == nullptr || w <= 0 || h <= 0) return DecodeResult{};
+    DecodeResult r = decodeScoped(img, w, h, options, allowUpscale);
+    if (!r.ok) return r;
+    std::vector<uint8_t> reverse((size_t)w * (size_t)h);
+    for (int y = 0; y < h; ++y) {
+        const uint8_t* row = img + (size_t)(h - 1 - y) * w;
+        uint8_t* dst = &reverse[(size_t)y * w];
+        for (int x = 0; x < w; ++x) dst[x] = row[w - 1 - x];
+    }
+    const DecodeResult rr = decodeScoped(reverse.data(), w, h, options, allowUpscale);
+    if (g_debug && !allowUpscale && r.ok) {
+        printf("[dbg] nested candidate %s votes=%d lead=%.2f score=%.3f reverse=%s revlead=%.2f\n",
+               r.digits.c_str(), r.votes, r.leadingQuiet, r.score,
+               rr.ok ? rr.digits.c_str() : "-", rr.leadingQuiet);
+    }
+    if (!rr.ok && !allowUpscale) {
+        // Nested derived scales are the highest phantom risk: a 2x/3x frame
+        // already amplifies print and texture. Require either reverse-view
+        // confirmation or a strong digit correlation there; top-level stills
+        // keep the normal single-view behavior.
+        if (r.score > 0.0f && r.score < 0.65f && r.votes < 3) return DecodeResult{};
+    }
+    if (rr.ok && rr.digits != r.digits) {
+        const int pick = pickDirectionLocal(r, rr);
+        if (pick == 0) return DecodeResult{};
+        if (pick < 0) {
+            if (relativeRotation != nullptr) *relativeRotation = 180;
+            return rr;
+        }
+    }
+    return r;
+}
+
 DecodeResult decodeAngleFallback(const uint8_t* gray, int width, int height,
-                                 const DecodeOptions& options) {
+                                 const DecodeOptions& options,
+                                 int* relativeRotation) {
+    if (relativeRotation != nullptr) *relativeRotation = 0;
+    if (gray == nullptr || width < 32 || height < 32) return DecodeResult{};
+    // Nine rotations of a large derived frame (for example a 3x ensemble
+    // scale) are too expensive; the frame-level caller caps its own input at
+    // 4 MP, and this keeps nested scale decodes bounded too.
+    if ((int64_t)width * (int64_t)height > 4000000) return DecodeResult{};
     float pred = predictAngle(gray, width, height);
     if (!std::isfinite(pred) || std::fabs(pred) > 60.0f) pred = 0.0f;
     if (g_debug) printf("[dbg] angle fallback %.2f deg\n", pred);
@@ -1977,13 +2047,24 @@ DecodeResult decodeAngleFallback(const uint8_t* gray, int width, int height,
         std::vector<uint8_t> rot;
         int rw = 0, rh = 0;
         rotateGrayExpanded(gray, width, height, -(pred + off), rot, rw, rh);
-        const DecodeResult r = decode(rot.data(), rw, rh, options);
-        if (r.ok) return r;
+        if (rw <= 0 || rh <= 0) continue;
+        int rel = 0;
+        const DecodeResult r = decodeViewSafe(rot.data(), rw, rh, options,
+                                             options.allowUpscale, &rel);
+        if (r.ok) {
+            if (relativeRotation != nullptr) *relativeRotation = rel;
+            return r;
+        }
         std::vector<uint8_t> stretched = rot;
         stretchGray(stretched);
-        const DecodeResult rs = decode(stretched.data(), rw, rh, options);
-        if (rs.ok) return rs;
-        if (std::max(width, height) >= 330 && std::max(rw, rh) <= 1800) {
+        const DecodeResult rs = decodeViewSafe(stretched.data(), rw, rh, options,
+                                               options.allowUpscale, &rel);
+        if (rs.ok) {
+            if (relativeRotation != nullptr) *relativeRotation = rel;
+            return rs;
+        }
+        if (options.allowUpscale &&
+            std::max(width, height) >= 330 && std::max(rw, rh) <= 1800) {
             const int W2 = rw * 2, H2 = rh * 2;
             std::vector<uint8_t> up2((size_t)W2 * (size_t)H2);
             for (int y = 0; y < H2; ++y) {
@@ -1991,11 +2072,17 @@ DecodeResult decodeAngleFallback(const uint8_t* gray, int width, int height,
                 uint8_t* dst = &up2[(size_t)y * W2];
                 for (int x = 0; x < W2; ++x) dst[x] = row[std::min(rw - 1, (x + 1) / 2)];
             }
-            const DecodeResult ru = decode(up2.data(), W2, H2, options);
-            if (ru.ok) return ru;
+            const DecodeResult ru = decodeViewSafe(up2.data(), W2, H2, options, false, &rel);
+            if (ru.ok) {
+                if (relativeRotation != nullptr) *relativeRotation = rel;
+                return ru;
+            }
             stretchGray(up2);
-            const DecodeResult rus = decode(up2.data(), W2, H2, options);
-            if (rus.ok) return rus;
+            const DecodeResult rus = decodeViewSafe(up2.data(), W2, H2, options, false, &rel);
+            if (rus.ok) {
+                if (relativeRotation != nullptr) *relativeRotation = rel;
+                return rus;
+            }
         }
     }
     return DecodeResult{};

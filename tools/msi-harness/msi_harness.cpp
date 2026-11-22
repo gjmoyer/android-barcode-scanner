@@ -569,6 +569,65 @@ static void frameSuite() {
             assertTrue(name.c_str(),
                        fr.decode.ok && fr.decode.digits == rc.full && fr.relativeRotation == 180);
         }
+        // The still fallbacks run after the sweeps; they must never bypass
+        // this arbitration and emit the reversed phantom as an upright read.
+        msi::FrameOptions rf = ro;
+        rf.maxOrientations = 1;
+        rf.scanTopFraction = 0.25f;
+        rf.stretchRetry = true;
+        for (const RevCase& rc : reversed) {
+            Gray g = renderMsi(rc.full, 3, rc.w, rc.h, rc.top, rc.barH);
+            boxBlur(g, rc.blur);
+            photometric(g, rc.contrast, rc.brightness);
+            Gray flip = rotateCw(g, 180);
+            rf.required = rc.policy;
+            msi::FrameResult fr = msi::decodeFrame(flip.px.data(), flip.w, flip.h, rf);
+            const std::string name =
+                std::string("frame fallback reversed phantom ") + rc.full + " not emitted as upright";
+            if (fr.decode.ok && fr.decode.digits != rc.full)
+                printf("  fallback phantom %s -> %s rel=%d\n", rc.full,
+                       fr.decode.digits.c_str(), fr.relativeRotation);
+            assertTrue(name.c_str(),
+                       !fr.decode.ok || fr.decode.digits == rc.full);
+        }
+    }
+
+    // 5a-2. Exact still-path reproducer for the fallback direction bypass.
+    // A blurred, low-contrast, upside-down tag at 3px/module used to return
+    // a different checksum-valid 9-digit value with relativeRotation=0.
+    {
+        Gray g = renderMsi("011578333", 3, 1000, 600, 220, 160);
+        photometric(g, 0.40f, 0);
+        boxBlur(g, 2);
+        Gray flip = rotateCw(g, 180);
+        msi::FrameOptions fo;
+        fo.maxOrientations = 1;
+        fo.scanTopFraction = 0.25f;
+        fo.minDigits = 9;
+        fo.maxDigits = 9;
+        fo.stretchRetry = true;
+        msi::FrameResult fr = msi::decodeFrame(flip.px.data(), flip.w, flip.h, fo);
+        assertTrue("still fallback 180 phantom: true read, relativeRotation 180",
+                   fr.decode.ok && fr.decode.digits == "011578333" &&
+                   fr.relativeRotation == 180);
+    }
+
+    // 5a-3. Small-module still path: a blurred 9-digit tag downscaled to
+    // ~2.5px/module must read through the scale fallback without a phantom.
+    {
+        Gray g = renderMsi("011578333", 5, 900, 400, 200, 120);
+        boxBlur(g, 1);
+        photometric(g, 0.5f, 0);
+        Gray small = downscaleNN(g, 0.5f);
+        msi::FrameOptions so;
+        so.maxOrientations = 1;
+        so.scanTopFraction = 0.25f;
+        so.minDigits = 9;
+        so.maxDigits = 9;
+        so.stretchRetry = true;
+        msi::FrameResult fr = msi::decodeFrame(small.px.data(), small.w, small.h, so);
+        assertTrue("still small-module fallback reads 9-digit tag",
+                   fr.decode.ok && fr.decode.digits == "011578333");
     }
 
     // 5b. Leading quiet zone (direction arbitration evidence). A 9px module
@@ -747,6 +806,16 @@ static void frameSuite() {
         msi::FrameResult sf = msi::decodeFrame(softFlip.px.data(), softFlip.w, softFlip.h, so);
         assertTrue("still soft low-contrast tag upside down: stretchRetry -> relativeRotation 180",
                    sf.decode.ok && sf.decode.digits == "12345674" && sf.relativeRotation == 180);
+        // A sensor-rotated still must run the fallbacks on the upright frame;
+        // otherwise the angle predictor sees a sideways tag.
+        Gray sensorSoft = rotateCw(soft, 270);
+        msi::FrameOptions sro = so;
+        sro.rotationDegrees = 90;
+        msi::FrameResult sr90 = msi::decodeFrame(sensorSoft.px.data(), sensorSoft.w,
+                                                 sensorSoft.h, sro);
+        assertTrue("still sensor rotation 90: fallback reads upright frame",
+                   sr90.decode.ok && sr90.decode.digits == "12345674" &&
+                   sr90.relativeRotation == 0);
         // The stretched sweep never touches the caller's buffer.
         Gray before = soft;
         msi::decodeFrame(soft.px.data(), soft.w, soft.h, so);

@@ -452,7 +452,9 @@ outvote it. Superseded by §8.3 before ever shipping. Leave it dead.
    separate helped from unhelped photos (177–237 levels in both groups), so
    there is no skip threshold. Live aim-box crops are stretched up front
    and never retry.
-8b. Stills only, after step 8 misses, in this order:
+8b. Stills only, after step 8 misses, in this order (whole stack capped at
+   4 MP; stills force at least two orientation attempts so 0/180
+   arbitration is never skipped):
    - **Orientation fallback.** A 32×32 → 128 → 64 → 1 MLP regressor
      (`msi_angle_model.h`, clean-room, trained offline on synthetic
      rotations) predicts the in-plane tag angle from a 32×32 area average.
@@ -461,21 +463,25 @@ outvote it. Superseded by §8.3 before ever shipping. Leave it dead.
      ±0.35/0.7/1.0/1.4°, then a 2%/98% stretch and a 2× retry. Predicted
      angles outside ±60° are treated as 0° and the rotated canvas is capped
      at 64 MP; the 2× stage needs long edge ≥330 px and rotated long edge
-     ≤1800 px.
+     ≤1800 px. Every accepted candidate is confirmed against its own 180°
+     view; an undecidable conflict is rejected.
    - **Sharpened retry.** Autocontrast (1–99%) plus unsharp mask (radius 2,
-     amount 1.8, threshold 2), then one normal decode plus the angle
-     fallback. Not a recursive `decodeFrame` sweep: that nested the full
-     orientation/ensemble path and turned one blurred frame into a
-     multi-minute stall.
-   - **2×/3× agreement ensemble.** 2× and 3× nearest-neighbour upscales are
-     decoded; if both read they must agree, otherwise the read is accepted
-     at one scale. Limited to frames ≤1000 px because the ensemble dominates
-     all-failure latency.
+     amount 1.8, threshold 2), then `decodeFrame` with two orientations plus
+     the angle fallback. Degenerate histograms return an identity copy.
+     Not a recursive full-stack sweep: that nested the orientation/ensemble
+     path and turned one blurred frame into a multi-minute stall.
+   - **2×/3× agreement ensemble.** Both scales use the +1px shifted
+     nearest-neighbour mapping (plain 2× duplicates every sampled pair and
+     is invisible to the xstep=2 ROI sampler). If both read they must agree;
+     a single-scale read needs score ≥0.65 or ≥3 votes. Limited to frames
+     ≤1000 px; nested angle fallback on derived scales is limited to
+     ≤600 px, and derived decodes disable the decoder's own 2× retry so
+     2×/3× cannot compound.
    These fallbacks add no new wrong reads on the local augmented suite and
-   raise it to 2,319/2,440 positives (reference 2,211); native stays
-   122/122. Host all-failure negatives cost 865 ms mean / 1,122 ms p95, so
-   they fit the 1.5 s still budget with limited headroom. Live frames never
-   run them. Full timing: `docs/MSI_PERFORMANCE.md`.
+   hold it at 2,299/2,440 positives (reference 2,211); native stays
+   122/122. Host all-failure negatives cost 622 ms mean / 750 ms p95 /
+   846 ms max, so they fit the 1.5 s still budget with limited headroom.
+   Live frames never run them. Full timing: `docs/MSI_PERFORMANCE.md`.
 9. Direction arbitration, outside `msi::decode`. `decodeFrame` pairs each
    view with its reverse (0/180, 90/270). When the first view of a pair
    reads and the reverse is within `maxOrientations`, the reverse is decoded

@@ -38,6 +38,17 @@ struct DecodeResult {
     // frame decoder compares it between a read and a conflicting read of
     // the 180-degree view (msi::decodeFrame).
     float leadingQuiet = -1e9f;
+    // Mean digit-template correlation of the winning vote (0..1; 0 when the
+    // result comes from a path that does not compute it). Frame-level
+    // fallbacks use it as a confidence gate on derived scales.
+    float score = 0.0f;
+    // Failure-path evidence, valid when ok == false: at least one scanline
+    // produced a checksum-valid candidate (or a candidate rejected only by
+    // the caller's required scheme), and the smallest observed module. The
+    // frame decoder uses this to keep the expensive scale fallback off
+    // text-only frames.
+    bool sawCandidate = false;
+    float minModule = 0.0f;
 };
 
 const char* policyName(ChecksumPolicy p);
@@ -74,16 +85,24 @@ struct DecodeOptions {
     // or displace an in-range read and cost no decode time.
     int minDigits = 0;
     int maxDigits = 0;
+    // Allow the far-field 2x retry. Frame-level fallbacks that already
+    // materialized a derived scale disable this so 2x/3x frames cannot
+    // compound to 4x/6x and produce phase-locked false reads.
+    bool allowUpscale = true;
 };
 
 DecodeResult decode(const uint8_t* gray, int width, int height,
                     const DecodeOptions& options);
 
-#ifdef MSI_ANGLE_MODEL
+#if MSI_ANGLE_MODEL
 // Experimental fallback: predict tag rotation, rotate the original frame,
 // and retry the normal decoder. Used only after both decodeFrame sweeps.
+// Every accepted candidate is checked against its own 180-degree view, so a
+// reversed phantom is never returned as an upright read. `relativeRotation`
+// is 180 when that reverse view wins, otherwise 0.
 DecodeResult decodeAngleFallback(const uint8_t* gray, int width, int height,
-                                 const DecodeOptions& options);
+                                 const DecodeOptions& options,
+                                 int* relativeRotation = nullptr);
 #endif
 
 } // namespace msi

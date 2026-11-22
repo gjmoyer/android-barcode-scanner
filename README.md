@@ -197,6 +197,7 @@ on-device full chain, Pixel 6a / emulator):
 | Stage | Host (macOS, `tools/msi-harness` bench) | On-device, full chain (arm64) |
 |---|---|---|
 | Native MSI decode | ~0.5 ms mean (1280×720 synthetic, Apple M2 Max), ~0.55 ms (fixture shelf photo) | single-digit ms inside the scan below |
+| MSI still fallback stack, all-failure frame | 622 ms mean / 750 ms p95 / 846 ms max; capped at 4 MP | not used on live frames |
 | One-shot MSI `scanBitmap` | n/a (native absent on JVM) | ~15–60 ms typical |
 | DataBar via zxing-cpp (native TryRotate/TryHarder) | n/a (native absent on JVM) | ~35–55 ms |
 | Full-chain worst case | — | capped by `decodeTimeoutMillis` (default 1500 ms) |
@@ -251,8 +252,9 @@ reads are flagged via `DecodedBarcode.isUpsideDown`. Off-cardinal tilts up to
 ±15° decode through the native skew retry (projection-search deskew inside
 the decoder). On stills, a clean-room orientation regressor plus rotated,
 sharpened and multi-scale retries extends that to the larger tilts measured
-in the local augmented suite; live frames still rely on the ±15° skew retry,
-so steeper tilts need a straighter aim (the ML Kit ROI assist was retired).
+in the local augmented suite; the heavy still fallbacks are capped at 4 MP,
+and live frames still rely on the ±15° skew retry, so steeper tilts need a
+straighter aim (the ML Kit ROI assist was retired).
 Model details and limitations: [`docs/MSI_ANGLE_MODEL.md`](docs/MSI_ANGLE_MODEL.md).
 
 **Retired: SKU text fallback.** An OCR fallback (`MsiOcr`, bundled ML Kit text
