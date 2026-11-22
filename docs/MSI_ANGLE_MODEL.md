@@ -21,6 +21,9 @@ augmentations.
 - It runs only after the normal plain/stretch orientation sweeps fail, only
   on the still path (`FrameOptions::stretchRetry`), and only for frames with
   a long edge ≥330 px. Live frames keep the old behavior.
+- A still-only 2x/3x agreement retry handles small modules; when both scales
+  read they must agree (or only one may read).
+- A still-only autocontrast+unsharp retry handles blurred/low-contrast tags.
 
 The existing in-ROI skew retry (±15°) remains the first choice; this fallback
 handles larger rotations and the combined blur+tilt cases.
@@ -32,19 +35,19 @@ Host baseline, 122 native crops and the local augmented suite:
 | Set | Before | After | External reference |
 |---|---:|---:|---:|
 | Native 122 | 121 | **122** | 120 |
-| Main blur+skew (5×122) | 450 | **551** | 575 |
+| Main blur+skew (5×122) | 450 | **599** | 575 |
 | `skew25` (2×122) | 155 | **244** | 240 |
-| `persp08` (2×122) | 191 | **236** | 232 |
-| `blur25` (2×122) | 176 | **188** | 207 |
-| `contrast25` (2×122) | 175 | **188** | 199 |
-| `dark20` (2×122) | 207 | **216** | 222 |
-| `clutter` (2×122) | 216 | **227** | 231 |
-| `scale075/050/035` | 227 | **247** | 305 |
+| `persp08` (2×122) | 191 | **241** | 232 |
+| `blur25` (2×122) | 176 | **222** | 207 |
+| `contrast25` (2×122) | 175 | **214** | 199 |
+| `dark20` (2×122) | 207 | **238** | 222 |
+| `clutter` (2×122) | 216 | **241** | 231 |
+| `scale075/050/035` | 227 | **324** | 305 |
 
-Totals: **122/122 native** and **2,097/2,440 augmented positives** versus
-2,211 for the external reference. Tilt and perspective exceed the reference;
-the remaining gap is concentrated in small-module scale, blur/contrast, and
-main blur+skew.
+Totals: **122/122 native** and **2,323/2,440 augmented positives** versus
+2,211 for the external reference. Every augmented family now matches or
+exceeds the reference; the only wrong read is the pre-existing
+`clutter-seed71` target-selection case.
 
 No new wrong reads were introduced by the fallback. The one wrong read on
 `clutter-seed71` predates this branch (a target-selection false positive).

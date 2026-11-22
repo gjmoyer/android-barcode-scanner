@@ -1613,6 +1613,9 @@ static void rotateGrayExpanded(const uint8_t* src, int W, int H, float deg,
     }
     ow = (int)ceilf(maxx) - (int)floorf(minx);
     oh = (int)ceilf(maxy) - (int)floorf(miny);
+    if (ow <= 0 || oh <= 0 || (int64_t)ow * (int64_t)oh > (int64_t)64000000) {
+        out.clear(); ow = 0; oh = 0; return;
+    }
     const float tx = -(ow - W) * 0.5f, ty = -(oh - H) * 0.5f;
     m2 = m0 * tx + m1 * ty + m2;
     m5 = m3 * tx + m4 * ty + m5;
@@ -1942,17 +1945,6 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
         DecodeResult r2 = decodeImpl(up.data(), W2, H2, /*allowUpscale=*/false, scanTopFraction);
         if (r2.ok) return r2;
     }
-    if (false && allowUpscale && std::max(width, height) >= 400 && std::max(width, height) <= 900) {
-        const int W3 = width * 3, H3 = height * 3;
-        std::vector<uint8_t> up3((size_t)W3 * (size_t)H3);
-        for (int y = 0; y < H3; ++y) {
-            const uint8_t* srcRow = gray + (size_t)(y / 3) * width;
-            uint8_t* dst = &up3[(size_t)y * W3];
-            for (int x = 0; x < W3; ++x) dst[x] = srcRow[std::min(width - 1, x / 3)];
-        }
-        DecodeResult r3 = decodeImpl(up3.data(), W3, H3, /*allowUpscale=*/false, scanTopFraction);
-        if (r3.ok) return r3;
-    }
     return res;
 }
 
@@ -1977,7 +1969,8 @@ static void stretchGray(std::vector<uint8_t>& img) {
 
 DecodeResult decodeAngleFallback(const uint8_t* gray, int width, int height,
                                  const DecodeOptions& options) {
-    const float pred = predictAngle(gray, width, height);
+    float pred = predictAngle(gray, width, height);
+    if (!std::isfinite(pred) || std::fabs(pred) > 60.0f) pred = 0.0f;
     if (g_debug) printf("[dbg] angle fallback %.2f deg\n", pred);
     static const float kOffsets[] = {0.0f, -0.35f, 0.35f, -0.7f, 0.7f, -1.0f, 1.0f, -1.4f, 1.4f};
     for (float off : kOffsets) {
