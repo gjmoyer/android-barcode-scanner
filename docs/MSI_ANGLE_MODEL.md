@@ -41,10 +41,10 @@ Host baseline, 122 native crops and the local augmented suite:
 | `blur25` (2×122) | 176 | **222** | 207 |
 | `contrast25` (2×122) | 175 | **214** | 199 |
 | `dark20` (2×122) | 207 | **238** | 222 |
-| `clutter` (2×122) | 216 | **241** | 231 |
+| `clutter` (2×122) | 216 | **237** | 231 |
 | `scale075/050/035` | 227 | **324** | 305 |
 
-Totals: **122/122 native** and **2,323/2,440 augmented positives** versus
+Totals: **122/122 native** and **2,319/2,440 augmented positives** versus
 2,211 for the external reference. Every augmented family now matches or
 exceeds the reference; the only wrong read is the pre-existing
 `clutter-seed71` target-selection case.

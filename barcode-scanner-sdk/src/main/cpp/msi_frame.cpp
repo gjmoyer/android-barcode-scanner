@@ -416,13 +416,31 @@ FrameResult decodeFrame(const uint8_t* gray, int width, int height, const FrameO
         }
     }
 #endif
+    // Still-image sharpened retry. Autocontrast + unsharp is the strongest
+    // recovery for blurred/low-contrast tags (10-13 extra reads per local
+    // blur/contrast set, zero wrong reads on failed rows).
+    if (options.stretchRetry && !result.decode.ok && t_sharpenDepth == 0 &&
+        options.minDigits == 9 && options.maxDigits == 9 &&
+        std::max(width, height) >= 330) {
+        std::vector<uint8_t> sharp;
+        sharpenGray(gray, width, height, sharp);
+        t_sharpenDepth = 1;
+        DecodeResult sr = decode(sharp.data(), width, height, decodeOptions);
+        if (!sr.ok) sr = decodeAngleFallback(sharp.data(), width, height, decodeOptions);
+        t_sharpenDepth = 0;
+        if (sr.ok) {
+            result.decode = std::move(sr);
+            result.relativeRotation = 0;
+        }
+    }
+
     // Still-image 2x/3x agreement fallback for small-module tags. A single
     // scale produces unstable reads on the 0.35/0.50 sets; requiring the two
     // scales to agree (or accepting a read seen at only one scale) recovered
     // 71/122 and 121/122 with zero wrong reads in the local suite.
     if (options.stretchRetry && !result.decode.ok && t_scaleEnsembleDepth == 0 &&
         options.minDigits == 9 && options.maxDigits == 9 &&
-        std::max(width, height) <= 2000) {
+        std::max(width, height) <= 1000) {
         FrameResult r2, r3;
         {
             std::vector<uint8_t> up; int uw = 0, uh = 0;
@@ -450,23 +468,6 @@ FrameResult decodeFrame(const uint8_t* gray, int width, int height, const FrameO
             result = std::move(r2);
         } else if (ok3) {
             result = std::move(r3);
-        }
-    }
-    // Still-image sharpened retry. Autocontrast + unsharp is the strongest
-    // recovery for blurred/low-contrast tags (10-13 extra reads per local
-    // blur/contrast set, zero wrong reads on failed rows).
-    if (options.stretchRetry && !result.decode.ok && t_sharpenDepth == 0 &&
-        options.minDigits == 9 && options.maxDigits == 9 &&
-        std::max(width, height) >= 330) {
-        std::vector<uint8_t> sharp;
-        sharpenGray(gray, width, height, sharp);
-        t_sharpenDepth = 1;
-        DecodeResult sr = decode(sharp.data(), width, height, decodeOptions);
-        if (!sr.ok) sr = decodeAngleFallback(sharp.data(), width, height, decodeOptions);
-        t_sharpenDepth = 0;
-        if (sr.ok) {
-            result.decode = std::move(sr);
-            result.relativeRotation = 0;
         }
     }
     return result;
