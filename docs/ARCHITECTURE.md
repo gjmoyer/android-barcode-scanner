@@ -108,13 +108,14 @@ Grayscale frame (row-major bytes via JNI)
     then the original extent; same vote and guard gates
   → single 2x NN upscale retry if still nothing, on a small frame (<800px
     edge) or on small modules with checksum-valid evidence
-  → stills only, after all orientation sweeps, ≤4 MP: learned-angle fallback:
+  → stills only, after all orientation sweeps, ≤3.5 MP: learned-angle fallback:
     predict the tag rotation from a 32x32 view, rotate upright, retry the
     predicted angle ±0.35/0.7/1.0/1.4°, then a 2%/98% stretch and a 2x retry;
     every accepted candidate is confirmed against its 180° view
-  → stills only: autocontrast (1%) + unsharp (radius 2, amount 1.8) retry on
-    the sharpened frame (decodeFrame with two orientations + angle fallback,
-    no recursive sweep; degenerate histograms return an identity copy)
+  → stills only, ≤4 MP: autocontrast (1%) + unsharp (radius 2, amount 1.8)
+    retry on the sharpened frame (decodeFrame with two orientations + angle
+    fallback, no recursive sweep; degenerate histograms return an identity
+    copy and skip the retry)
   → stills only, frame ≤400px: shifted 2x/3x agreement retry; both scales
     must match when both read, and a single scale needs score ≥0.70
   → Kotlin: re-validate reported digits strictly under `msiChecksumPolicy`,
@@ -138,15 +139,17 @@ Grayscale frame (row-major bytes via JNI)
   retry targets blur and low contrast; a shifted 2x/3x agreement retry
   targets small modules. All three run only on stills; the sharpened and
   ensemble retries require `minDigits>=9`, so default open-length stills get
-  only the angle fallback. The frame-level stack is capped at a 4 MP source,
-  the angle fallback's 2× stage needs a long edge ≥330 px and caps its output
-  at 4 MP, and the ensemble runs only at ≤400 px. Stills always force at
-  least two orientation attempts so 0/180 arbitration is never skipped.
+  only the angle fallback. The angle path is capped at 3.5 MP, sharpening at
+  4 MP; the angle fallback's 2× stage needs a long edge ≥330 px and caps its
+  output at 4 MP, and the ensemble runs only at ≤400 px. Stills always force
+  at least two orientation attempts so 0/180 arbitration is never skipped.
+  A stretched-sweep read whose reverse view fails is rejected below score
+  0.55.
   The sharpened retry is deliberately before the ensemble: the ensemble is
   the dominant cost on all-failure frames. Recursion guards are RAII
-  `DepthGuard`s; sharpened decodes disable their own upscale, derived angle
-  fallback is limited to ≤1 MP planes, and the scale legs honor the caller's
-  `allowUpscale`. Details:
+  `DepthGuard`s; sharpened frame decodes disable their own upscale, the
+  sharpened angle pass and scale legs honor the caller's `allowUpscale`, and
+  derived angle fallback is limited to ≤1 MP planes. Details:
   [`MSI_ANGLE_MODEL.md`](MSI_ANGLE_MODEL.md); failure-path timing:
   [`MSI_PERFORMANCE.md`](MSI_PERFORMANCE.md).
 - **The MSI decoder owns a synchronized `MsiVoteGate`**, so scanline agreement

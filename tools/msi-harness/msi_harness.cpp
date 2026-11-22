@@ -680,6 +680,7 @@ static void frameSuite() {
 
     // 5a-4. Direct angle-fallback contract: no reversed phantom may be
     // returned as an upright read.
+#if MSI_ANGLE_MODEL
     {
         Gray g = renderMsi("011578333", 3, 1000, 600, 220, 160);
         photometric(g, 0.40f, 0);
@@ -694,6 +695,7 @@ static void frameSuite() {
         assertTrue("angle fallback never returns reversed phantom as upright",
                    !ar.ok || (ar.digits == "011578333" && rel == 180));
     }
+#endif
     // 5a-5. Small-module still path: a blurred 9-digit tag downscaled to
     // ~2.5px/module must read through the scale fallback without a phantom.
     {
@@ -1442,6 +1444,7 @@ static void perfSuite() {
     one("perf 4MP noise", 2000, 2000, true, 2000);
     one("perf 1000px noise", 1000, 1000, true, 1200);
     one("perf 550px noise", 550, 550, true, 1000);
+    one("perf 400px ensemble noise", 400, 400, true, 1200);
 }
 
 int main(int argc, char** argv) {

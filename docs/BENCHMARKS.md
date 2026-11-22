@@ -12,7 +12,7 @@ checked instead of taken on trust.
   must-not-misread negatives, and **0 false reads across 3,430 clutter
   frames**.
 - **129–133/162 reads at ±6°/±10° tilt**, with 0 wrong reads.
-- **148/148 host-harness assertions green** (167/167 with the local fixture photos); native decode averages
+- **149/149 host-harness assertions green** (168/168 with the local fixture photos); native decode averages
   **0.49 ms** per 1280×720 synthetic frame (Apple M2 Max, Nov 2026; was
   0.74 ms before the digit-template vectorisation).
 
@@ -67,9 +67,9 @@ Latest run (2026-11-22, macOS 27.2, Apple M2 Max):
 
 | Check | Result |
 |---|---|
-| Assertions | 148 pass, 0 fail (167 with the six local fixture photos) |
-| Bench: 1280×720 synthetic MSI | 495 µs mean, 568 µs worst |
-| Bench: real shelf photo | 528 µs mean, 685 µs worst |
+| Assertions | 149 pass, 0 fail (168 with the six local fixture photos) |
+| Bench: 1280×720 synthetic MSI | 486 µs mean, 494 µs worst |
+| Bench: real shelf photo | 524 µs mean, 631 µs worst |
 | 1280×720 text-clutter negatives | 0 false positives (30 frames) |
 | Clutter sweep | 0 false reads (3,430 frames) |
 
@@ -115,11 +115,12 @@ known far-field wrong reads on 8-digit fragments. The production policies
 | Native MSI decode, host | 0.49 ms mean / 0.56 ms worst per 1280×720 synthetic frame |
 | Native MSI decode, real shelf photo | ~0.55 ms mean / 0.71 ms worst (host, harness bench) |
 | MSI still path, 116 real crops (Pixel 10a emulator, warmed) | 4.7 ms mean / 4 ms p50 / 12 ms p95 after the digit-template vectorisation (5.5 ms before, local private run) |
-| MSI still fallback stack, all-failure frame (host) | 415 ms mean / 601 ms p95 / 742 ms max |
-| MSI still fallback, 16 MP all-failure still (host) | 56 ms / 34 MB peak (4 MP heavy-fallback cap) |
+| MSI still fallback stack, all-failure frame (host) | 408 ms mean / 595 ms p95 / 728 ms max |
+| MSI still fallback, 16 MP all-failure still (host) | 59 ms / 34 MB peak (4 MP heavy-fallback cap) |
 | MSI still fallback, 550×550 noise (host) | 299 ms / 6 MB peak |
-| MSI still fallback, 1000×1000 noise (host) | 348 ms / 14 MB peak |
-| MSI still fallback, 2000×2000 (4 MP) noise (host) | 800 ms / 32 MB peak |
+| MSI still fallback, 400×400 noise (ensemble, host) | 640 ms / 10 MB peak |
+| MSI still fallback, 1000×1000 noise (host) | 352 ms / 14 MB peak |
+| MSI still fallback, 2000×2000 (4 MP) noise (host) | 156 ms / 31 MB peak |
 | 9-digit clutter frame, host | 9.3 ms mean / 31.6 ms p95 / 70.2 ms max |
 | On-device full chain, one-shot | ~15–60 ms typical (Pixel 6a / emulator) |
 
@@ -152,14 +153,14 @@ keeps the confirmation intact.
   [`MSI_ANGLE_MODEL.md`](MSI_ANGLE_MODEL.md)).
 - **Fallback timing is host-only.** The rotation, sharpened and 2x/3x
   retries are still-path only and run only after a miss. Host all-failure
-  negatives measure 415 ms mean / 601 ms p95; device latency and thermal
+  negatives measure 408 ms mean / 595 ms p95; device latency and thermal
   behavior are not yet measured. Live frames never run these retries. The
   heavy stack is capped at a 4 MP source, so full-resolution 12–16 MP stills
   use the normal orientation sweep only. The accuracy numbers use the exact
   9-digit shelf configuration; default open-length stills get the angle
   fallback only.
 - **Open-length defaults are not the accuracy gate.** The 0-wrong and
-  2,288-positive figures use the exact 9-digit shelf configuration. Default
+  2,286-positive figures use the exact 9-digit shelf configuration. Default
   open-length MOD10 stills get the direction-safe angle fallback but not the
   sharpened/scale retries; pre-existing open-length negative behavior is
   outside this table.

@@ -31,12 +31,14 @@ those numbers are not training labels or implementation inputs.
   undecidable conflict is rejected. A candidate whose reverse view fails to
   read must clear score ≥0.70 (no vote escape). Stills also force at least
   two orientations, so the ordinary sweep confirms the reverse view even
-  when a caller asks for one orientation.
+  when a caller asks for one orientation. A stretched-sweep read whose
+  reverse view fails is rejected below score 0.55.
 - It runs only after the normal plain/stretch orientation sweeps fail, only
   on the still path (`FrameOptions::stretchRetry`). Live frames keep the old
   behavior. The 2× stage needs a long edge ≥330 px, caps the rotated long
   edge at 1800 px, and caps its output at 4 MP. The frame-level stack is
-  capped at a 4 MP source; larger stills use the normal sweep.
+  capped at a 3.5 MP source for the angle path (4 MP for sharpening); larger
+  stills use the normal sweep.
 - A still-only autocontrast+unsharp retry handles blurred/low-contrast tags.
   It runs **before** the 2x/3x ensemble because the ensemble dominates
   all-failure latency. Degenerate/near-flat histograms return an identity
@@ -46,10 +48,11 @@ those numbers are not training labels or implementation inputs.
   sampled pair and never produces an ROI). If both scales read they must
   agree; a single-scale read needs score ≥0.70. The ensemble is limited to
   frames ≤400 px, and derived angle fallback is limited to derived planes
-  ≤1 MP. Sharpened decodes disable their own upscale; the scale legs honor
-  the caller's `allowUpscale`. The sharpened and scale retries require the
-  configured range to start at 9 (`minDigits>=9`); default open-length stills
-  get only the direction-safe angle fallback.
+  ≤1 MP. Sharpened frame decodes disable their own upscale; the sharpened
+  angle pass and scale legs honor the caller's `allowUpscale`. The sharpened
+  and scale retries require the configured range to start at 9
+  (`minDigits>=9`); default open-length stills get only the direction-safe
+  angle fallback.
 
 The existing in-ROI skew retry (±15°) remains the first choice; this fallback
 handles larger rotations and the combined blur+tilt cases.
@@ -67,35 +70,35 @@ Host baseline, 122 native crops and the local augmented suite:
 | `blur25` (2×122) | 176 | **220** | 207 |
 | `contrast25` (2×122) | 175 | **211** | 199 |
 | `dark20` (2×122) | 207 | **235** | 222 |
-| `clutter` (2×122) | 216 | **232** | 231 |
+| `clutter` (2×122) | 216 | **230** | 231 |
 | `scale075/050/035` | 227 | **319** | 305 |
 
-Totals: **122/122 native** and **2,288/2,440 augmented positives** versus
+Totals: **122/122 native** and **2,286/2,440 augmented positives** versus
 2,211 for the anonymized commercial baseline. Every augmented family still
 exceeds the baseline. The only wrong read is the pre-existing
 `clutter-seed71` target-selection case; the safety pass added zero new wrong
 reads.
 
-The safety pass trades 31 reads for the direction-arbitration and score
-gates above (2,319 → 2,288). The main loss is the 0.35 scale set, where the
+The safety pass trades 33 reads for the direction-arbitration and score
+gates above (2,319 → 2,286). The main loss is the 0.35 scale set, where the
 old single-view over-upscaled reads were also the source of a checksum-valid
 phantom.
 
 ## Guardrails
 
-- `tools/msi-harness`: **167 assertions pass, 0 fail** (148 public, 167 with
+- `tools/msi-harness`: **168 assertions pass, 0 fail** (149 public, 168 with
   the local fixture photos).
-- Fast path: 495 µs mean / 568 µs worst synthetic 1280×720; 528 µs / 685 µs
+- Fast path: 486 µs mean / 494 µs worst synthetic 1280×720; 524 µs / 631 µs
   on the fixture shelf photo (Apple M2 Max).
 - Predicted angles outside ±60° are treated as 0°. The rotated canvas is
-  capped at 64 MP. The frame-level stack is capped at a 4 MP source, with
-  separate derived-plane caps (ensemble source ≤400 px, derived angle ≤1 MP,
-  explicit angle 2× plane ≤4 MP).
+  capped at 64 MP. The angle path is capped at a 3.5 MP source, sharpening at
+  4 MP, with separate derived-plane caps (ensemble source ≤400 px, derived
+  angle ≤1 MP, explicit angle 2× plane ≤4 MP).
 - The harness includes the exact 180° fallback phantom, the 181° open/9-digit
   fallback phantom, five reversed-phantom cases under the still path, a
   direct angle-fallback contract check, a small-module scale read, a
-  sensor-rotation fallback case, and single-shot 16 MP/4 MP/1000 px/550 px
-  all-failure budgets.
+  sensor-rotation fallback case, and single-shot 16 MP/4 MP/1000 px/550 px/
+  400 px ensemble all-failure budgets.
 - The angle model must not be enabled for live frames without re-measuring
   latency; the current gate keeps it on stills.
 - The training script is local-only and not committed. Keep
@@ -103,8 +106,9 @@ phantom.
   regenerating, and do not train on the local augmented evaluation sets.
 - Failure-path cost is measured separately in
   [`MSI_PERFORMANCE.md`](MSI_PERFORMANCE.md): the full fallback stack is
-  ~0.415 s mean per all-failure negative still on the host (p95 0.60 s,
-  max 0.74 s), against a 1.5 s still budget. A 16 MP all-failure still costs
-  ~56 ms / 34 MB because the 4 MP gate skips the heavy retries; 4 MP noise
-  costs ~0.80 s, 1000×1000 ~0.35 s, and 550×550 ~0.30 s. Fast-path reads are
+  ~0.408 s mean per all-failure negative still on the host (p95 0.60 s,
+  max 0.73 s), against a 1.5 s still budget. A 16 MP all-failure still costs
+  ~59 ms / 34 MB because the 4 MP gate skips the heavy retries; 4 MP noise
+  costs ~0.16 s / 31 MB, 1000×1000 ~0.35 s / 14 MB, 550×550 ~0.30 s / 6 MB,
+  and the worst 400 px ensemble case ~0.64 s / 10 MB. Fast-path reads are
   unchanged.

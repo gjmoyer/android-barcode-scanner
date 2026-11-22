@@ -78,7 +78,7 @@ emulator image and local fixture photos.
   `NativeFrame.prepareStill`), never by live frames. Stills force at least
   two orientation attempts even when the caller asks for one, so the normal
   sweep always has 0/180 arbitration:
-  - Angle fallback: source frame capped at 4 MP; predicted angle outside ±60°
+  - Angle fallback: source frame capped at 3.5 MP; predicted angle outside ±60°
     treated as 0°, rotated canvas capped at 64 MP, explicit 2x plane capped
     at 4 MP; tries the predicted angle, ±0.35/0.7/1.0/1.4° offsets, a
     2%/98% stretch and a 2x retry (the 2x stage needs long edge ≥330 px and
@@ -93,15 +93,16 @@ emulator image and local fixture photos.
     with checksum/small-module evidence; both scales use the +1px shifted
     NN mapping. If both read they must agree. A single-scale read needs
     score ≥0.70. Nested angle fallback is limited to derived planes ≤1 MP,
-    and the scale legs honor the caller's `allowUpscale`.
+    and the scale legs honor the caller's `allowUpscale`. Stretched-sweep
+    reads whose reverse view fails are rejected below score 0.55.
   Default open-length stills get only the direction-safe angle fallback;
   sharpened/scale retries are shelf-configuration only.
   Recursion guards are `t_sharpenDepth` and `t_scaleEnsembleDepth`, held by
   RAII `DepthGuard`s so `bad_alloc` cannot poison a worker thread. Do not
   widen these gates without re-running the full augmented suite, the negative
-  sets (currently 415 ms mean / 601 ms p95 / 742 ms max per all-failure
-  frame on the host) and the harness (167 assertions). The safety pass holds
-  2,288/2,440 augmented positives with no new wrong reads.
+  sets (currently 408 ms mean / 595 ms p95 / 728 ms max per all-failure
+  frame on the host) and the harness (168 assertions). The safety pass holds
+  2,286/2,440 augmented positives with no new wrong reads.
 - The orientation regressor is the only learned MSI component: a 32x32 →
   128 → 64 → 1 MLP in `msi_angle_model.h`, trained offline on synthetic
   rotations. No commercial SDK code, weights, model outputs, or training data

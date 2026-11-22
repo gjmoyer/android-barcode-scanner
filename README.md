@@ -197,7 +197,7 @@ on-device full chain, Pixel 6a / emulator):
 | Stage | Host (macOS, `tools/msi-harness` bench) | On-device, full chain (arm64) |
 |---|---|---|
 | Native MSI decode | ~0.5 ms mean (1280×720 synthetic, Apple M2 Max), ~0.55 ms (fixture shelf photo) | single-digit ms inside the scan below |
-| MSI still fallback stack, all-failure frame | 415 ms mean / 601 ms p95 / 742 ms max; 4 MP source cap | not used on live frames |
+| MSI still fallback stack, all-failure frame | 408 ms mean / 595 ms p95 / 728 ms max; 3.5 MP angle / 4 MP sharpen source cap | not used on live frames |
 | One-shot MSI `scanBitmap` | n/a (native absent on JVM) | ~15–60 ms typical |
 | DataBar via zxing-cpp (native TryRotate/TryHarder) | n/a (native absent on JVM) | ~35–55 ms |
 | Full-chain worst case | — | capped by `decodeTimeoutMillis` (default 1500 ms) |

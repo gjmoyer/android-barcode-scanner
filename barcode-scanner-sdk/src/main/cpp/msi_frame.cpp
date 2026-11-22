@@ -32,6 +32,9 @@ struct DepthGuard {
 // photo can cost hundreds of MB and seconds without helping a tag that is
 // only a few percent of the frame; the normal orientation sweep still runs.
 constexpr int64_t kMaxFallbackPixels = 4'000'000;
+// The angle fallback is the most allocation-heavy stage. Keep it to crop-scale
+// frames; the 4 MP cap still allows the sharpened retry on larger stills.
+constexpr int64_t kMaxAngleFallbackPixels = 3'500'000;
 // Derived 2x/3x frames are not allowed to run the angle fallback above this
 // area. Keeps a 550x550 all-failure still from generating 2x/3x rotations
 // while still covering the 0.35/0.50 shelf-scale sets.
@@ -464,6 +467,13 @@ FrameResult decodeFrame(const uint8_t* gray, int width, int height, const FrameO
                         r = std::move(reverse);
                         relative = kOrder[k + 1];
                     }
+                } else if (!reverse.ok && options.stretchRetry && lut != nullptr &&
+                           r.score < 0.55f) {
+                    // Stretched stills can turn a low-contrast reversed
+                    // phantom into the first read. If the opposite view does
+                    // not confirm it, a weak template score is not enough;
+                    // continue to the next orientation/fallback.
+                    continue;
                 }
             }
             result.decode = std::move(r);
@@ -486,6 +496,7 @@ FrameResult decodeFrame(const uint8_t* gray, int width, int height, const FrameO
     // size cap is rotation-invariant, so check it before materializing the
     // full-resolution upright copy.
     const bool fallbackSize = fallbackSizeOk(width, height);
+    const bool angleSize = (int64_t)width * (int64_t)height <= kMaxAngleFallbackPixels;
     std::vector<uint8_t> upright;
     const uint8_t* fallbackGray = gray;
     int fallbackW = width, fallbackH = height;
@@ -496,7 +507,7 @@ FrameResult decodeFrame(const uint8_t* gray, int width, int height, const FrameO
         if (sensor == 90 || sensor == 270) std::swap(fallbackW, fallbackH);
     }
 #if MSI_ANGLE_MODEL
-    if (options.stretchRetry && !result.decode.ok && fallbackSize &&
+    if (options.stretchRetry && !result.decode.ok && angleSize &&
         options.allowAngleFallback) {
         int relative = 0;
         DecodeResult r = decodeAngleFallback(fallbackGray, fallbackW, fallbackH,
@@ -515,26 +526,29 @@ FrameResult decodeFrame(const uint8_t* gray, int width, int height, const FrameO
         fallbackDigitsAllowed(options) && fallbackSize &&
         std::max(fallbackW, fallbackH) >= 330) {
         std::vector<uint8_t> sharp;
-        sharpenGray(fallbackGray, fallbackW, fallbackH, sharp);
-        FrameOptions sharpOptions = options;
-        sharpOptions.rotationDegrees = 0;
-        sharpOptions.stretchRetry = false;
-        sharpOptions.allowUpscale = false;
-        sharpOptions.maxOrientations = std::max(options.maxOrientations, 2);
-        DepthGuard guard(t_sharpenDepth);
-        FrameResult sr = decodeFrame(sharp.data(), fallbackW, fallbackH, sharpOptions);
+        if (sharpenGray(fallbackGray, fallbackW, fallbackH, sharp)) {
+            FrameOptions sharpOptions = options;
+            sharpOptions.rotationDegrees = 0;
+            sharpOptions.stretchRetry = false;
+            sharpOptions.allowUpscale = false;
+            sharpOptions.maxOrientations = std::max(options.maxOrientations, 2);
+            DepthGuard guard(t_sharpenDepth);
+            FrameResult sr = decodeFrame(sharp.data(), fallbackW, fallbackH, sharpOptions);
 #if MSI_ANGLE_MODEL
-        if (!sr.decode.ok) {
-            int relative = 0;
-            DecodeResult ar = decodeAngleFallback(sharp.data(), fallbackW, fallbackH,
-                                                  decodeOptions, &relative);
-            if (ar.ok) {
-                sr.decode = std::move(ar);
-                sr.relativeRotation = relative;
+            if (!sr.decode.ok && options.allowAngleFallback && angleSize) {
+                int relative = 0;
+                DecodeOptions sharpDecodeOptions = decodeOptions;
+                sharpDecodeOptions.allowUpscale = options.allowUpscale;
+                DecodeResult ar = decodeAngleFallback(sharp.data(), fallbackW, fallbackH,
+                                                      sharpDecodeOptions, &relative);
+                if (ar.ok) {
+                    sr.decode = std::move(ar);
+                    sr.relativeRotation = relative;
+                }
             }
-        }
 #endif
-        if (sr.decode.ok) result = std::move(sr);
+            if (sr.decode.ok) result = std::move(sr);
+        }
     }
 
     // Still-image 2x/3x agreement fallback for small-module tags. The 2x/3x
@@ -560,6 +574,7 @@ FrameResult decodeFrame(const uint8_t* gray, int width, int height, const FrameO
             upscaleNNShifted(fallbackGray, fallbackW, fallbackH, 2, up, uw, uh);
             FrameOptions o2 = scaleOptions;
             o2.allowAngleFallback =
+                options.allowAngleFallback &&
                 (int64_t)uw * (int64_t)uh <= kMaxDerivedAnglePixels;
             DepthGuard scaleGuard(t_scaleEnsembleDepth);
             DepthGuard sharpGuard(t_sharpenDepth);
@@ -570,6 +585,7 @@ FrameResult decodeFrame(const uint8_t* gray, int width, int height, const FrameO
             upscaleNNShifted(fallbackGray, fallbackW, fallbackH, 3, up, uw, uh);
             FrameOptions o3 = scaleOptions;
             o3.allowAngleFallback =
+                options.allowAngleFallback &&
                 (int64_t)uw * (int64_t)uh <= kMaxDerivedAnglePixels;
             DepthGuard scaleGuard(t_scaleEnsembleDepth);
             DepthGuard sharpGuard(t_sharpenDepth);

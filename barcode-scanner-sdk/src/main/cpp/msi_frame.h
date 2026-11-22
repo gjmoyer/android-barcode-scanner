@@ -98,9 +98,11 @@ struct FrameOptions {
     // Orientations to try (1..4, clamped) in the SDK priority order relative
     // to upright: 0, 180, 90, 270. Live aim-box frames use 2 (a tag held
     // upside-down reads; sideways tags cannot fit a wide box). Stills use 4
-    // (gallery photos arrive in any orientation). Reversed bars can decode
-    // to checksum-valid garbage, so a read whose reverse view is within
-    // maxOrientations is confirmed against it (see decodeFrame).
+    // (gallery photos arrive in any orientation) and force at least 2 even
+    // when the caller asks for 1, so the 0/180 pair is always confirmed.
+    // Reversed bars can decode to checksum-valid garbage, so a read whose
+    // reverse view is within the effective attempts is confirmed against it
+    // (see decodeFrame).
     int maxOrientations = 1;
     // See DecodeOptions::scanTopFraction: 0 for aim-box crops, 0.25 for
     // full frames.

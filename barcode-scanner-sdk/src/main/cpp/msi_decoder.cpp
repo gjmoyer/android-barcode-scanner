@@ -2036,10 +2036,10 @@ DecodeResult decodeAngleFallback(const uint8_t* gray, int width, int height,
                                  int* relativeRotation) {
     if (relativeRotation != nullptr) *relativeRotation = 0;
     if (gray == nullptr || width < 32 || height < 32) return DecodeResult{};
-    // Nine rotations of a large derived frame (for example a 3x ensemble
-    // scale) are too expensive; the frame-level caller caps its own input at
-    // 4 MP, and this keeps nested scale decodes bounded too.
-    if ((int64_t)width * (int64_t)height > 4000000) return DecodeResult{};
+    // Nine rotations of a large derived frame are too expensive; the
+    // frame-level caller caps the angle path at 3.5 MP, and this keeps direct
+    // or nested calls bounded too.
+    if ((int64_t)width * (int64_t)height > 3500000) return DecodeResult{};
     float pred = predictAngle(gray, width, height);
     if (!std::isfinite(pred) || std::fabs(pred) > 60.0f) pred = 0.0f;
     if (g_debug) printf("[dbg] angle fallback %.2f deg\n", pred);
