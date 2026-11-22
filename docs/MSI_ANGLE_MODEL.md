@@ -109,6 +109,6 @@ phantom.
   ~0.408 s mean per all-failure negative still on the host (p95 0.60 s,
   max 0.73 s), against a 1.5 s still budget. A 16 MP all-failure still costs
   ~59 ms / 34 MB because the 4 MP gate skips the heavy retries; 4 MP noise
-  costs ~0.16 s / 31 MB, 1000×1000 ~0.35 s / 14 MB, 550×550 ~0.30 s / 6 MB,
-  and the worst 400 px ensemble case ~0.64 s / 10 MB. Fast-path reads are
-  unchanged.
+  costs ~0.16 s / 35 MB, 1000×1000 ~0.35 s / 21 MB, 550×550 ~0.30 s / 7 MB,
+  and the worst 400 px ensemble case ~0.64 s / 22 MB. The angle path peaks
+  near its 3.5 MP cap (~0.74 s / 68 MB). Fast-path reads are unchanged.

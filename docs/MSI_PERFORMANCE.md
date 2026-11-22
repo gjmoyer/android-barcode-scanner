@@ -51,25 +51,31 @@ now fits the 1.5 s still budget with ~0.76 s headroom on this host.
 |---|---:|---:|
 | 4000×4000 blank, all fail | 59 ms | 34 MB |
 | 4000×4000 blank, sensor 90°, all fail | 59 ms | 34 MB |
-| 2000×2000 noise (4 MP), all fail | 156 ms | 31 MB |
-| 1000×1000 noise, all fail | 352 ms | 14 MB |
-| 800×600 noise, all fail | 365 ms | 9 MB |
-| 550×550 noise, all fail | 299 ms | 6 MB |
-| 400×400 noise (ensemble), all fail | 640 ms | 10 MB |
+| 1870×1870 noise (3.5 MP angle path), all fail | 740 ms | 68 MB |
+| 1871×1871 noise (just over 3.5 MP, no angle), all fail | 150 ms | 31 MB |
+| 2048×1536 noise (3.1 MP), all fail | 687 ms | 56 MB |
+| 1920×1080 noise (2.1 MP), all fail | 554 ms | 46 MB |
+| 2000×2000 noise (4 MP, sharpen only), all fail | 156 ms | 35 MB |
+| 1000×1000 noise, all fail | 352 ms | 21 MB |
+| 800×600 noise, all fail | 365 ms | 11 MB |
+| 550×550 noise, all fail | 299 ms | 7 MB |
+| 400×400 noise (ensemble), all fail | 640 ms | 22 MB |
 
 The sharpened stage is capped at a **4 MP source**; the angle path is capped
-at **3.5 MP**. Larger stills (including the 16 MP app maximum) use the normal
-orientation sweep plus the in-decoder 1D, skew, grid and 2D retries; they do
-not allocate the full-frame angle/sharpening/2x/3x planes. This removes the
-previous ~565 MB / 2.6 s all-failure spike.
+at **3.5 MP**. Peak memory is highest just *under* the angle cap (a 3.5 MP
+angle frame is ~68 MB); a frame just over the cap skips the angle path and
+drops to ~31 MB. Larger stills (including the 16 MP app maximum) use the
+normal orientation sweep plus the in-decoder 1D, skew, grid and 2D retries;
+they do not allocate the full-frame angle/sharpening/2x/3x planes. This
+removes the previous ~565 MB / 2.6 s all-failure spike.
 
 Derived work is bounded separately: the 2x/3x ensemble runs only for sources
 ≤400 px, derived angle fallback only for derived planes ≤1 MP, and the angle
 fallback's explicit 2× plane is capped at 4 MP. Sharpened frame decodes
 disable their own far-field upscale; the sharpened angle pass and scale legs
 honor the caller's `allowUpscale`. A 550×550 all-failure frame dropped from
-~1.5 s / 98 MB to ~0.30 s / 6 MB; the worst 400 px ensemble case is
-~0.64 s / 10 MB.
+~1.5 s / 98 MB to ~0.30 s / 7 MB; the worst 400 px ensemble case is
+~0.64 s / 22 MB.
 
 ## Where the time goes
 

@@ -117,8 +117,8 @@ struct FrameOptions {
     // crops are already stretched and leave this off.
     bool stretchRetry = false;
     // Allow the decoder's far-field 2x retry inside this frame decode.
-    // Derived-frame fallbacks (sharpened, 2x/3x) set this false so scales
-    // cannot compound; the top-level still path leaves it true.
+    // Sharpened frame decodes set this false; the scale legs honor the
+    // caller's value, and derived angle fallback has its own area cap.
     bool allowUpscale = true;
     // Allow the frame-level angle fallback. Derived 2x/3x frames disable it
     // above a small area cap so nested rotations cannot blow the budget.

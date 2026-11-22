@@ -117,10 +117,13 @@ known far-field wrong reads on 8-digit fragments. The production policies
 | MSI still path, 116 real crops (Pixel 10a emulator, warmed) | 4.7 ms mean / 4 ms p50 / 12 ms p95 after the digit-template vectorisation (5.5 ms before, local private run) |
 | MSI still fallback stack, all-failure frame (host) | 408 ms mean / 595 ms p95 / 728 ms max |
 | MSI still fallback, 16 MP all-failure still (host) | 59 ms / 34 MB peak (4 MP heavy-fallback cap) |
-| MSI still fallback, 550×550 noise (host) | 299 ms / 6 MB peak |
-| MSI still fallback, 400×400 noise (ensemble, host) | 640 ms / 10 MB peak |
-| MSI still fallback, 1000×1000 noise (host) | 352 ms / 14 MB peak |
-| MSI still fallback, 2000×2000 (4 MP) noise (host) | 156 ms / 31 MB peak |
+| MSI still fallback, 550×550 noise (host) | 299 ms / 7 MB peak |
+| MSI still fallback, 400×400 noise (ensemble, host) | 640 ms / 22 MB peak |
+| MSI still fallback, 1000×1000 noise (host) | 352 ms / 21 MB peak |
+| MSI still fallback, 1870×1870 (3.5 MP angle, host) | 740 ms / 68 MB peak |
+| MSI still fallback, 1871×1871 (over angle cap, host) | 150 ms / 31 MB peak |
+| MSI still fallback, 2048×1536 (3.1 MP, host) | 687 ms / 56 MB peak |
+| MSI still fallback, 2000×2000 (4 MP, host) | 156 ms / 35 MB peak |
 | 9-digit clutter frame, host | 9.3 ms mean / 31.6 ms p95 / 70.2 ms max |
 | On-device full chain, one-shot | ~15–60 ms typical (Pixel 6a / emulator) |
 

@@ -72,8 +72,9 @@ No pipeline change.
 
 **Tune speed vs recall**:
 - `ScannerConfig(maxOrientationsTried=N)` caps the MSI orientations tried natively
-  on stills (1..4; live aim-box frames always try 2). A hit at the confident
-  threshold still ends the frame early.
+  on stills (1..4; stills force at least 0/180, so the effective minimum is 2;
+  live aim-box frames always try 2). A hit at the confident threshold still
+  ends the frame early.
 - `zxingTryHarder(false)` opts the native sweep out of thorough mode. The MSI
   engine is always thorough: multi-ROI scanline voting, digit-template
   correlation, and small-module 1D/2D 2x retries.

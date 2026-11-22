@@ -496,7 +496,9 @@ FrameResult decodeFrame(const uint8_t* gray, int width, int height, const FrameO
     // size cap is rotation-invariant, so check it before materializing the
     // full-resolution upright copy.
     const bool fallbackSize = fallbackSizeOk(width, height);
+#if MSI_ANGLE_MODEL
     const bool angleSize = (int64_t)width * (int64_t)height <= kMaxAngleFallbackPixels;
+#endif
     std::vector<uint8_t> upright;
     const uint8_t* fallbackGray = gray;
     int fallbackW = width, fallbackH = height;
