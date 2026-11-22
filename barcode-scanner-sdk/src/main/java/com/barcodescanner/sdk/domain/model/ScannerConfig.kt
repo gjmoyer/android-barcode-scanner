@@ -12,13 +12,13 @@ data class ScannerConfig(
     /**
      * Max MSI orientations attempted per one-shot still: 1..4, tried
      * natively in the order upright, upside-down, 90, 270 on the one
-     * converted frame (no rotated copies), first read wins (confirmed
-     * against the opposite direction when that view is tried) — easy stills
-     * never pay for the rotations they don't try. ML Kit and zxing resolve
-     * rotation themselves and are unaffected. Applies to one-shot scans
-     * (`scanBitmap`/`scanFrame`). Live camera aim-box frames always try MSI
-     * upright and upside-down: sideways tags cannot fit the wide box (ML Kit
-     * and zxing still resolve rotation themselves).
+     * converted frame (no rotated copies), first read wins. One-shot stills
+     * always confirm the 0/180 pair, so the effective minimum is two
+     * sweeps; values above 2 add the sideways views. ML Kit and zxing
+     * resolve rotation themselves and are unaffected. Applies to one-shot
+     * scans (`scanBitmap`/`scanFrame`). Live camera aim-box frames always
+     * try MSI upright and upside-down: sideways tags cannot fit the wide box
+     * (ML Kit and zxing still resolve rotation themselves).
      */
     val maxOrientationsTried: Int,
     /** Per-frame decode timeout; fusion returns best-so-far after this. */

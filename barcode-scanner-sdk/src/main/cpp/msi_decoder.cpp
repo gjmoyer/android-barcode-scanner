@@ -2012,12 +2012,12 @@ static DecodeResult decodeViewSafe(const uint8_t* img, int w, int h,
                r.digits.c_str(), r.votes, r.leadingQuiet, r.score,
                rr.ok ? rr.digits.c_str() : "-", rr.leadingQuiet);
     }
-    if (!rr.ok && !allowUpscale) {
-        // Nested derived scales are the highest phantom risk: a 2x/3x frame
-        // already amplifies print and texture. Require either reverse-view
-        // confirmation or a strong digit correlation there; top-level stills
-        // keep the normal single-view behavior.
-        if (r.score > 0.0f && r.score < 0.65f && r.votes < 3) return DecodeResult{};
+    if (!rr.ok) {
+        // A derived view with no reverse confirmation must clear a real
+        // template-correlation bar. Votes are not enough here: clean
+        // reversed phantoms can agree on 10 rows with score ~0.68, while
+        // true angle-fallback reads measured 0.79-0.89.
+        if (r.score < 0.70f) return DecodeResult{};
     }
     if (rr.ok && rr.digits != r.digits) {
         const int pick = pickDirectionLocal(r, rr);
@@ -2066,6 +2066,7 @@ DecodeResult decodeAngleFallback(const uint8_t* gray, int width, int height,
         if (options.allowUpscale &&
             std::max(width, height) >= 330 && std::max(rw, rh) <= 1800) {
             const int W2 = rw * 2, H2 = rh * 2;
+            if ((int64_t)W2 * (int64_t)H2 > 4000000) continue;
             std::vector<uint8_t> up2((size_t)W2 * (size_t)H2);
             for (int y = 0; y < H2; ++y) {
                 const uint8_t* row = rot.data() + (size_t)(y / 2) * rw;

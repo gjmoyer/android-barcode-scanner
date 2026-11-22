@@ -442,6 +442,43 @@ static Gray rotateCw(const Gray& g, int deg) {
     return toSensor(g, (360 - deg) % 360, 0, stride);
 }
 
+// Arbitrary clockwise rotation with an expanded white canvas, mirroring the
+// still fallback's reverse-affine geometry. Used by the near-180 phantom
+// regression, which is not a cardinal rotation.
+static Gray rotateAny(const Gray& src, float deg) {
+    const float a = deg * 3.14159265358979323846f / 180.0f;
+    const float m0 = cosf(a), m1 = sinf(a), m3 = -sinf(a), m4 = cosf(a);
+    const float cx = 0.5f * src.w, cy = 0.5f * src.h;
+    float m2 = -cx * m0 - cy * m1 + cx;
+    float m5 = -cx * m3 - cy * m4 + cy;
+    float minx = 1e30f, miny = 1e30f, maxx = -1e30f, maxy = -1e30f;
+    for (int k = 0; k < 4; ++k) {
+        const float x = (k == 1 || k == 2) ? (float)src.w : 0.0f;
+        const float y = (k >= 2) ? (float)src.h : 0.0f;
+        const float u = m0 * x + m1 * y + m2;
+        const float v = m3 * x + m4 * y + m5;
+        minx = std::min(minx, u); maxx = std::max(maxx, u);
+        miny = std::min(miny, v); maxy = std::max(maxy, v);
+    }
+    Gray out;
+    out.w = (int)ceilf(maxx) - (int)floorf(minx);
+    out.h = (int)ceilf(maxy) - (int)floorf(miny);
+    const float tx = -(out.w - src.w) * 0.5f, ty = -(out.h - src.h) * 0.5f;
+    m2 = m0 * tx + m1 * ty + m2;
+    m5 = m3 * tx + m4 * ty + m5;
+    out.px.assign((size_t)out.w * out.h, 255);
+    for (int y = 0; y < out.h; ++y) {
+        for (int x = 0; x < out.w; ++x) {
+            const float sx = m0 * x + m1 * y + m2;
+            const float sy = m3 * x + m4 * y + m5;
+            if (sx < 0 || sy < 0 || sx >= src.w || sy >= src.h) continue;
+            out.px[(size_t)y * out.w + x] =
+                src.px[(size_t)(int)sy * src.w + (int)sx];
+        }
+    }
+    return out;
+}
+
 static void frameSuite() {
     printf("--- native frame path (msi_frame) ---\n");
     // 1. Stretch parity with the Kotlin transform (mirrored by
@@ -588,7 +625,8 @@ static void frameSuite() {
                 printf("  fallback phantom %s -> %s rel=%d\n", rc.full,
                        fr.decode.digits.c_str(), fr.relativeRotation);
             assertTrue(name.c_str(),
-                       !fr.decode.ok || fr.decode.digits == rc.full);
+                       !fr.decode.ok ||
+                           (fr.decode.digits == rc.full && fr.relativeRotation == 180));
         }
     }
 
@@ -612,7 +650,51 @@ static void frameSuite() {
                    fr.relativeRotation == 180);
     }
 
-    // 5a-3. Small-module still path: a blurred 9-digit tag downscaled to
+    // 5a-3. Near-180 fallback phantom: a blurred, low-contrast tag rotated
+    // 181 degrees used to return a checksum-valid wrong value as upright when
+    // the reverse view failed. The score gate must reject it (a correct read
+    // at relativeRotation 180 is also acceptable).
+    {
+        Gray g = renderMsi("900800087", 3, 800, 400, 150, 120);
+        photometric(g, 0.45f, 0);
+        boxBlur(g, 3);
+        Gray tilted = rotateAny(g, 181.0f);
+        msi::FrameOptions po;
+        po.maxOrientations = 4;
+        po.scanTopFraction = 0.25f;
+        po.stretchRetry = true;
+        po.required = msi::ChecksumPolicy::MOD10;
+        for (int bounds : {0, 9}) {
+            po.minDigits = bounds;
+            po.maxDigits = bounds;
+            msi::FrameResult pr = msi::decodeFrame(tilted.px.data(), tilted.w,
+                                                   tilted.h, po);
+            assertTrue(bounds == 0
+                           ? "still 181-degree fallback: no wrong open-length read"
+                           : "still 181-degree fallback: no wrong 9-digit read",
+                       !pr.decode.ok ||
+                           (pr.decode.digits == "900800087" &&
+                            pr.relativeRotation == 180));
+        }
+    }
+
+    // 5a-4. Direct angle-fallback contract: no reversed phantom may be
+    // returned as an upright read.
+    {
+        Gray g = renderMsi("011578333", 3, 1000, 600, 220, 160);
+        photometric(g, 0.40f, 0);
+        boxBlur(g, 2);
+        Gray flip = rotateCw(g, 180);
+        msi::DecodeOptions d;
+        d.minDigits = 9;
+        d.maxDigits = 9;
+        int rel = -1;
+        msi::DecodeResult ar = msi::decodeAngleFallback(
+            flip.px.data(), flip.w, flip.h, d, &rel);
+        assertTrue("angle fallback never returns reversed phantom as upright",
+                   !ar.ok || (ar.digits == "011578333" && rel == 180));
+    }
+    // 5a-5. Small-module still path: a blurred 9-digit tag downscaled to
     // ~2.5px/module must read through the scale fallback without a phantom.
     {
         Gray g = renderMsi("011578333", 5, 900, 400, 200, 120);
@@ -1326,6 +1408,42 @@ static void benchSuite(const std::string& dir) {
     if (hasPhoto) bench("photo dixie", photo);
 }
 
+// ------------------------------------------------------------ perf guards
+// Single-shot all-failure guards for the bounded still fallback. Budgets are
+// deliberately generous host limits: they target the old 1.5 s/565 MB class
+// of regression, not a device benchmark.
+static void perfSuite() {
+    printf("--- still fallback budgets (single shot, host) ---\n");
+    auto one = [](const char* name, int w, int h, bool noise, long budgetMs) {
+        Gray g;
+        g.w = w; g.h = h;
+        g.px.assign((size_t)w * h, 255);
+        if (noise) {
+            uint32_t s = 0x12345678u;
+            for (uint8_t& v : g.px) {
+                s = s * 1664525u + 1013904223u;
+                v = (uint8_t)(s >> 24);
+            }
+        }
+        msi::FrameOptions o;
+        o.maxOrientations = 4;
+        o.scanTopFraction = 0.25f;
+        o.minDigits = 9;
+        o.maxDigits = 9;
+        o.stretchRetry = true;
+        auto t0 = std::chrono::steady_clock::now();
+        msi::FrameResult r = msi::decodeFrame(g.px.data(), g.w, g.h, o);
+        auto t1 = std::chrono::steady_clock::now();
+        const long ms = (long)std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+        printf("PERF %-24s %dx%d %ldms (budget %ldms)\n", name, w, h, ms, budgetMs);
+        assertTrue(name, !r.decode.ok && ms <= budgetMs);
+    };
+    one("perf 16MP blank", 4000, 4000, false, 1000);
+    one("perf 4MP noise", 2000, 2000, true, 2000);
+    one("perf 1000px noise", 1000, 1000, true, 1200);
+    one("perf 550px noise", 550, 550, true, 1000);
+}
+
 int main(int argc, char** argv) {
     if (argc > 1 && std::string(argv[1]) == "diag") {
         // Forensics: ./msi_harness diag photo.png [--contrast] [--up2]
@@ -1374,6 +1492,7 @@ int main(int argc, char** argv) {
     shelfSuite(shelfDir);
     frameSuite();
     benchSuite(shelfDir);
+    perfSuite();
     printf("ASSERTS pass=%d fail=%d (info-only misses=%d)\n", g_assertPass, g_assertFails,
            g_infoFails);
     return g_assertFails == 0 ? 0 : 1;

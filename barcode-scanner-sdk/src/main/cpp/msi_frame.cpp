@@ -32,19 +32,25 @@ struct DepthGuard {
 // photo can cost hundreds of MB and seconds without helping a tag that is
 // only a few percent of the frame; the normal orientation sweep still runs.
 constexpr int64_t kMaxFallbackPixels = 4'000'000;
+// Derived 2x/3x frames are not allowed to run the angle fallback above this
+// area. Keeps a 550x550 all-failure still from generating 2x/3x rotations
+// while still covering the 0.35/0.50 shelf-scale sets.
+constexpr int64_t kMaxDerivedAnglePixels = 1'000'000;
 
 bool fallbackSizeOk(int width, int height) {
     if (width <= 0 || height <= 0) return false;
     return (int64_t)width * (int64_t)height <= kMaxFallbackPixels;
 }
 
-// The host may configure `msiSymbolLengths` as an exact count, a range, or
-// open (0/0). The shelf fallbacks are useful whenever 9-digit codewords are
-// allowed, not only for an exact 9/9 setting.
+// The sharpened and scale retries are shelf-tag fallbacks. Requiring the
+// configured range to start at 9 keeps them off the default open-length
+// configuration, where a 7/8-digit checksum-valid phantom is cheaper to
+// produce on an upscaled/cut tag. Open-length stills still get the
+// direction-safe angle fallback.
 bool fallbackDigitsAllowed(const FrameOptions& options) {
     const int minD = std::max(options.minDigits, 0);
     const int maxD = std::max(options.maxDigits, 0);
-    return minD <= 9 && (maxD == 0 || maxD >= 9);
+    return minD >= 9 && (maxD == 0 || maxD >= minD);
 }
 
 // Autocontrast at 1% + unsharp mask (radius 2, amount 1.8, threshold 2),
@@ -52,10 +58,10 @@ bool fallbackDigitsAllowed(const FrameOptions& options) {
 // horizontal blur is stored as one float plane; the vertical/unsharp pass
 // runs row by row from it, so peak memory is one float plane plus output
 // instead of two float planes.
-void sharpenGray(const uint8_t* src, int w, int h, std::vector<uint8_t>& out) {
+bool sharpenGray(const uint8_t* src, int w, int h, std::vector<uint8_t>& out) {
     if (src == nullptr || w <= 0 || h <= 0) {
         out.clear();
-        return;
+        return false;
     }
     const size_t n = (size_t)w * (size_t)h;
     uint32_t hist[256] = {0};
@@ -69,10 +75,11 @@ void sharpenGray(const uint8_t* src, int w, int h, std::vector<uint8_t>& out) {
     }
     // Degenerate/near-flat histogram: autocontrast is an identity copy. Without
     // this, a >99%-white still maps white to 1 (lo=hi=254) and blackens a tag
-    // that occupies a small part of the frame.
+    // that occupies a small part of the frame. Return false so the caller
+    // skips re-decoding an identical frame.
     if (hi - lo < kMinStretchRange) {
         out.assign(src, src + n);
-        return;
+        return false;
     }
     uint8_t lut[256];
     const float sc = 255.0f / (float)(hi - lo);
@@ -105,6 +112,7 @@ void sharpenGray(const uint8_t* src, int w, int h, std::vector<uint8_t>& out) {
                     (std::fabs(d) > 2.0f ? 1.8f * d : 0.0f)));
         }
     }
+    return true;
 }
 
 // Nearest-neighbour upscale with a +1 source-pixel shift on both axes. A
@@ -486,7 +494,8 @@ FrameResult decodeFrame(const uint8_t* gray, int width, int height, const FrameO
     }
     const bool fallbackSize = fallbackSizeOk(fallbackW, fallbackH);
 #if MSI_ANGLE_MODEL
-    if (options.stretchRetry && !result.decode.ok && fallbackSize) {
+    if (options.stretchRetry && !result.decode.ok && fallbackSize &&
+        options.allowAngleFallback) {
         int relative = 0;
         DecodeResult r = decodeAngleFallback(fallbackGray, fallbackW, fallbackH,
                                              decodeOptions, &relative);
@@ -508,6 +517,7 @@ FrameResult decodeFrame(const uint8_t* gray, int width, int height, const FrameO
         FrameOptions sharpOptions = options;
         sharpOptions.rotationDegrees = 0;
         sharpOptions.stretchRetry = false;
+        sharpOptions.allowUpscale = false;
         sharpOptions.maxOrientations = std::max(options.maxOrientations, 2);
         DepthGuard guard(t_sharpenDepth);
         FrameResult sr = decodeFrame(sharp.data(), fallbackW, fallbackH, sharpOptions);
@@ -536,30 +546,36 @@ FrameResult decodeFrame(const uint8_t* gray, int width, int height, const FrameO
                                (minModuleSeen > 0.5f && minModuleSeen < 3.5f);
     if (options.stretchRetry && !result.decode.ok && t_scaleEnsembleDepth == 0 &&
         fallbackDigitsAllowed(options) && fallbackSize && scaleEvidence &&
-        std::max(fallbackW, fallbackH) <= 1000) {
+        std::max(fallbackW, fallbackH) <= 400) {
         FrameOptions scaleOptions = options;
         scaleOptions.rotationDegrees = 0;
         scaleOptions.stretchRetry = true;
-        scaleOptions.allowUpscale = std::max(fallbackW, fallbackH) <= 600;
+        scaleOptions.allowUpscale = options.allowUpscale;
         scaleOptions.maxOrientations = std::max(options.maxOrientations, 2);
         FrameResult r2, r3;
         {
             std::vector<uint8_t> up; int uw = 0, uh = 0;
             upscaleNNShifted(fallbackGray, fallbackW, fallbackH, 2, up, uw, uh);
+            FrameOptions o2 = scaleOptions;
+            o2.allowAngleFallback =
+                (int64_t)uw * (int64_t)uh <= kMaxDerivedAnglePixels;
             DepthGuard scaleGuard(t_scaleEnsembleDepth);
             DepthGuard sharpGuard(t_sharpenDepth);
-            r2 = decodeFrame(up.data(), uw, uh, scaleOptions);
+            r2 = decodeFrame(up.data(), uw, uh, o2);
         }
         {
             std::vector<uint8_t> up; int uw = 0, uh = 0;
             upscaleNNShifted(fallbackGray, fallbackW, fallbackH, 3, up, uw, uh);
+            FrameOptions o3 = scaleOptions;
+            o3.allowAngleFallback =
+                (int64_t)uw * (int64_t)uh <= kMaxDerivedAnglePixels;
             DepthGuard scaleGuard(t_scaleEnsembleDepth);
             DepthGuard sharpGuard(t_sharpenDepth);
-            r3 = decodeFrame(up.data(), uw, uh, scaleOptions);
+            r3 = decodeFrame(up.data(), uw, uh, o3);
         }
         const bool ok2 = r2.decode.ok, ok3 = r3.decode.ok;
         const auto strong = [](const FrameResult& r) {
-            return r.decode.score >= 0.65f || r.decode.votes >= 3;
+            return r.decode.score >= 0.70f;
         };
         if (ok2 && ok3) {
             // Two scales must agree.

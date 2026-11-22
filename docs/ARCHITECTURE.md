@@ -115,9 +115,8 @@ Grayscale frame (row-major bytes via JNI)
   → stills only: autocontrast (1%) + unsharp (radius 2, amount 1.8) retry on
     the sharpened frame (decodeFrame with two orientations + angle fallback,
     no recursive sweep; degenerate histograms return an identity copy)
-  → stills only, frame ≤1000px: shifted 2x/3x agreement retry; both scales
-    must match when both read, and a single scale needs score ≥0.65 or
-    ≥3 votes
+  → stills only, frame ≤400px: shifted 2x/3x agreement retry; both scales
+    must match when both read, and a single scale needs score ≥0.70
   → Kotlin: re-validate reported digits strictly under `msiChecksumPolicy`,
     strip check digits, reject degenerate (single-digit) payloads
 ```
@@ -138,15 +137,16 @@ Grayscale frame (row-major bytes via JNI)
   small angle offsets, contrast stretch and 2x; an autocontrast + unsharp
   retry targets blur and low contrast; a shifted 2x/3x agreement retry
   targets small modules. All three run only on stills; the sharpened and
-  ensemble retries are additionally gated to length ranges that include 9.
-  The whole stack is capped at 4 MP, the angle fallback's 2× stage needs a
-  long edge ≥330 px, and the ensemble only runs at ≤1000 px. Stills always
-  force at least two orientation attempts so 0/180 arbitration is never
-  skipped.
+  ensemble retries require `minDigits>=9`, so default open-length stills get
+  only the angle fallback. The frame-level stack is capped at a 4 MP source,
+  the angle fallback's 2× stage needs a long edge ≥330 px and caps its output
+  at 4 MP, and the ensemble runs only at ≤400 px. Stills always force at
+  least two orientation attempts so 0/180 arbitration is never skipped.
   The sharpened retry is deliberately before the ensemble: the ensemble is
   the dominant cost on all-failure frames. Recursion guards are RAII
-  `DepthGuard`s, and derived decodes set `allowUpscale=false` so 2x/3x
-  cannot compound. Details:
+  `DepthGuard`s; sharpened decodes disable their own upscale, derived angle
+  fallback is limited to ≤1 MP planes, and the scale legs honor the caller's
+  `allowUpscale`. Details:
   [`MSI_ANGLE_MODEL.md`](MSI_ANGLE_MODEL.md); failure-path timing:
   [`MSI_PERFORMANCE.md`](MSI_PERFORMANCE.md).
 - **The MSI decoder owns a synchronized `MsiVoteGate`**, so scanline agreement

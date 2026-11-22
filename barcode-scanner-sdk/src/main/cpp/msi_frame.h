@@ -118,6 +118,9 @@ struct FrameOptions {
     // Derived-frame fallbacks (sharpened, 2x/3x) set this false so scales
     // cannot compound; the top-level still path leaves it true.
     bool allowUpscale = true;
+    // Allow the frame-level angle fallback. Derived 2x/3x frames disable it
+    // above a small area cap so nested rotations cannot blow the budget.
+    bool allowAngleFallback = true;
 };
 
 // Orientation-aware decode of a contiguous gray buffer (stride = width).

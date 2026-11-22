@@ -98,9 +98,9 @@ class MsiNativeDecoder(
      * Standalone bitmap decode (hosts using the engine directly; the facade
      * never calls this). The bitmap is converted to gray natively
      * ([NativeFrame.prepareStill]: no rotation — the pixel layout
-     * as given, as this entry point always decoded) and read with one
-     * orientation and the full-frame band window. A read is reported upside
-     * down when [ScanFrame.isUpsideDownCandidate].
+     * as given, as this entry point always decoded) and read with 0/180
+     * direction confirmation (stills force at least two sweeps). A read is
+     * reported upside down when [ScanFrame.isUpsideDownCandidate].
      */
     override suspend fun decode(frame: ScanFrame): DecodeOutcome = withContext(dispatcher) {
         try {
