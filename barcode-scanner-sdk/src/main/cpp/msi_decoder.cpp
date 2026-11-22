@@ -26,6 +26,10 @@
 #include <string>
 #include <vector>
 
+#ifdef MSI_ANGLE_MODEL
+#include "msi_angle_model.h"
+#endif
+
 namespace msi {
 namespace {
 
@@ -1588,6 +1592,87 @@ void upsampleProfile2x(std::vector<float>& pr, int head, int n) {
 
 } // namespace
 
+#ifdef MSI_ANGLE_MODEL
+// Rotate an 8-bit image about its centre into an expanded white canvas.
+static void rotateGrayExpanded(const uint8_t* src, int W, int H, float deg,
+                        std::vector<uint8_t>& out, int& ow, int& oh) {
+    // Match PIL Image.rotate(deg, expand=True) reverse-affine geometry.
+    const float a = -deg * kDegToRad;
+    const float m0 = cosf(a), m1 = sinf(a), m3 = -sinf(a), m4 = cosf(a);
+    const float cx = 0.5f * W, cy = 0.5f * H;
+    float m2 = -cx * m0 - cy * m1 + cx;
+    float m5 = -cx * m3 - cy * m4 + cy;
+    float minx = 1e30f, miny = 1e30f, maxx = -1e30f, maxy = -1e30f;
+    for (int k = 0; k < 4; ++k) {
+        const float x = (k == 1 || k == 2) ? (float)W : 0.0f;
+        const float y = (k >= 2) ? (float)H : 0.0f;
+        const float u = m0 * x + m1 * y + m2;
+        const float v = m3 * x + m4 * y + m5;
+        minx = std::min(minx, u); maxx = std::max(maxx, u);
+        miny = std::min(miny, v); maxy = std::max(maxy, v);
+    }
+    ow = (int)ceilf(maxx) - (int)floorf(minx);
+    oh = (int)ceilf(maxy) - (int)floorf(miny);
+    const float tx = -(ow - W) * 0.5f, ty = -(oh - H) * 0.5f;
+    m2 = m0 * tx + m1 * ty + m2;
+    m5 = m3 * tx + m4 * ty + m5;
+    out.assign((size_t)ow * (size_t)oh, 255);
+    for (int y = 0; y < oh; ++y) {
+        for (int x = 0; x < ow; ++x) {
+            const float sx = m0 * x + m1 * y + m2;
+            const float sy = m3 * x + m4 * y + m5;
+            if (sx < 0 || sy < 0 || sx >= W || sy >= H) continue;
+            const int xi = (int)sx, yi = (int)sy;
+            out[(size_t)y * ow + x] = src[(size_t)yi * W + xi];
+        }
+    }
+}
+
+
+// Predict the in-plane rotation of the tag from a 32x32 area-averaged view.
+static float predictAngle(const uint8_t* src, int W, int H) {
+    float x[kAngleInput];
+    int k = 0;
+    for (int oy = 0; oy < 32; ++oy) {
+        const int y0 = (oy * H) / 32;
+        int y1 = ((oy + 1) * H) / 32;
+        if (y1 <= y0) y1 = std::min(H, y0 + 1);
+        for (int ox = 0; ox < 32; ++ox) {
+            const int x0 = (ox * W) / 32;
+            int x1 = ((ox + 1) * W) / 32;
+            if (x1 <= x0) x1 = std::min(W, x0 + 1);
+            double sum = 0;
+            for (int y = y0; y < y1; ++y)
+                for (int xx = x0; xx < x1; ++xx)
+                    sum += src[(size_t)y * W + xx];
+            x[k++] = (float)(sum / ((double)(y1 - y0) * (x1 - x0))) / 255.0f;
+        }
+    }
+    float mean = 0;
+    for (float v : x) mean += v;
+    mean /= kAngleInput;
+    float var = 0;
+    for (float v : x) var += (v - mean) * (v - mean);
+    const float sd = sqrtf(var / kAngleInput) + 1e-9f;
+    for (float& v : x) v = (v - mean) / sd;
+    float h0[kAngleH0];
+    for (int j = 0; j < kAngleH0; ++j) {
+        float v = ab0[j];
+        for (int i = 0; i < kAngleInput; ++i) v += x[i] * aw0[i * kAngleH0 + j];
+        h0[j] = v > 0 ? v : 0;
+    }
+    float h1[kAngleH1];
+    for (int j = 0; j < kAngleH1; ++j) {
+        float v = ab1[j];
+        for (int i = 0; i < kAngleH0; ++i) v += h0[i] * aw1[i * kAngleH1 + j];
+        h1[j] = v > 0 ? v : 0;
+    }
+    float out = ab2[0];
+    for (int i = 0; i < kAngleH1; ++i) out += h1[i] * aw2[i];
+    return out;
+}
+#endif
+
 // Forward: decode() wraps decodeImpl() with the upscale retry enabled.
 DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUpscale,
                         float scanTopFraction);
@@ -1854,9 +1939,74 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
             memcpy(dst0, expanded.data(), (size_t)W2);
             memcpy(dst1, expanded.data(), (size_t)W2);
         }
-        return decodeImpl(up.data(), W2, H2, /*allowUpscale=*/false, scanTopFraction);
+        DecodeResult r2 = decodeImpl(up.data(), W2, H2, /*allowUpscale=*/false, scanTopFraction);
+        if (r2.ok) return r2;
+    }
+    if (false && allowUpscale && std::max(width, height) >= 400 && std::max(width, height) <= 900) {
+        const int W3 = width * 3, H3 = height * 3;
+        std::vector<uint8_t> up3((size_t)W3 * (size_t)H3);
+        for (int y = 0; y < H3; ++y) {
+            const uint8_t* srcRow = gray + (size_t)(y / 3) * width;
+            uint8_t* dst = &up3[(size_t)y * W3];
+            for (int x = 0; x < W3; ++x) dst[x] = srcRow[std::min(width - 1, x / 3)];
+        }
+        DecodeResult r3 = decodeImpl(up3.data(), W3, H3, /*allowUpscale=*/false, scanTopFraction);
+        if (r3.ok) return r3;
     }
     return res;
 }
+
+#ifdef MSI_ANGLE_MODEL
+static void stretchGray(std::vector<uint8_t>& img) {
+    uint32_t hist[256] = {0};
+    for (uint8_t v : img) ++hist[v];
+    const float n = (float)img.size();
+    float acc = 0; int lo = 0, hi = 255;
+    for (int i = 0; i < 256; ++i) {
+        acc += (float)hist[i] / n;
+        if (acc < 0.02f) lo = i;
+        if (acc <= 0.98f) hi = i;
+    }
+    if (hi - lo < 12) return;
+    uint8_t lut[256];
+    const float sc = 255.0f / (float)(hi - lo);
+    for (int i = 0; i < 256; ++i)
+        lut[i] = (uint8_t)std::min(255, std::max(0, (int)((i - lo) * sc + 0.5f)));
+    for (uint8_t& v : img) v = lut[v];
+}
+
+DecodeResult decodeAngleFallback(const uint8_t* gray, int width, int height,
+                                 const DecodeOptions& options) {
+    const float pred = predictAngle(gray, width, height);
+    if (g_debug) printf("[dbg] angle fallback %.2f deg\n", pred);
+    static const float kOffsets[] = {0.0f, -0.35f, 0.35f, -0.7f, 0.7f, -1.0f, 1.0f, -1.4f, 1.4f};
+    for (float off : kOffsets) {
+        std::vector<uint8_t> rot;
+        int rw = 0, rh = 0;
+        rotateGrayExpanded(gray, width, height, -(pred + off), rot, rw, rh);
+        const DecodeResult r = decode(rot.data(), rw, rh, options);
+        if (r.ok) return r;
+        std::vector<uint8_t> stretched = rot;
+        stretchGray(stretched);
+        const DecodeResult rs = decode(stretched.data(), rw, rh, options);
+        if (rs.ok) return rs;
+        if (std::max(width, height) >= 330 && std::max(rw, rh) <= 1800) {
+            const int W2 = rw * 2, H2 = rh * 2;
+            std::vector<uint8_t> up2((size_t)W2 * (size_t)H2);
+            for (int y = 0; y < H2; ++y) {
+                const uint8_t* row = rot.data() + (size_t)(y / 2) * rw;
+                uint8_t* dst = &up2[(size_t)y * W2];
+                for (int x = 0; x < W2; ++x) dst[x] = row[std::min(rw - 1, (x + 1) / 2)];
+            }
+            const DecodeResult ru = decode(up2.data(), W2, H2, options);
+            if (ru.ok) return ru;
+            stretchGray(up2);
+            const DecodeResult rus = decode(up2.data(), W2, H2, options);
+            if (rus.ok) return rus;
+        }
+    }
+    return DecodeResult{};
+}
+#endif
 
 } // namespace msi

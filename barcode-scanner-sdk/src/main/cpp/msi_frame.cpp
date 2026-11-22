@@ -348,6 +348,15 @@ FrameResult decodeFrame(const uint8_t* gray, int width, int height, const FrameO
     // existing reads keep their result and orientation.
     uint8_t lut[256];
     if (options.stretchRetry && buildStretchLut(gray, width, width, height, lut)) sweep(lut);
+#ifdef MSI_ANGLE_MODEL
+    if (options.stretchRetry && !result.decode.ok) {
+        DecodeResult r = decodeAngleFallback(gray, width, height, decodeOptions);
+        if (r.ok) {
+            result.decode = std::move(r);
+            result.relativeRotation = 0;
+        }
+    }
+#endif
     return result;
 }
 

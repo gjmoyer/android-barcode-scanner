@@ -10,6 +10,11 @@
 #include <cstdint>
 #include <string>
 
+// Clean-room synthetic orientation model. Runtime is C++ (msi_angle_model.h).
+#ifndef MSI_ANGLE_MODEL
+#define MSI_ANGLE_MODEL 1
+#endif
+
 namespace msi {
 
 // Checksum policies the decoder will try (in order) for each candidate.
@@ -73,5 +78,12 @@ struct DecodeOptions {
 
 DecodeResult decode(const uint8_t* gray, int width, int height,
                     const DecodeOptions& options);
+
+#ifdef MSI_ANGLE_MODEL
+// Experimental fallback: predict tag rotation, rotate the original frame,
+// and retry the normal decoder. Used only after both decodeFrame sweeps.
+DecodeResult decodeAngleFallback(const uint8_t* gray, int width, int height,
+                                 const DecodeOptions& options);
+#endif
 
 } // namespace msi
