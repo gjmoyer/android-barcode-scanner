@@ -7,10 +7,12 @@ struct CameraView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> ScannerPreviewView {
         let view = ScannerPreviewView()
-        controller.attach(previewLayer: view.previewLayer)
+        // Install the callback before attaching the session so an immediate
+        // first result cannot arrive before the overlay can draw it.
         controller.onResult = { [weak view] result in
             view?.show(result)
         }
+        controller.attach(previewLayer: view.previewLayer)
         return view
     }
 

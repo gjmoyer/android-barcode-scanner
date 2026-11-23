@@ -1,12 +1,14 @@
 import AVFoundation
 import Combine
 import Foundation
+import UIKit
 
 final class MsiCameraController: NSObject, ObservableObject {
 
-    @Published private(set) var status = "Starting camera…"
+    @Published private(set) var status = "Ready — tap Scan to scan an MSI barcode"
     @Published private(set) var lastPayload: String?
     @Published private(set) var lastNativeDetail: String?
+    @Published private(set) var isScanning = false
     @Published var policy: MsiChecksumPolicy = .mod10 {
         didSet {
             policyLock.lock()
@@ -25,14 +27,22 @@ final class MsiCameraController: NSObject, ObservableObject {
     private let policyLock = NSLock()
     private var lockedPolicy: MsiChecksumPolicy = .mod10
     private var previewLayer: AVCaptureVideoPreviewLayer?
-    private var videoOutput: AVCaptureVideoDataOutput?
     private var configured = false
-    private var lastAccepted = ""
-    private var lastAcceptedAt = Date.distantPast
 
-    /// The app is portrait-only and uses the back camera, whose native sensor
-    /// orientation needs a 90-degree clockwise turn to be upright.
+    /// Scan-session state shared with the video queue. The camera is only
+    /// running while `scanActive` is true, and a scan accepts exactly one hit.
+    private let stateLock = NSLock()
+    private var scanToken = 0
+    private var scanActive = false
+    private var acceptedForScan = false
+    private var pendingFinish: DispatchWorkItem?
+
+    /// Portrait-only app using the back camera: the sensor buffer needs a
+    /// 90-degree clockwise turn to be upright.
     private let bufferRotationDegrees: Int32 = 90
+
+    /// How long the result stays visible before the camera is shut off.
+    private let highlightMilliseconds = 1_000
 
     func attach(previewLayer: AVCaptureVideoPreviewLayer) {
         self.previewLayer = previewLayer
@@ -41,48 +51,79 @@ final class MsiCameraController: NSObject, ObservableObject {
         applyPreviewRotation()
     }
 
-    func start() {
+    /// Starts a one-shot scan. The camera session and decode work only while a
+    /// scan is armed; calling this again after a result works normally.
+    func startScan() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.startScan() }
+            return
+        }
+        guard !isScanning else { return }
+
+        pendingFinish?.cancel()
+        pendingFinish = nil
+        let token = beginScan()
+        isScanning = true
+        status = "Starting camera…"
+        lastPayload = nil
+        lastNativeDetail = nil
+
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
-            configureAndStart()
+            configureAndStart(token: token)
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
-                guard let self else { return }
-                if granted {
-                    self.configureAndStart()
-                } else {
-                    self.publishStatus("Camera access denied — enable it in Settings")
+                DispatchQueue.main.async {
+                    guard let self, self.isScanning, self.currentToken() == token else {
+                        return
+                    }
+                    if granted {
+                        self.configureAndStart(token: token)
+                    } else {
+                        self.finishScan(status: "Camera access denied — enable it in Settings")
+                    }
                 }
             }
         case .denied, .restricted:
-            publishStatus("Camera access denied — enable it in Settings")
+            finishScan(status: "Camera access denied — enable it in Settings")
         @unknown default:
-            publishStatus("Camera authorization status is unknown")
+            finishScan(status: "Camera authorization status is unknown")
         }
     }
 
-    func stop() {
-        sessionQueue.async { [session] in
-            if session.isRunning { session.stopRunning() }
+    /// Cancels an active scan or ends the post-result highlight immediately.
+    func stopScan() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.stopScan() }
+            return
         }
+        guard isScanning else { return }
+        finishScan(status: "Ready — tap Scan to scan an MSI barcode")
     }
 
-    private func configureAndStart() {
+    private func configureAndStart(token: Int) {
         sessionQueue.async { [weak self] in
-            guard let self else { return }
+            guard let self, self.isScanActive() else { return }
             do {
                 if !self.configured {
                     try self.configureSession()
                 }
+                guard self.isScanActive() else { return }
                 if !self.session.isRunning {
                     self.session.startRunning()
                 }
                 DispatchQueue.main.async {
+                    guard self.isScanning, self.currentToken() == token else {
+                        self.stopSession()
+                        return
+                    }
                     self.applyPreviewRotation()
-                    self.status = "Aim at an MSI Plessey barcode"
+                    self.status = "Scanning… point at an MSI barcode"
                 }
             } catch {
-                self.publishStatus(error.localizedDescription)
+                DispatchQueue.main.async {
+                    self.finishScan(status: error.localizedDescription)
+                }
             }
         }
     }
@@ -113,7 +154,6 @@ final class MsiCameraController: NSObject, ObservableObject {
         output.setSampleBufferDelegate(self, queue: videoQueue)
         guard session.canAddOutput(output) else { throw CameraError.cannotAddOutput }
         session.addOutput(output)
-        self.videoOutput = output
 
         // Keep the data output in sensor orientation: the C++ decoder rotates
         // it internally and maps its box back into the buffer. Only the
@@ -129,16 +169,82 @@ final class MsiCameraController: NSObject, ObservableObject {
         }
     }
 
-    private func publishStatus(_ text: String) {
-        DispatchQueue.main.async { [weak self] in
-            self?.status = text
+    private func finishScan(status text: String) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.finishScan(status: text) }
+            return
         }
+        _ = endScan()
+        pendingFinish?.cancel()
+        pendingFinish = nil
+        isScanning = false
+        status = text
+        stopSession()
+    }
+
+    private func stopSession() {
+        sessionQueue.async { [session] in
+            if session.isRunning { session.stopRunning() }
+        }
+    }
+
+    private func scheduleFinish(token: Int) {
+        pendingFinish?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.isScanning, self.currentToken() == token else { return }
+            self.finishScan(status: "Scanned — tap Scan for the next barcode")
+        }
+        pendingFinish = work
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + .milliseconds(highlightMilliseconds),
+            execute: work
+        )
     }
 
     private func currentPolicy() -> MsiChecksumPolicy {
         policyLock.lock()
         defer { policyLock.unlock() }
         return lockedPolicy
+    }
+
+    // MARK: - Scan-session state
+
+    private func beginScan() -> Int {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        scanToken += 1
+        scanActive = true
+        acceptedForScan = false
+        return scanToken
+    }
+
+    private func endScan() -> Int {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        scanToken += 1
+        scanActive = false
+        return scanToken
+    }
+
+    private func currentToken() -> Int {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return scanToken
+    }
+
+    private func isScanActive() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return scanActive
+    }
+
+    /// True exactly once per armed scan: the one-shot result gate.
+    private func markAcceptedForScan() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard scanActive, !acceptedForScan else { return false }
+        acceptedForScan = true
+        return true
     }
 }
 
@@ -148,6 +254,7 @@ extension MsiCameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
         didOutput sampleBuffer: CMSampleBuffer,
         from connection: AVCaptureConnection
     ) {
+        guard isScanActive() else { return }
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         guard CVPixelBufferIsPlanar(pixelBuffer), CVPixelBufferGetPlaneCount(pixelBuffer) > 0 else {
             return
@@ -178,33 +285,29 @@ extension MsiCameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
         }
 
         // The native engine already selected a policy-valid codeword. Keep the
-        // same server-side tail as Android: validate, strip checks, reject
-        // degenerate payloads, then suppress rapid identical frames.
+        // same tail as Android: validate, strip checks, reject degenerate
+        // payloads, and accept only the first hit of this scan.
         let validation = MsiChecksumValidator.validate(result.digits, policy: policy)
         guard validation.valid,
               validation.payloadWithoutChecksum.count >= 3,
-              Set(validation.payloadWithoutChecksum).count >= 2
+              Set(validation.payloadWithoutChecksum).count >= 2,
+              markAcceptedForScan()
         else {
             return
         }
 
-        let now = Date()
-        if validation.payloadWithoutChecksum == lastAccepted,
-           now.timeIntervalSince(lastAcceptedAt) < 0.5 {
-            return
-        }
-        lastAccepted = validation.payloadWithoutChecksum
-        lastAcceptedAt = now
-
+        let token = currentToken()
         let payload = validation.payloadWithoutChecksum
         let nativeDetail =
             "\(result.digits) / \(result.nativePolicy) / \(result.votes) votes"
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
+            guard let self, self.isScanning, self.currentToken() == token else { return }
             self.lastPayload = payload
             self.lastNativeDetail = nativeDetail
             self.status = "Detected MSI Plessey"
             self.onResult?(result)
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            self.scheduleFinish(token: token)
         }
     }
 }
