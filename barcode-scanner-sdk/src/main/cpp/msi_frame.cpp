@@ -153,12 +153,17 @@ void upscaleNNShifted(const uint8_t* src, int w, int h, int f,
     oh = static_cast<int>(oh64);
     out.resize(static_cast<size_t>(ow) * static_cast<size_t>(oh));
     std::vector<uint8_t> expanded((size_t)ow);
+    // A source row (sy) feeds up to f consecutive output rows; expand it once.
+    int lastSy = -1;
     for (int y = 0; y < oh; ++y) {
         const int sy = std::min(h - 1, (y + 1) / f);
-        const uint8_t* row = src + (size_t)sy * w;
-        expanded[0] = row[0];
-        for (int x = 1; x < ow; ++x)
-            expanded[x] = row[std::min(w - 1, (x + 1) / f)];
+        if (sy != lastSy) {
+            const uint8_t* row = src + (size_t)sy * w;
+            expanded[0] = row[0];
+            for (int x = 1; x < ow; ++x)
+                expanded[x] = row[std::min(w - 1, (x + 1) / f)];
+            lastSy = sy;
+        }
         std::memcpy(&out[(size_t)y * ow], expanded.data(), (size_t)ow);
     }
 }
