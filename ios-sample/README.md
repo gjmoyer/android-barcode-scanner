@@ -47,8 +47,9 @@ xcodebuild \
 ## What it demonstrates
 
 - One-shot scanning: the camera session and decoder are off while idle; the
-  large Scan button arms a scan, the first valid read shows the highlight for
-  about a second, then the camera stops again
+  large Scan button arms a scan, the first valid read freezes that camera frame
+  with the highlight still drawn on it, then the camera stops
+- The frozen result stays on screen until the next Scan
 - `AVCaptureVideoDataOutput` Y-plane access with row-stride handling
 - One native pass (`msi::prepareRegion`) to compact rows and contrast-stretch
 - `msi::decodeFrame` with policy, digit bounds, orientation and live-only options

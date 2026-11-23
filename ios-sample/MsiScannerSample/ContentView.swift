@@ -6,11 +6,14 @@ struct ContentView: View {
 
     var body: some View {
         ZStack {
-            idleBackground
+            // Keep the preview layer attached for the app's lifetime. Only the
+            // capture session is stopped while idle, so arming a scan does not
+            // have to rebuild the preview connection.
+            CameraView(controller: controller)
+                .ignoresSafeArea()
 
-            if controller.isScanning {
-                CameraView(controller: controller)
-                    .ignoresSafeArea()
+            if !controller.isScanning && controller.frozenFrame == nil {
+                idleBackground
                     .transition(.opacity)
             }
 

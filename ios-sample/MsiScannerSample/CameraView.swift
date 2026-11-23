@@ -13,10 +13,13 @@ struct CameraView: UIViewRepresentable {
             view?.show(result)
         }
         controller.attach(previewLayer: view.previewLayer)
+        view.setFrozenFrame(controller.frozenFrame)
         return view
     }
 
-    func updateUIView(_ uiView: ScannerPreviewView, context: Context) {}
+    func updateUIView(_ uiView: ScannerPreviewView, context: Context) {
+        uiView.setFrozenFrame(controller.frozenFrame)
+    }
 }
 
 final class ScannerPreviewView: UIView {
@@ -26,12 +29,20 @@ final class ScannerPreviewView: UIView {
         layer as! AVCaptureVideoPreviewLayer
     }
 
+    private let frozenImageView = UIImageView()
     private let overlay = BarcodeOverlayView()
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .black
         previewLayer.videoGravity = .resizeAspectFill
+
+        frozenImageView.contentMode = .scaleAspectFill
+        frozenImageView.clipsToBounds = true
+        frozenImageView.isHidden = true
+        frozenImageView.isUserInteractionEnabled = false
+        addSubview(frozenImageView)
+
         overlay.translatesAutoresizingMaskIntoConstraints = false
         addSubview(overlay)
         NSLayoutConstraint.activate([
@@ -46,6 +57,22 @@ final class ScannerPreviewView: UIView {
         fatalError("init(coder:) has not been implemented")
     }
 
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        frozenImageView.frame = bounds
+    }
+
+    func setFrozenFrame(_ image: UIImage?) {
+        guard let image else {
+            frozenImageView.image = nil
+            frozenImageView.isHidden = true
+            overlay.clear()
+            return
+        }
+        frozenImageView.image = image
+        frozenImageView.isHidden = false
+    }
+
     func show(_ result: MsiDecodeResult) {
         overlay.show(result, in: previewLayer)
     }
@@ -58,7 +85,7 @@ private final class BarcodeOverlayView: UIView {
         super.init(frame: frame)
         isUserInteractionEnabled = false
         backgroundColor = .clear
-        shape.fillColor = UIColor.systemGreen.withAlphaComponent(0.18).cgColor
+        shape.fillColor = UIColor.systemGreen.withAlphaComponent(0.20).cgColor
         shape.strokeColor = UIColor.systemGreen.cgColor
         shape.lineWidth = 3
         shape.lineJoin = .round
@@ -72,6 +99,11 @@ private final class BarcodeOverlayView: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         shape.frame = bounds
+    }
+
+    func clear() {
+        shape.removeAllAnimations()
+        shape.path = nil
     }
 
     func show(_ result: MsiDecodeResult, in previewLayer: AVCaptureVideoPreviewLayer) {
@@ -99,13 +131,11 @@ private final class BarcodeOverlayView: UIView {
         shape.removeAllAnimations()
         shape.opacity = 1
 
-        let fade = CABasicAnimation(keyPath: "opacity")
-        fade.fromValue = 1
-        fade.toValue = 0
-        fade.beginTime = CACurrentMediaTime() + 0.45
-        fade.duration = 0.45
-        fade.fillMode = .forwards
-        fade.isRemovedOnCompletion = false
-        shape.add(fade, forKey: "fade")
+        // A short pop-in, then leave the box visible on the frozen frame.
+        let pop = CABasicAnimation(keyPath: "opacity")
+        pop.fromValue = 0.2
+        pop.toValue = 1
+        pop.duration = 0.15
+        shape.add(pop, forKey: "pop")
     }
 }

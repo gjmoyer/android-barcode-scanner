@@ -1,5 +1,6 @@
 import AVFoundation
 import Combine
+import CoreImage
 import Foundation
 import UIKit
 
@@ -9,6 +10,9 @@ final class MsiCameraController: NSObject, ObservableObject {
     @Published private(set) var lastPayload: String?
     @Published private(set) var lastNativeDetail: String?
     @Published private(set) var isScanning = false
+    /// Camera frame captured at the winning decode, shown frozen after the
+    /// session stops so the highlighted barcode stays on screen.
+    @Published private(set) var frozenFrame: UIImage?
     @Published var policy: MsiChecksumPolicy = .mod10 {
         didSet {
             policyLock.lock()
@@ -24,6 +28,7 @@ final class MsiCameraController: NSObject, ObservableObject {
 
     private let sessionQueue = DispatchQueue(label: "com.barcodescanner.msiscanner.session")
     private let videoQueue = DispatchQueue(label: "com.barcodescanner.msiscanner.video")
+    private let ciContext = CIContext()
     private let policyLock = NSLock()
     private var lockedPolicy: MsiChecksumPolicy = .mod10
     private var previewLayer: AVCaptureVideoPreviewLayer?
@@ -67,6 +72,7 @@ final class MsiCameraController: NSObject, ObservableObject {
         status = "Starting camera…"
         lastPayload = nil
         lastNativeDetail = nil
+        frozenFrame = nil
 
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
@@ -148,7 +154,7 @@ final class MsiCameraController: NSObject, ObservableObject {
         let output = AVCaptureVideoDataOutput()
         output.videoSettings = [
             kCVPixelBufferPixelFormatTypeKey as String:
-                kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+                kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         ]
         output.alwaysDiscardsLateVideoFrames = true
         output.setSampleBufferDelegate(self, queue: videoQueue)
@@ -300,10 +306,19 @@ extension MsiCameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
         let payload = validation.payloadWithoutChecksum
         let nativeDetail =
             "\(result.digits) / \(result.nativePolicy) / \(result.votes) votes"
+
+        // Render this exact winning frame while the pixel buffer is still
+        // locked, then keep it behind the highlight after the session stops.
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        let frozen: UIImage? = ciContext
+            .createCGImage(ciImage, from: ciImage.extent)
+            .map { UIImage(cgImage: $0, scale: 1, orientation: .right) }
+
         DispatchQueue.main.async { [weak self] in
             guard let self, self.isScanning, self.currentToken() == token else { return }
             self.lastPayload = payload
             self.lastNativeDetail = nativeDetail
+            self.frozenFrame = frozen
             self.status = "Detected MSI Plessey"
             self.onResult?(result)
             UINotificationFeedbackGenerator().notificationOccurred(.success)
