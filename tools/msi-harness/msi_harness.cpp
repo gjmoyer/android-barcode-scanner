@@ -12,9 +12,11 @@
 //      variants x repeats; mild variants are ASSERTED, harsh combos reported;
 //   4. native frame path (msi_frame): one-pass crop/stretch/rotate parity,
 //      stride + offset handling, orientation attempts, scan-top override;
-//   5. timing bench with a pass/fail budget.
+//   5. timing bench; still-fallback perf budgets are advisory by default
+//      (MSI_PERF_STRICT=1 enforces them on a dedicated benchmark host).
 //
-// Exit code = number of asserted failures (0 = all green).
+// Exit code = number of asserted failures (0 = all green; advisory perf
+// overruns do not change it).
 // Usage: ./build.sh [path/to/cpp/dir]
 
 #include <algorithm>
@@ -22,6 +24,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -31,10 +34,33 @@
 #include "msi_decoder.h"
 #include "msi_frame.h"
 
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(undefined_behavior_sanitizer)
+#define MSI_SANITIZER_BUILD 1
+#endif
+#endif
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define MSI_SANITIZER_BUILD 1
+#endif
+
 // ------------------------------------------------------------ test context
 static int g_assertFails = 0;
 static int g_assertPass = 0;
 static int g_infoFails = 0;
+static int g_perfOver = 0;
+
+// Absolute wall-clock budgets are host-tuned; shared CI/VMs are routinely
+// several times slower than the machine they were measured on. Perf overruns
+// are advisory by default (printed as WARN, exit stays green). Set
+// MSI_PERF_STRICT=1 on a dedicated benchmark host to enforce them.
+static bool perfStrict() {
+    static const bool strict = [] {
+        const char* v = getenv("MSI_PERF_STRICT");
+        return v != nullptr && *v != '\0' && std::strcmp(v, "0") != 0 &&
+               std::strcmp(v, "false") != 0;
+    }();
+    return strict;
+}
 
 struct Gray {
     std::vector<uint8_t> px;
@@ -442,6 +468,43 @@ static Gray rotateCw(const Gray& g, int deg) {
     return toSensor(g, (360 - deg) % 360, 0, stride);
 }
 
+// Arbitrary clockwise rotation with an expanded white canvas, mirroring the
+// still fallback's reverse-affine geometry. Used by the near-180 phantom
+// regression, which is not a cardinal rotation.
+static Gray rotateAny(const Gray& src, float deg) {
+    const float a = deg * 3.14159265358979323846f / 180.0f;
+    const float m0 = cosf(a), m1 = sinf(a), m3 = -sinf(a), m4 = cosf(a);
+    const float cx = 0.5f * src.w, cy = 0.5f * src.h;
+    float m2 = -cx * m0 - cy * m1 + cx;
+    float m5 = -cx * m3 - cy * m4 + cy;
+    float minx = 1e30f, miny = 1e30f, maxx = -1e30f, maxy = -1e30f;
+    for (int k = 0; k < 4; ++k) {
+        const float x = (k == 1 || k == 2) ? (float)src.w : 0.0f;
+        const float y = (k >= 2) ? (float)src.h : 0.0f;
+        const float u = m0 * x + m1 * y + m2;
+        const float v = m3 * x + m4 * y + m5;
+        minx = std::min(minx, u); maxx = std::max(maxx, u);
+        miny = std::min(miny, v); maxy = std::max(maxy, v);
+    }
+    Gray out;
+    out.w = (int)ceilf(maxx) - (int)floorf(minx);
+    out.h = (int)ceilf(maxy) - (int)floorf(miny);
+    const float tx = -(out.w - src.w) * 0.5f, ty = -(out.h - src.h) * 0.5f;
+    m2 = m0 * tx + m1 * ty + m2;
+    m5 = m3 * tx + m4 * ty + m5;
+    out.px.assign((size_t)out.w * out.h, 255);
+    for (int y = 0; y < out.h; ++y) {
+        for (int x = 0; x < out.w; ++x) {
+            const float sx = m0 * x + m1 * y + m2;
+            const float sy = m3 * x + m4 * y + m5;
+            if (sx < 0 || sy < 0 || sx >= src.w || sy >= src.h) continue;
+            out.px[(size_t)y * out.w + x] =
+                src.px[(size_t)(int)sy * src.w + (int)sx];
+        }
+    }
+    return out;
+}
+
 static void frameSuite() {
     printf("--- native frame path (msi_frame) ---\n");
     // 1. Stretch parity with the Kotlin transform (mirrored by
@@ -569,6 +632,255 @@ static void frameSuite() {
             assertTrue(name.c_str(),
                        fr.decode.ok && fr.decode.digits == rc.full && fr.relativeRotation == 180);
         }
+        // The still fallbacks run after the sweeps; they must never bypass
+        // this arbitration and emit the reversed phantom as an upright read.
+        msi::FrameOptions rf = ro;
+        rf.maxOrientations = 1;
+        rf.scanTopFraction = 0.25f;
+        rf.stretchRetry = true;
+        for (const RevCase& rc : reversed) {
+            Gray g = renderMsi(rc.full, 3, rc.w, rc.h, rc.top, rc.barH);
+            boxBlur(g, rc.blur);
+            photometric(g, rc.contrast, rc.brightness);
+            Gray flip = rotateCw(g, 180);
+            rf.required = rc.policy;
+            msi::FrameResult fr = msi::decodeFrame(flip.px.data(), flip.w, flip.h, rf);
+            const std::string name =
+                std::string("frame fallback reversed phantom ") + rc.full + " not emitted as upright";
+            if (fr.decode.ok && fr.decode.digits != rc.full)
+                printf("  fallback phantom %s -> %s rel=%d\n", rc.full,
+                       fr.decode.digits.c_str(), fr.relativeRotation);
+            assertTrue(name.c_str(),
+                       !fr.decode.ok ||
+                           (fr.decode.digits == rc.full && fr.relativeRotation == 180));
+        }
+    }
+
+    // 5a-2. Exact still-path reproducer for the fallback direction bypass.
+    // A blurred, low-contrast, upside-down tag at 3px/module used to return
+    // a different checksum-valid 9-digit value with relativeRotation=0.
+    {
+        Gray g = renderMsi("011578333", 3, 1000, 600, 220, 160);
+        photometric(g, 0.40f, 0);
+        boxBlur(g, 2);
+        Gray flip = rotateCw(g, 180);
+        msi::FrameOptions fo;
+        fo.maxOrientations = 1;
+        fo.scanTopFraction = 0.25f;
+        fo.minDigits = 9;
+        fo.maxDigits = 9;
+        fo.stretchRetry = true;
+        msi::FrameResult fr = msi::decodeFrame(flip.px.data(), flip.w, flip.h, fo);
+        assertTrue("still fallback 180 phantom: true read, relativeRotation 180",
+                   fr.decode.ok && fr.decode.digits == "011578333" &&
+                   fr.relativeRotation == 180);
+    }
+
+    // 5a-3. Near-180 fallback phantom: a blurred, low-contrast tag rotated
+    // 181 degrees used to return a checksum-valid wrong value as upright when
+    // the reverse view failed. The score gate must reject it (a correct read
+    // at relativeRotation 180 is also acceptable).
+    {
+        Gray g = renderMsi("900800087", 3, 800, 400, 150, 120);
+        photometric(g, 0.45f, 0);
+        boxBlur(g, 3);
+        Gray tilted = rotateAny(g, 181.0f);
+        msi::FrameOptions po;
+        po.maxOrientations = 4;
+        po.scanTopFraction = 0.25f;
+        po.stretchRetry = true;
+        po.required = msi::ChecksumPolicy::MOD10;
+        for (int bounds : {0, 9}) {
+            po.minDigits = bounds;
+            po.maxDigits = bounds;
+            msi::FrameResult pr = msi::decodeFrame(tilted.px.data(), tilted.w,
+                                                   tilted.h, po);
+            assertTrue(bounds == 0
+                           ? "still 181-degree fallback: no wrong open-length read"
+                           : "still 181-degree fallback: no wrong 9-digit read",
+                       !pr.decode.ok ||
+                           (pr.decode.digits == "900800087" &&
+                            pr.relativeRotation == 180));
+        }
+    }
+
+    // 5a-3b. Second near-180 phantom (846639722) from the stretched sweep.
+    {
+        Gray g = renderMsi("846639722", 3, 800, 400, 150, 120);
+        photometric(g, 0.40f, 0);
+        boxBlur(g, 3);
+        Gray tilted = rotateAny(g, 181.0f);
+        msi::FrameOptions po;
+        po.maxOrientations = 4;
+        po.scanTopFraction = 0.25f;
+        po.stretchRetry = true;
+        po.required = msi::ChecksumPolicy::MOD10;
+        for (int bounds : {0, 9}) {
+            po.minDigits = bounds;
+            po.maxDigits = bounds;
+            msi::FrameResult pr = msi::decodeFrame(tilted.px.data(), tilted.w,
+                                                   tilted.h, po);
+            assertTrue(bounds == 0
+                           ? "still 181-degree sweep phantom: no wrong open read"
+                           : "still 181-degree sweep phantom: no wrong 9-digit read",
+                       !pr.decode.ok ||
+                           (pr.decode.digits == "846639722" &&
+                            pr.relativeRotation == 180));
+        }
+    }
+
+    // 5a-3c. Attempts == 3 (0, 180, 90) is a legal still config but leaves
+    // the 90-degree view without its 270 reverse. A stretched-sweep read
+    // there must still clear the score gate: the 5a-3b phantom tag rotated
+    // ~91 degrees used to emit the checksum-valid 446947731 as upright.
+    // Attempting the reverse view is not what fixes it (4 orientations also
+    // miss here); the gate must reject an unconfirmed weak read regardless
+    // of pair position.
+    {
+        Gray g = renderMsi("846639722", 3, 800, 400, 150, 120);
+        photometric(g, 0.40f, 0);
+        boxBlur(g, 3);
+        Gray sideways = rotateAny(g, 91.0f);
+        msi::FrameOptions po;
+        po.scanTopFraction = 0.25f;
+        po.stretchRetry = true;
+        po.required = msi::ChecksumPolicy::MOD10;
+        for (int maxO : {3, 4}) {
+            po.maxOrientations = maxO;
+            for (int bounds : {0, 9}) {
+                po.minDigits = bounds;
+                po.maxDigits = bounds;
+                msi::FrameResult pr = msi::decodeFrame(sideways.px.data(), sideways.w,
+                                                       sideways.h, po);
+                assertTrue(maxO == 3
+                               ? (bounds == 0
+                                      ? "3-orientation stretched sweep: no wrong open read"
+                                      : "3-orientation stretched sweep: no wrong 9-digit read")
+                               : (bounds == 0
+                                      ? "4-orientation control: no wrong open read"
+                                      : "4-orientation control: no wrong 9-digit read"),
+                           !pr.decode.ok ||
+                               (pr.decode.digits == "846639722" &&
+                                pr.relativeRotation == 90));
+            }
+        }
+    }
+
+    // 5a-4. Direct angle-fallback contract: no reversed phantom may be
+    // returned as an upright read.
+#if MSI_ANGLE_MODEL
+    {
+        Gray g = renderMsi("011578333", 3, 1000, 600, 220, 160);
+        photometric(g, 0.40f, 0);
+        boxBlur(g, 2);
+        Gray flip = rotateCw(g, 180);
+        msi::DecodeOptions d;
+        d.minDigits = 9;
+        d.maxDigits = 9;
+        int rel = -1;
+        msi::DecodeResult ar = msi::decodeAngleFallback(
+            flip.px.data(), flip.w, flip.h, d, &rel);
+        assertTrue("angle fallback never returns reversed phantom as upright",
+                   !ar.ok || (ar.digits == "011578333" && rel == 180));
+    }
+
+    // 5a-4b. Positive angle-fallback contract. The phantom test above only
+    // proves the fallback stays silent; this proves it actually rescues a
+    // tilt the plain sweeps miss — and that the learned prediction, not the
+    // small fixed offset sweep, is doing the work: at 22 degrees a zeroed
+    // predictor cannot read this frame at all.
+    {
+        Gray g = renderMsi("011578333", 5, 1600, 900, 300, 200);
+        photometric(g, 0.45f, 0);
+        boxBlur(g, 1);
+        Gray tilted = rotateAny(g, 22.0f);  // clockwise
+        msi::FrameOptions so;
+        so.maxOrientations = 4;
+        so.scanTopFraction = 0.25f;
+        so.minDigits = 9;
+        so.maxDigits = 9;
+        so.stretchRetry = true;
+        // The three still-only stages off: plain + stretch sweeps only.
+        so.allowStillFallbacks = false;
+        msi::FrameResult plain = msi::decodeFrame(tilted.px.data(), tilted.w,
+                                                  tilted.h, so);
+        assertTrue("22-degree tilt: plain sweeps miss", !plain.decode.ok);
+        so.allowStillFallbacks = true;
+        msi::FrameResult full = msi::decodeFrame(tilted.px.data(), tilted.w,
+                                                 tilted.h, so);
+        assertTrue("22-degree tilt: still fallbacks read upright",
+                   full.decode.ok && full.decode.digits == "011578333" &&
+                       full.relativeRotation == 0);
+        msi::DecodeOptions d;
+        d.minDigits = 9;
+        d.maxDigits = 9;
+        int rel = -1;
+        msi::DecodeResult ar = msi::decodeAngleFallback(
+            tilted.px.data(), tilted.w, tilted.h, d, &rel);
+        assertTrue("22-degree tilt: angle fallback itself reads",
+                   ar.ok && ar.digits == "011578333" && rel == 0);
+        // Sign convention: predictAngle returns the correction to apply
+        // (negative for a clockwise tilt), so the frame is not upright when
+        // the predictor reports zero.
+        const float pred = msi::predictAngle(tilted.px.data(), tilted.w,
+                                             tilted.h);
+        assertTrue("angle predictor tracks a 22-degree clockwise tilt",
+                   pred > -30.0f && pred < -14.0f);
+    }
+
+    // 5a-4c. Golden vectors pin the committed msi_angle_model.h weights.
+    // The header is generated and not reproducible in this repo, so any
+    // stray edit (or a re-train) must fail loudly and update these numbers
+    // deliberately. Tolerance covers float contraction differences only.
+    {
+        auto close = [](float got, float want, float tol) {
+            return std::fabs(got - want) <= tol;
+        };
+        Gray g = renderMsi("011578333", 6, 1600, 800, 250, 200);
+        photometric(g, 0.45f, 0);
+        boxBlur(g, 1);
+        const float upright = msi::predictAngle(g.px.data(), g.w, g.h);
+        assertTrue("angle golden: upright 1600x800", close(upright, -2.026f, 0.75f));
+        Gray cw = rotateAny(g, 12.0f);
+        assertTrue("angle golden: 12-degree clockwise",
+                   close(msi::predictAngle(cw.px.data(), cw.w, cw.h), -13.061f, 0.75f));
+        Gray ccw = rotateAny(g, -12.0f);
+        assertTrue("angle golden: 12-degree counter-clockwise",
+                   close(msi::predictAngle(ccw.px.data(), ccw.w, ccw.h), 10.837f, 0.75f));
+        Gray blank;
+        blank.w = 400;
+        blank.h = 300;
+        blank.px.assign(120000, 255);
+        assertTrue("angle golden: flat frame predicts ~0",
+                   close(msi::predictAngle(blank.px.data(), blank.w, blank.h),
+                         0.152f, 0.75f));
+        Gray px;
+        px.w = 64;
+        px.h = 64;
+        px.px.assign(64 * 64, 255);
+        assertTrue("predictAngle rejects null", msi::predictAngle(nullptr, 64, 64) == 0.0f);
+        assertTrue("predictAngle rejects width < 32",
+                   msi::predictAngle(px.px.data(), 31, 64) == 0.0f);
+        assertTrue("predictAngle rejects height < 32",
+                   msi::predictAngle(px.px.data(), 64, 31) == 0.0f);
+    }
+#endif
+    // 5a-5. Small-module still path: a blurred 9-digit tag downscaled to
+    // ~2.5px/module must read through the scale fallback without a phantom.
+    {
+        Gray g = renderMsi("011578333", 5, 900, 400, 200, 120);
+        boxBlur(g, 1);
+        photometric(g, 0.5f, 0);
+        Gray small = downscaleNN(g, 0.5f);
+        msi::FrameOptions so;
+        so.maxOrientations = 1;
+        so.scanTopFraction = 0.25f;
+        so.minDigits = 9;
+        so.maxDigits = 9;
+        so.stretchRetry = true;
+        msi::FrameResult fr = msi::decodeFrame(small.px.data(), small.w, small.h, so);
+        assertTrue("still small-module fallback reads 9-digit tag",
+                   fr.decode.ok && fr.decode.digits == "011578333");
     }
 
     // 5b. Leading quiet zone (direction arbitration evidence). A 9px module
@@ -747,6 +1059,16 @@ static void frameSuite() {
         msi::FrameResult sf = msi::decodeFrame(softFlip.px.data(), softFlip.w, softFlip.h, so);
         assertTrue("still soft low-contrast tag upside down: stretchRetry -> relativeRotation 180",
                    sf.decode.ok && sf.decode.digits == "12345674" && sf.relativeRotation == 180);
+        // A sensor-rotated still must run the fallbacks on the upright frame;
+        // otherwise the angle predictor sees a sideways tag.
+        Gray sensorSoft = rotateCw(soft, 270);
+        msi::FrameOptions sro = so;
+        sro.rotationDegrees = 90;
+        msi::FrameResult sr90 = msi::decodeFrame(sensorSoft.px.data(), sensorSoft.w,
+                                                 sensorSoft.h, sro);
+        assertTrue("still sensor rotation 90: fallback reads upright frame",
+                   sr90.decode.ok && sr90.decode.digits == "12345674" &&
+                   sr90.relativeRotation == 0);
         // The stretched sweep never touches the caller's buffer.
         Gray before = soft;
         msi::decodeFrame(soft.px.data(), soft.w, soft.h, so);
@@ -1257,6 +1579,124 @@ static void benchSuite(const std::string& dir) {
     if (hasPhoto) bench("photo dixie", photo);
 }
 
+// ----------------------------------------------------- live deskew rescue
+// The live tilt rescue consumes an unstretched wide-short crop, estimates the
+// projection skew, and tries bicubic rotations. Positive: a clean 5 px/module
+// tag rotated 10 degrees in a 972x252 crop. Negative: flat and noise crops
+// must decline before any rotation/decode.
+static void liveDeskewSuite() {
+    printf("--- live deskew rescue (unstretched wide-short crop) ---\n");
+    {
+        Gray g = renderMsi("011578333", 5, 972, 252, 81, 90);
+        boxBlur(g, 1);
+        Gray tilted = rotateAny(g, 10.0f);  // clockwise, matches the camera crop
+        msi::DecodeOptions d;
+        d.minDigits = 9;
+        d.maxDigits = 9;
+        d.required = msi::ChecksumPolicy::MOD10;
+        msi::DecodeResult r = msi::decodeDeskew(tilted.px.data(), tilted.w,
+                                                tilted.h, d);
+        assertTrue("live deskew: 10-degree crop reads",
+                   r.ok && r.digits == "011578333" && r.score >= 0.70f);
+    }
+    {
+        Gray blank;
+        blank.w = 972;
+        blank.h = 252;
+        blank.px.assign(972 * 252, 255);
+        msi::DecodeOptions d;
+        d.minDigits = 9;
+        d.maxDigits = 9;
+        d.required = msi::ChecksumPolicy::MOD10;
+        msi::DecodeResult r = msi::decodeDeskew(blank.px.data(), blank.w,
+                                                blank.h, d);
+        assertTrue("live deskew: flat crop declines", !r.ok);
+
+        Gray noise;
+        noise.w = 972;
+        noise.h = 252;
+        noise.px.resize(972 * 252);
+        uint32_t s = 0x12345678u;
+        for (uint8_t& v : noise.px) {
+            s = s * 1664525u + 1013904223u;
+            v = (uint8_t)(s >> 24);
+        }
+        r = msi::decodeDeskew(noise.px.data(), noise.w, noise.h, d);
+        assertTrue("live deskew: noise crop declines", !r.ok);
+
+        // Live cap: a still-sized frame must decline before any sweep work.
+        Gray big;
+        big.w = 1200;
+        big.h = 1000;
+        big.px.assign(1200 * 1000, 255);
+        r = msi::decodeDeskew(big.px.data(), big.w, big.h, d);
+        assertTrue("live deskew: >1MP crop declines", !r.ok);
+    }
+}
+
+// ------------------------------------------------------------ perf guards
+// Single-shot all-failure guards for the bounded still fallback. Budgets are
+// deliberately generous host limits: they target the old 1.5 s/565 MB class
+// of regression, not a device benchmark. They are ADVISORY by default because
+// shared CI/VMs are often 2-4x slower than the reference host; only the
+// all-failure correctness assertion always gates the exit code.
+// MSI_PERF_STRICT=1 makes an overrun a real failure (dedicated bench host).
+static void perfSuite() {
+    printf("--- still fallback budgets (single shot, host; %s) ---\n",
+           perfStrict() ? "enforced" : "advisory");
+    auto one = [](const char* name, int w, int h, bool noise, long budgetMs) {
+        Gray g;
+        g.w = w; g.h = h;
+        g.px.assign((size_t)w * h, 255);
+        if (noise) {
+            uint32_t s = 0x12345678u;
+            for (uint8_t& v : g.px) {
+                s = s * 1664525u + 1013904223u;
+                v = (uint8_t)(s >> 24);
+            }
+        }
+        msi::FrameOptions o;
+        o.maxOrientations = 4;
+        o.scanTopFraction = 0.25f;
+        o.minDigits = 9;
+        o.maxDigits = 9;
+        o.stretchRetry = true;
+        auto t0 = std::chrono::steady_clock::now();
+        msi::FrameResult r = msi::decodeFrame(g.px.data(), g.w, g.h, o);
+        auto t1 = std::chrono::steady_clock::now();
+        const long ms = (long)std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+        printf("PERF %-24s %dx%d %ldms (budget %ldms)\n", name, w, h, ms, budgetMs);
+        const bool correct = !r.decode.ok;
+#ifdef MSI_SANITIZER_BUILD
+        // Sanitizer instrumentation makes wall-clock budgets meaningless;
+        // keep the all-failure correctness assertion only.
+        assertTrue(name, correct);
+#else
+        if (!correct) {
+            printf("FAIL %-24s decoded an all-failure frame\n", name);
+            ++g_assertFails;
+        } else if (ms <= budgetMs) {
+            assertTrue(name, true);
+        } else if (perfStrict()) {
+            printf("FAIL %-24s %ldms over %ldms budget (MSI_PERF_STRICT)\n",
+                   name, ms - budgetMs, budgetMs);
+            ++g_assertFails;
+        } else {
+            printf("WARN %-24s %ldms over %ldms budget (advisory; "
+                   "MSI_PERF_STRICT=1 enforces)\n",
+                   name, ms - budgetMs, budgetMs);
+            ++g_assertPass;
+            ++g_perfOver;
+        }
+#endif
+    };
+    one("perf 16MP blank", 4000, 4000, false, 1000);
+    one("perf 4MP noise", 2000, 2000, true, 2000);
+    one("perf 1000px noise", 1000, 1000, true, 1200);
+    one("perf 550px noise", 550, 550, true, 1000);
+    one("perf 400px ensemble noise", 400, 400, true, 1200);
+}
+
 int main(int argc, char** argv) {
     if (argc > 1 && std::string(argv[1]) == "diag") {
         // Forensics: ./msi_harness diag photo.png [--contrast] [--up2]
@@ -1305,7 +1745,14 @@ int main(int argc, char** argv) {
     shelfSuite(shelfDir);
     frameSuite();
     benchSuite(shelfDir);
+    liveDeskewSuite();
+    perfSuite();
     printf("ASSERTS pass=%d fail=%d (info-only misses=%d)\n", g_assertPass, g_assertFails,
            g_infoFails);
+    if (g_perfOver > 0) {
+        printf("PERF %d advisory budget overrun(s): host-tuned wall-clock "
+               "limits, not asserted (MSI_PERF_STRICT=1 enforces)\n",
+               g_perfOver);
+    }
     return g_assertFails == 0 ? 0 : 1;
 }

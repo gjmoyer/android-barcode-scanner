@@ -6,5 +6,9 @@ package com.barcodescanner.sdk.data.msi;
 public class MsiNativeDecoder {
     public native String nativeDecodeLuma(java.nio.ByteBuffer gray, int width, int height,
             int maxOrientations, float scanTopFraction, int requiredPolicy,
-            int minDigits, int maxDigits, boolean stretchRetry);
+            int minDigits, int maxDigits, boolean stretchRetry,
+            boolean stillFallbacks);
+
+    public native String nativeDecodeDeskew(java.nio.ByteBuffer gray, int width, int height,
+            int requiredPolicy, int minDigits, int maxDigits);
 }

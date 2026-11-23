@@ -39,14 +39,18 @@ CameraX / Bitmap
   → LumaFusion: engines in REGISTRY order (MLKit → MsiNative → ZXingCpp) read
   that one buffer in place; nothing converts, crops, rotates or copies pixels,
   and no engine ever sees a second variant of the frame
-  → whole frame under one decodeTimeoutMillis budget, best-so-far on expiry;
-  hits below minConfidence or outside the enabled set are dropped
+  → whole frame under one decodeTimeoutMillis budget, best-so-far on expiry
+  (checked between engines: a single blocking native still decode can overrun
+  it); hits below minConfidence or outside the enabled set are dropped
   → pool deduped on (value, symbology) keeping max confidence; a hit at
   CONFIDENT_THRESHOLD (0.95) stops the frame
   → per-engine timings + final result go to logcat under `LumaFusion`
   (always emitted at DEBUG; filter with `adb logcat -s LumaFusion`)
   → live path: MSI bar stability gate (2 consecutive sightings) → per-key
   duplicate suppression → ScanResult.Success
+  → live only, default on (`ScannerConfig.msiLiveDeskew`): after an all-engine
+  miss, retry the unstretched aim-box crop through MSI's projection-deskew
+  bicubic sweep; successful frames never take this path
   → one-shot path: pure return, never touches the results Flow
 ```
 
@@ -72,8 +76,9 @@ No pipeline change.
 
 **Tune speed vs recall**:
 - `ScannerConfig(maxOrientationsTried=N)` caps the MSI orientations tried natively
-  on stills (1..4; live aim-box frames always try 2). A hit at the confident
-  threshold still ends the frame early.
+  on stills (1..4; stills force at least 0/180, so the effective minimum is 2;
+  live aim-box frames always try 2). A hit at the confident threshold still
+  ends the frame early.
 - `zxingTryHarder(false)` opts the native sweep out of thorough mode. The MSI
   engine is always thorough: multi-ROI scanline voting, digit-template
   correlation, and small-module 1D/2D 2x retries.
@@ -108,6 +113,17 @@ Grayscale frame (row-major bytes via JNI)
     then the original extent; same vote and guard gates
   → single 2x NN upscale retry if still nothing, on a small frame (<800px
     edge) or on small modules with checksum-valid evidence
+  → stills only, after all orientation sweeps, ≤3.5 MP: learned-angle fallback:
+    predict the tag rotation from a 32x32 view; for each offset (predicted,
+    then ±0.35/0.7/1.0/1.4°) rotate upright and try the rotated frame, its
+    2%/98% stretch, a 2x upscale and the stretched 2x frame (all four nested
+    per offset); every accepted candidate is confirmed against its 180° view
+  → stills only, ≤4 MP: autocontrast (1%) + unsharp (Gaussian radius 4,
+    sigma 2, amount 1.8) retry on the sharpened frame (decodeFrame with two
+    orientations + angle fallback, no recursive sweep; degenerate histograms
+    return an identity copy and skip the retry)
+  → stills only, frame ≤400px: shifted 2x/3x agreement retry; both scales
+    must match when both read, and a single scale needs score ≥0.70
   → Kotlin: re-validate reported digits strictly under `msiChecksumPolicy`,
     strip check digits, reject degenerate (single-digit) payloads
 ```
@@ -115,13 +131,33 @@ Grayscale frame (row-major bytes via JNI)
 - **One frame per scan, no ROI pass.** The live frame is already the aim-box
   crop; a still is read whole, and the MSI band search skips the top quarter
   (`LumaFrame.scanTopFraction`). The retired ML Kit isolation assist left no
-  second-chance ROI path for tilts beyond the native skew retry's ±15°,
-  so widen the aim box instead.
+  second-chance ROI path for tilts beyond the native skew retry's ±15° on
+  live frames; stills use the orientation fallback below. Widen the aim box
+  for live tilt beyond ±15°.
 - **Stills retry contrast-stretched**: `decodeFrame` sweeps every orientation
   plain, then (`FrameOptions.stretchRetry`, stills only) once more through the
   2%/98% stretch. Stills are never stretched up front: a whole-photo
   stretch clips bars that already read. Live aim-box crops are stretched
   once in the native prepare and never retry.
+- **Stills then run three fallbacks**, in this order: a clean-room orientation
+  regressor rotates the frame by its predicted in-plane angle and retries
+  small angle offsets, contrast stretch and 2x; an autocontrast + unsharp
+  retry targets blur and low contrast; a shifted 2x/3x agreement retry
+  targets small modules. All three run only on stills; the sharpened and
+  ensemble retries require `minDigits>=9`, so default open-length stills get
+  only the angle fallback. The angle path is capped at 3.5 MP, sharpening at
+  4 MP; the angle fallback's 2× stage needs a long edge ≥330 px and caps its
+  output at 4 MP, and the ensemble runs only at ≤400 px. Stills always force
+  at least two orientation attempts so 0/180 arbitration is never skipped.
+  A stretched-sweep read whose paired reverse view fails is rejected below
+  score 0.55.
+  The sharpened retry is deliberately before the ensemble: the ensemble is
+  the dominant cost on all-failure frames. Recursion guards are RAII
+  `DepthGuard`s; sharpened frame decodes disable their own upscale, the
+  sharpened angle pass and scale legs honor the caller's `allowUpscale`, and
+  derived angle fallback is limited to ≤1 MP planes. Details:
+  [`MSI_ANGLE_MODEL.md`](MSI_ANGLE_MODEL.md); failure-path timing:
+  [`MSI_PERFORMANCE.md`](MSI_PERFORMANCE.md).
 - **The MSI decoder owns a synchronized `MsiVoteGate`**, so scanline agreement
   is counted per decoder instance. Live MSI bar reads additionally pass the
   facade's 2-sighting stability gate (`DefaultBarcodeScanner.confirmLiveBarHit`).

@@ -69,6 +69,62 @@ emulator image and local fixture photos.
   the 2D recursion it compounds to 4x and bred phantoms), then the skew
   retry, then the grid retry, then the 2D NN 2x frame retry. 2D bilinear and per-ROI 2D upscales
   were measured and rejected: they re-detect ROIs and bred confident phantoms.
+  After every plain/stretched orientation misses, frame-level still fallbacks
+  run in this order: learned-angle rotation (`decodeAngleFallback`), then the
+  autocontrast + unsharp retry, then the 2x/3x agreement ensemble. That order
+  is load-bearing: sharpening is much cheaper than the ensemble, and the
+  ensemble dominates all-failure latency.
+- Still-only fallbacks are gated by `FrameOptions::stretchRetry` (set by
+  `NativeFrame.prepareStill`), never by live frames. Stills force at least
+  two orientation attempts even when the caller asks for one, so the normal
+  sweep always has 0/180 arbitration:
+  - Angle fallback: source frame capped at 3.5 MP (the operative bound; the
+    64 MP rotated-canvas guard is defense-in-depth, only reachable for
+    extreme-aspect strips); predicted angle outside ±60° treated as 0°,
+    explicit 2x plane capped at 4 MP. For each offset (predicted, then
+    ±0.35/0.7/1.0/1.4°) it tries four views in order: the rotated frame, its
+    2%/98% stretch, a 2x upscale, and the stretched 2x frame (the 2x stage
+    needs long edge ≥330 px and rotated long edge ≤1800 px). The offset loop
+    wraps all four variants, so this is not four global sweeps. Every
+    accepted candidate is confirmed against its 180° view; a reverse-failing
+    read needs score ≥0.70 (no vote escape).
+  - Sharpened retry: stills with `minDigits>=9`, long edge ≥330 px, ≤4 MP;
+    decodeFrame with two orientations on the sharpened frame, with upscale
+    disabled for that leg; the explicit angle pass on the sharpened frame
+    re-enables the caller's `allowUpscale` (matching the scale ensemble).
+    Degenerate histograms return an identity copy and skip the retry.
+  - 2x/3x ensemble: stills with `minDigits>=9`, ≤4 MP, source frame ≤400 px,
+    with checksum/small-module evidence; both scales use the +1px shifted
+    NN mapping. If both read they must agree. A single-scale read needs
+    score ≥0.70. Nested angle fallback is limited to derived planes ≤1 MP,
+    and the scale legs honor the caller's `allowUpscale`. Any stretched-sweep
+    read without a reverse confirmation (failed paired reverse, odd view, or
+    the unpaired 90° view at `maxOrientations=3`) is rejected below score 0.55.
+  - Live tilt rescue: on by default via `ScannerConfig.msiLiveDeskew` (set false to disable).
+    On a live MSI miss, the same aim-box crop is re-prepared unstretched and
+    run through `msi::decodeDeskew`: projection estimate (gain ≥1.3), coarse
+    bicubic rotation sweep, then the shared 180° reverse confirmation
+    (`confirmReverseView`; score ≥0.70 only when the reverse fails, quiet-zone
+    arbitration on conflict). Sweeps are capped at 1 MP and throttled to one
+    per 250 ms from the previous sweep's end; the unstretched copy is
+    prepared on the same cadence and only when the decoder's cooldown has
+    elapsed, so hits pay it too but no copy is dropped as throttled. The
+    normal decode path and the still path are untouched. Measured on a 972x252 Pixel crop: the MLP predicted +17.9° for
+    a ~-6° tilt; the projection/bicubic sweep read it.
+  Default open-length stills get only the direction-safe angle fallback;
+  sharpened/scale retries are shelf-configuration only.
+  Recursion guards are `t_sharpenDepth` and `t_scaleEnsembleDepth`, held by
+  RAII `DepthGuard`s so `bad_alloc` cannot poison a worker thread. Do not
+  widen these gates without re-running the full augmented suite, the negative
+  sets (currently 412 ms mean / 596 ms p95 / 743 ms max per all-failure
+  frame on the host) and the harness (189 assertions). The safety pass holds
+  2,286/2,440 augmented positives with no new wrong reads.
+- The orientation regressor is the only learned MSI component: a 32x32 →
+  128 → 64 → 1 MLP in `msi_angle_model.h`, trained offline on synthetic
+  rotations. No commercial SDK code, weights, model outputs, or training data
+  are used, and the local augmented evaluation sets are not training data.
+  Bars, templates, checksums, voting, sharpening and scale agreement are
+  deterministic C++ logic.
 - Skew retry (`estimateSkew`, top level only): projection search over ±15°
   for the angle that sharpens the deskewed band average; gated by
   |angle| ≥1.5° and gain ≥1.5, first gated ROI only (`kSkewMaxRois`; more

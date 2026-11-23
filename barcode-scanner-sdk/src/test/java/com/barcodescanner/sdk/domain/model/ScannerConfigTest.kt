@@ -2,6 +2,7 @@ package com.barcodescanner.sdk.domain.model
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ScannerConfigTest {
@@ -99,5 +100,17 @@ class ScannerConfigTest {
     @Test(expected = IllegalArgumentException::class)
     fun scanRegion_overFull_rejected() {
         ScannerConfig.Builder().scanRegion(1.1f, 0.5f).build()
+    }
+
+    @Test
+    fun stillFallbacks_defaultOn_andBuilderCanDisable() {
+        assertTrue(ScannerConfig.default().msiStillFallbacks)
+        assertFalse(ScannerConfig.Builder().msiStillFallbacks(false).build().msiStillFallbacks)
+    }
+
+    @Test
+    fun liveDeskew_defaultOn_andBuilderCanDisable() {
+        assertTrue(ScannerConfig.default().msiLiveDeskew)
+        assertFalse(ScannerConfig.Builder().msiLiveDeskew(false).build().msiLiveDeskew)
     }
 }

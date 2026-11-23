@@ -2,7 +2,10 @@
 #include "msi_frame.h"
 
 #include <algorithm>
+#include <cmath>
+#include <cstddef>
 #include <cstring>
+#include <limits>
 #include <new>
 #include <vector>
 
@@ -16,6 +19,154 @@ namespace {
 constexpr float kLowPercentile = 0.02f;
 constexpr float kHighPercentile = 0.98f;
 constexpr int kMinStretchRange = 12;
+
+// Guards the still-image 2x/3x agreement fallback against recursion.
+thread_local int t_scaleEnsembleDepth = 0;
+thread_local int t_sharpenDepth = 0;
+
+struct DepthGuard {
+    int& depth;
+    explicit DepthGuard(int& d) : depth(d) { ++depth; }
+    ~DepthGuard() { --depth; }
+};
+
+// The heavy still fallbacks are for crop-scale frames. A full-resolution
+// photo can cost hundreds of MB and seconds without helping a tag that is
+// only a few percent of the frame; the normal orientation sweep still runs.
+constexpr int64_t kMaxFallbackPixels = 4'000'000;
+#if MSI_ANGLE_MODEL
+// The angle fallback is the most allocation-heavy stage. Keep it to crop-scale
+// frames; the 4 MP cap still allows the sharpened retry on larger stills.
+constexpr int64_t kMaxAngleFallbackPixels = 3'500'000;
+#endif
+// Derived 2x/3x frames are not allowed to run the angle fallback above this
+// area. Keeps a 550x550 all-failure still from generating 2x/3x rotations
+// while still covering the 0.35/0.50 shelf-scale sets.
+constexpr int64_t kMaxDerivedAnglePixels = 1'000'000;
+
+bool fallbackSizeOk(int width, int height) {
+    if (width <= 0 || height <= 0) return false;
+    return (int64_t)width * (int64_t)height <= kMaxFallbackPixels;
+}
+
+// The sharpened and scale retries are shelf-tag fallbacks. Requiring the
+// configured range to start at 9 keeps them off the default open-length
+// configuration, where a 7/8-digit checksum-valid phantom is cheaper to
+// produce on an upscaled/cut tag. Open-length stills still get the
+// direction-safe angle fallback.
+bool fallbackDigitsAllowed(const FrameOptions& options) {
+    const int minD = std::max(options.minDigits, 0);
+    const int maxD = std::max(options.maxDigits, 0);
+    return minD >= 9 && (maxD == 0 || maxD >= minD);
+}
+
+// Autocontrast at 1% + unsharp mask (Gaussian radius 4, sigma 2, amount 1.8,
+// threshold 2), matching the strongest preprocessing retry in the local
+// suite. The horizontal blur is stored as one float plane; the vertical/unsharp
+// pass runs row by row from it, so peak memory is one float plane plus output
+// instead of two float planes.
+bool sharpenGray(const uint8_t* src, int w, int h, std::vector<uint8_t>& out) {
+    if (src == nullptr || w <= 0 || h <= 0) {
+        out.clear();
+        return false;
+    }
+    const size_t n = (size_t)w * (size_t)h;
+    uint32_t hist[256] = {0};
+    for (size_t i = 0; i < n; ++i) ++hist[src[i]];
+    const float fn = (float)n;
+    float acc = 0; int lo = 0, hi = 255;
+    for (int i = 0; i < 256; ++i) {
+        acc += (float)hist[i] / fn;
+        if (acc < 0.01f) lo = i;
+        if (acc <= 0.99f) hi = i;
+    }
+    // Degenerate/near-flat histogram: autocontrast is an identity copy. Without
+    // this, a >99%-white still maps white to 1 (lo=hi=254) and blackens a tag
+    // that occupies a small part of the frame. Return false so the caller
+    // skips re-decoding an identical frame.
+    if (hi - lo < kMinStretchRange) {
+        out.assign(src, src + n);
+        return false;
+    }
+    uint8_t lut[256];
+    const float sc = 255.0f / (float)(hi - lo);
+    for (int i = 0; i < 256; ++i)
+        lut[i] = (uint8_t)std::min(255, std::max(0, (int)((i - lo) * sc + 0.5f)));
+    // separable Gaussian, radius 4, sigma 2
+    static const float kG[9] = {0.02763055f, 0.06628225f, 0.12383154f, 0.18017382f,
+                                0.20416214f, 0.18017382f, 0.12383154f, 0.06628225f,
+                                0.02763055f};
+    std::vector<float> tmp(n);
+    for (int y = 0; y < h; ++y) {
+        const uint8_t* row = src + (size_t)y * w;
+        for (int x = 0; x < w; ++x) {
+            float v = 0;
+            for (int k = -4; k <= 4; ++k)
+                v += lut[row[std::min(w - 1, std::max(0, x + k))]] * kG[k + 4];
+            tmp[(size_t)y * w + x] = v;
+        }
+    }
+    out.resize(n);
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            float v = 0;
+            for (int k = -4; k <= 4; ++k)
+                v += tmp[(size_t)std::min(h - 1, std::max(0, y + k)) * w + x] * kG[k + 4];
+            const int a = lut[src[(size_t)y * w + x]];
+            const float d = (float)a - v;
+            out[(size_t)y * w + x] = (uint8_t)std::min(
+                255.0f, std::max(0.0f, (float)a +
+                    (std::fabs(d) > 2.0f ? 1.8f * d : 0.0f)));
+        }
+    }
+    return true;
+}
+
+// Nearest-neighbour upscale with a +1 source-pixel shift on both axes. A
+// plain 2x mapping duplicates every adjacent pair, and findRoiCandidates
+// samples with xstep=2: every pair would be identical and the upscaled image
+// would never yield an ROI. Reading src[(x+1)/f] / src[(y+1)/f] moves each
+// source boundary off the duplicated run. For f=2 a boundary lands inside
+// every sampled pair (and this is the same mapping the decoder's existing 2D
+// retry uses). For f=3 boundaries repeat every 3 columns against a 2-column
+// sample, so only ~1 in 3 sampled pairs differs — impossible to do better with
+// a monotone mapping, and still far ahead of plain 3x, where none do.
+//
+// Positive `w`, `h`, `f` are required. Output dimensions are ints: inputs
+// whose upscaled size cannot be represented yield an empty image
+// (ow = oh = 0) instead of overflowing. The still ensemble currently calls
+// this only with w,h <= 400, but it is a reusable helper.
+void upscaleNNShifted(const uint8_t* src, int w, int h, int f,
+                      std::vector<uint8_t>& out, int& ow, int& oh) {
+    const int64_t ow64 = static_cast<int64_t>(w) * f;
+    const int64_t oh64 = static_cast<int64_t>(h) * f;
+    if (src == nullptr || w <= 0 || h <= 0 || f <= 0 ||
+        ow64 > std::numeric_limits<int>::max() ||
+        oh64 > std::numeric_limits<int>::max() ||
+        ow64 * oh64 > static_cast<int64_t>(std::numeric_limits<std::ptrdiff_t>::max())) {
+        ow = 0;
+        oh = 0;
+        out.clear();
+        return;
+    }
+    ow = static_cast<int>(ow64);
+    oh = static_cast<int>(oh64);
+    out.resize(static_cast<size_t>(ow) * static_cast<size_t>(oh));
+    std::vector<uint8_t> expanded((size_t)ow);
+    // A source row (sy) feeds up to f consecutive output rows; expand it once.
+    int lastSy = -1;
+    for (int y = 0; y < oh; ++y) {
+        const int sy = std::min(h - 1, (y + 1) / f);
+        if (sy != lastSy) {
+            const uint8_t* row = src + (size_t)sy * w;
+            expanded[0] = row[0];
+            for (int x = 1; x < ow; ++x)
+                expanded[x] = row[std::min(w - 1, (x + 1) / f)];
+            lastSy = sy;
+        }
+        std::memcpy(&out[(size_t)y * ow], expanded.data(), (size_t)ow);
+    }
+}
 
 // Tile edge for the cache-blocked 90/270 transposes (64x64 bytes = 4 KiB).
 constexpr int kTile = 64;
@@ -190,22 +341,10 @@ void grayInto(const PixelView& src, int scale, int outW, int outH, uint8_t* out)
 // open lengths gave 5 near + 1 far wrong reads, each accepted in the first
 // view before the right one was tried. A read and a different read of the
 // opposite (180-degree) view cannot both be true, and the true one has the
-// clearer quiet zone before its Start (DecodeResult::leadingQuiet): over the
-// shelf still crops at 0/+-6/+-10 degrees, MOD10 open lengths, all 17
-// conflicts had true reads at 1.91-3.04 vs reversed phantoms at 0.85-1.66,
-// each pair by >= 0.61. Votes and template score do not separate them. A
-// near tie or an unmeasured zone rejects the frame.
-constexpr float kMinReverseLeadMargin = 0.3f;
-
-// 1 keeps `first`, -1 keeps `reverse`, 0 is undecidable.
-int pickDirection(const DecodeResult& first, const DecodeResult& reverse) {
-    constexpr float kSeen = -1e8f;
-    if (first.leadingQuiet < kSeen || reverse.leadingQuiet < kSeen) return 0;
-    const float d = first.leadingQuiet - reverse.leadingQuiet;
-    if (d >= kMinReverseLeadMargin) return 1;
-    if (d <= -kMinReverseLeadMargin) return -1;
-    return 0;
-}
+// clearer quiet zone before its Start (DecodeResult::leadingQuiet). Votes and
+// template score do not separate them. See msi::pickDirection and
+// msi::kMinReverseLeadMargin in msi_decoder.h for the rule and the measured
+// margin (shared with the angle fallback's decodeViewSafe).
 
 } // namespace
 
@@ -285,18 +424,22 @@ FrameResult decodeFrame(const uint8_t* gray, int width, int height, const FrameO
     if (sensor < 0) return result;
 
     // Same priority as the retired Kotlin OrientationCandidates: upright,
-    // upside-down, then sideways.
+    // upside-down, then sideways. Stills always confirm the reverse view:
+    // reversed bars can pass the checksum, and the still fallbacks run after
+    // this sweep, so a one-view still would have no arbitration at all.
     static constexpr int kOrder[4] = {0, 180, 90, 270};
-    const int attempts = std::min(std::max(options.maxOrientations, 1), 4);
+    const int requested = std::max(options.maxOrientations, 1);
+    const int attempts = std::min(std::max(requested, options.stretchRetry ? 2 : 1), 4);
 
     DecodeOptions decodeOptions;
     decodeOptions.required = options.required;
     decodeOptions.scanTopFraction = options.scanTopFraction;
     decodeOptions.minDigits = options.minDigits;
     decodeOptions.maxDigits = options.maxDigits;
+    decodeOptions.allowUpscale = options.allowUpscale;
 
     // One scratch buffer per call (not thread-local): full-resolution stills
-    // would otherwise pin ~12 MB per decode thread for the process lifetime.
+    // would otherwise pin tens of MB per decode thread for the process lifetime.
     std::vector<uint8_t> scratch;
     // Decodes the view kOrder[k] from upright; a non-null `lut` is applied in
     // the same pass as the rotation (so even the upright view goes to scratch).
@@ -319,22 +462,45 @@ FrameResult decodeFrame(const uint8_t* gray, int width, int height, const FrameO
     // read there is arbitrated (pickDirection). Returns true once the frame
     // is settled: a read, or an undecidable conflict, which is no read
     // (later views and the stretch retry would revisit the same symbol).
+    bool sawCandidate = false;
+    float minModuleSeen = 0.0f;
     const auto sweep = [&](const uint8_t* lut) {
         for (int k = 0; k < attempts; ++k) {
             DecodeResult r = decodeAt(k, lut);
-            if (!r.ok) continue;
+            if (!r.ok) {
+                if (r.sawCandidate) sawCandidate = true;
+                if (r.minModule > 0.5f &&
+                    (minModuleSeen <= 0.0f || r.minModule < minModuleSeen))
+                    minModuleSeen = r.minModule;
+                continue;
+            }
             int relative = kOrder[k];
+            // A read is confirmed only when its paired opposite view also
+            // decoded: same digits, or a conflict resolved by pickDirection.
+            // Unpaired reads get no confirmation — attempts == 3 (a legal
+            // still config: 0, 180, 90) leaves 90 without its 270 reverse.
+            bool confirmed = false;
             if (k % 2 == 0 && k + 1 < attempts) {
                 DecodeResult reverse = decodeAt(k + 1, lut);
-                if (reverse.ok && reverse.digits != r.digits) {
-                    const int pick = pickDirection(r, reverse);
-                    if (pick == 0) return true;
-                    if (pick < 0) {
-                        r = std::move(reverse);
-                        relative = kOrder[k + 1];
+                if (reverse.ok) {
+                    if (reverse.digits != r.digits) {
+                        const int pick = pickDirection(r, reverse);
+                        if (pick == 0) return true;
+                        if (pick < 0) {
+                            r = std::move(reverse);
+                            relative = kOrder[k + 1];
+                        }
                     }
+                    confirmed = true;
                 }
             }
+            // Any stretched-sweep read without a reverse confirmation must
+            // clear the score gate: a low-contrast phantom must not win
+            // merely because its opposite view was not attempted (odd k, or
+            // the unpaired 90-degree view at attempts == 3).
+            if (options.stretchRetry && lut != nullptr && !confirmed &&
+                r.score < kStretchedScoreGate)
+                continue;
             result.decode = std::move(r);
             result.relativeRotation = relative;
             return true;
@@ -347,7 +513,126 @@ FrameResult decodeFrame(const uint8_t* gray, int width, int height, const FrameO
     // retry stretched only once every plain orientation has failed, so
     // existing reads keep their result and orientation.
     uint8_t lut[256];
-    if (options.stretchRetry && buildStretchLut(gray, width, width, height, lut)) sweep(lut);
+    if (options.stretchRetry && buildStretchLut(gray, width, width, height, lut) &&
+        sweep(lut))
+        return result;
+    // Fallbacks operate on the sensor-upright frame so rotationDegrees=90/270
+    // stills are not decoded in a different orientation from the sweeps. The
+    // size cap is rotation-invariant, so check it before materializing the
+    // full-resolution upright copy.
+    const bool fallbackSize = fallbackSizeOk(width, height);
+#if MSI_ANGLE_MODEL
+    const bool angleSize = (int64_t)width * (int64_t)height <= kMaxAngleFallbackPixels;
+#endif
+    std::vector<uint8_t> upright;
+    const uint8_t* fallbackGray = gray;
+    int fallbackW = width, fallbackH = height;
+    if (fallbackSize && sensor != 0) {
+        upright.resize((size_t)width * (size_t)height);
+        rotateInto(gray, width, width, height, sensor, nullptr, upright.data());
+        fallbackGray = upright.data();
+        if (sensor == 90 || sensor == 270) std::swap(fallbackW, fallbackH);
+    }
+#if MSI_ANGLE_MODEL
+    if (options.stretchRetry && options.allowStillFallbacks && !result.decode.ok &&
+        angleSize && options.allowAngleFallback) {
+        int relative = 0;
+        DecodeResult r = decodeAngleFallback(fallbackGray, fallbackW, fallbackH,
+                                             decodeOptions, &relative);
+        if (r.ok) {
+            result.decode = std::move(r);
+            result.relativeRotation = relative;
+        }
+    }
+#endif
+    // Still-image sharpened retry. Autocontrast + unsharp is the strongest
+    // recovery for blurred/low-contrast tags (10-13 extra reads per local
+    // blur/contrast set). Decode it through decodeFrame with two orientations
+    // so the sharpened view gets the same 0/180 arbitration as the original.
+    if (options.stretchRetry && options.allowStillFallbacks && !result.decode.ok &&
+        t_sharpenDepth == 0 && fallbackDigitsAllowed(options) && fallbackSize &&
+        std::max(fallbackW, fallbackH) >= 330) {
+        std::vector<uint8_t> sharp;
+        if (sharpenGray(fallbackGray, fallbackW, fallbackH, sharp)) {
+            FrameOptions sharpOptions = options;
+            sharpOptions.rotationDegrees = 0;
+            sharpOptions.stretchRetry = false;
+            sharpOptions.allowUpscale = false;
+            sharpOptions.maxOrientations = std::max(options.maxOrientations, 2);
+            DepthGuard guard(t_sharpenDepth);
+            FrameResult sr = decodeFrame(sharp.data(), fallbackW, fallbackH, sharpOptions);
+#if MSI_ANGLE_MODEL
+            if (!sr.decode.ok && options.allowAngleFallback && angleSize) {
+                int relative = 0;
+                DecodeOptions sharpDecodeOptions = decodeOptions;
+                sharpDecodeOptions.allowUpscale = options.allowUpscale;
+                DecodeResult ar = decodeAngleFallback(sharp.data(), fallbackW, fallbackH,
+                                                      sharpDecodeOptions, &relative);
+                if (ar.ok) {
+                    sr.decode = std::move(ar);
+                    sr.relativeRotation = relative;
+                }
+            }
+#endif
+            if (sr.decode.ok) result = std::move(sr);
+        }
+    }
+
+    // Still-image 2x/3x agreement fallback for small-module tags. The 2x/3x
+    // images use the shifted nearest-neighbour mapping (plain 2x duplicates
+    // every pair and is invisible to the xstep=2 ROI sampler). Each derived
+    // frame is decoded through decodeFrame with two orientations, so it gets
+    // 0/180 arbitration and never re-enters these fallbacks. Requires the
+    // checksum-candidate/small-module evidence the decoder already collected
+    // from the original frame, so text-only stills skip the expensive scales.
+    const bool scaleEvidence = sawCandidate ||
+                               (minModuleSeen > 0.5f && minModuleSeen < 3.5f);
+    if (options.stretchRetry && options.allowStillFallbacks && !result.decode.ok &&
+        t_scaleEnsembleDepth == 0 && fallbackDigitsAllowed(options) && fallbackSize &&
+        scaleEvidence && std::max(fallbackW, fallbackH) <= 400) {
+        FrameOptions scaleOptions = options;
+        scaleOptions.rotationDegrees = 0;
+        scaleOptions.stretchRetry = true;
+        scaleOptions.allowUpscale = options.allowUpscale;
+        scaleOptions.maxOrientations = std::max(options.maxOrientations, 2);
+        FrameResult r2, r3;
+        {
+            std::vector<uint8_t> up; int uw = 0, uh = 0;
+            upscaleNNShifted(fallbackGray, fallbackW, fallbackH, 2, up, uw, uh);
+            FrameOptions o2 = scaleOptions;
+            o2.allowAngleFallback =
+                options.allowAngleFallback &&
+                (int64_t)uw * (int64_t)uh <= kMaxDerivedAnglePixels;
+            DepthGuard scaleGuard(t_scaleEnsembleDepth);
+            DepthGuard sharpGuard(t_sharpenDepth);
+            r2 = decodeFrame(up.data(), uw, uh, o2);
+        }
+        {
+            std::vector<uint8_t> up; int uw = 0, uh = 0;
+            upscaleNNShifted(fallbackGray, fallbackW, fallbackH, 3, up, uw, uh);
+            FrameOptions o3 = scaleOptions;
+            o3.allowAngleFallback =
+                options.allowAngleFallback &&
+                (int64_t)uw * (int64_t)uh <= kMaxDerivedAnglePixels;
+            DepthGuard scaleGuard(t_scaleEnsembleDepth);
+            DepthGuard sharpGuard(t_sharpenDepth);
+            r3 = decodeFrame(up.data(), uw, uh, o3);
+        }
+        const bool ok2 = r2.decode.ok, ok3 = r3.decode.ok;
+        const auto strong = [](const FrameResult& r) {
+            return r.decode.score >= kFallbackScoreGate;
+        };
+        if (ok2 && ok3) {
+            // Two scales must agree.
+            if (r2.decode.digits == r3.decode.digits) result = std::move(r2);
+        } else if (ok2) {
+            // A single scale is accepted only with strong template evidence;
+            // otherwise over-upscaled print can pass the checksum by chance.
+            if (strong(r2)) result = std::move(r2);
+        } else if (ok3) {
+            if (strong(r3)) result = std::move(r3);
+        }
+    }
     return result;
 }
 

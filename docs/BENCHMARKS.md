@@ -12,8 +12,8 @@ checked instead of taken on trust.
   must-not-misread negatives, and **0 false reads across 3,430 clutter
   frames**.
 - **129–133/162 reads at ±6°/±10° tilt**, with 0 wrong reads.
-- **133/133 host-harness assertions green** (152/152 with the local fixture photos); native decode averages
-  **0.51 ms** per 1280×720 synthetic frame (Apple M2 Max, Oct 2026; was
+- **170/170 host-harness assertions green** (189/189 with the local fixture photos); native decode averages
+  **0.49 ms** per 1280×720 synthetic frame (Apple M2 Max, Nov 2026; was
   0.74 ms before the digit-template vectorisation).
 
 ## Comparison
@@ -38,7 +38,9 @@ codewords independently scanned for 15 tags. This SDK ran `MOD_10_10` with
 9-digit configuration. Measured 2026-10-31: this SDK at commit `b1a8fd1`
 (includes the digit-template vectorisation; the same-protocol run at
 `ed7d039` measured 5.55 ms / 4 ms / 14 ms), commercial and Vision rows as
-first measured.
+first measured. This comparison predates the still-path fallbacks: the fast
+path is unchanged, but the one miss in that run would now pay fallback
+latency; see [`MSI_PERFORMANCE.md`](MSI_PERFORMANCE.md).
 
 Timed region: this SDK's `scanBitmap` (native prepare + MSI decode), the
 commercial engine's `BitmapFrameSource` -> `BarcodeCapture` path, and Apple
@@ -61,12 +63,13 @@ MSI spec (not from the decoder's own tables), covers all four checksum
 policies and the 9-digit shelf format, sweeps blur/scale/rotation and
 clutter negatives, and exercises the native frame path.
 
-Latest run (2026-10-31, macOS 27.2, Apple M2 Max):
+Latest run (2026-11-22, macOS 27.2, Apple M2 Max):
 
 | Check | Result |
 |---|---|
-| Assertions | 133 pass, 0 fail (152 with the six local fixture photos) |
-| Bench: 1280×720 synthetic MSI | 742 µs mean, 756 µs worst (20 iterations) |
+| Assertions | 151 pass, 0 fail (170 with the six local fixture photos) |
+| Bench: 1280×720 synthetic MSI | 486 µs mean, 494 µs worst |
+| Bench: real shelf photo | 524 µs mean, 631 µs worst |
 | 1280×720 text-clutter negatives | 0 false positives (30 frames) |
 | Clutter sweep | 0 false reads (3,430 frames) |
 
@@ -109,9 +112,18 @@ known far-field wrong reads on 8-digit fragments. The production policies
 
 | Path | Measurement |
 |---|---|
-| Native MSI decode, host | 0.51 ms mean / 0.58 ms worst per 1280×720 synthetic frame |
-| Native MSI decode, real shelf photo | ~0.7–1 ms (host, README bench) |
+| Native MSI decode, host | 0.49 ms mean / 0.56 ms worst per 1280×720 synthetic frame |
+| Native MSI decode, real shelf photo | ~0.55 ms mean / 0.71 ms worst (host, harness bench) |
 | MSI still path, 116 real crops (Pixel 10a emulator, warmed) | 4.7 ms mean / 4 ms p50 / 12 ms p95 after the digit-template vectorisation (5.5 ms before, local private run) |
+| MSI still fallback stack, all-failure frame (host) | 412 ms mean / 596 ms p95 / 743 ms max |
+| MSI still fallback, 16 MP all-failure still (host) | 59 ms / 34 MB peak (4 MP heavy-fallback cap) |
+| MSI still fallback, 550×550 noise (host) | 299 ms / 7 MB peak |
+| MSI still fallback, 400×400 noise (ensemble, host) | 640 ms / 22 MB peak |
+| MSI still fallback, 1000×1000 noise (host) | 352 ms / 21 MB peak |
+| MSI still fallback, 1870×1870 (3.5 MP angle, host) | 740 ms / 68 MB peak |
+| MSI still fallback, 1871×1871 (over angle cap, host) | 150 ms / 31 MB peak |
+| MSI still fallback, 2048×1536 (3.1 MP, host) | 687 ms / 56 MB peak |
+| MSI still fallback, 2000×2000 (4 MP, host) | 156 ms / 35 MB peak |
 | 9-digit clutter frame, host | 9.3 ms mean / 31.6 ms p95 / 70.2 ms max |
 | On-device full chain, one-shot | ~15–60 ms typical (Pixel 6a / emulator) |
 
@@ -129,14 +141,32 @@ keeps the confirmation intact.
 
 ## Scope boundaries
 
-- **The commercial comparison is anonymized.** A licensed commercial barcode
-  SDK was run on the same 116 crops and device, but the repository contains
-  no commercial SDK dependency, license key or per-row comparison data.
-  The vendor name/version and raw rows stay private; only the aggregate
-  table and chart are published.
+- **The commercial comparison is anonymized and evaluation-only.** A licensed
+  commercial barcode SDK was run on finished builds over the same 116 crops
+  and device, but the repository contains no commercial SDK dependency,
+  license key or per-row comparison data. The vendor name/version and raw
+  rows stay private; only the aggregate table and chart are published. No
+  commercial SDK code, weights, model outputs, or per-read data are used in
+  the decoder, its tests, or training.
 - **The real-photo set is private.** A clean clone reproduces the synthetic
   and frame-path results, not the 110-photo table. The real-photo numbers
-  come from the local regression described in the research note.
+  come from the local regression described in the research note; the
+  accuracy table predates the still-path rotation/sharpening/multi-scale
+  fallbacks (the augmented-suite comparison is in
+  [`MSI_ANGLE_MODEL.md`](MSI_ANGLE_MODEL.md)).
+- **Fallback timing is host-only.** The rotation, sharpened and 2x/3x
+  retries are still-path only and run only after a miss. Host all-failure
+  negatives measure 412 ms mean / 596 ms p95; device latency and thermal
+  behavior are not yet measured. Live frames never run these retries. The
+  heavy stack is capped at a 4 MP source, so full-resolution 12–16 MP stills
+  use the normal orientation sweep only. The accuracy numbers use the exact
+  9-digit shelf configuration; default open-length stills get the angle
+  fallback only.
+- **Open-length defaults are not the accuracy gate.** The 0-wrong and
+  2,286-positive figures use the exact 9-digit shelf configuration. Default
+  open-length MOD10 stills get the direction-safe angle fallback but not the
+  sharpened/scale retries; pre-existing open-length negative behavior is
+  outside this table.
 - **Not a camera benchmark.** There are no fps, thermal, battery or
   time-to-first-scan measurements here.
 - **Apple Vision is a host baseline.** It was measured on macOS stills, not

@@ -12,16 +12,24 @@ data class ScannerConfig(
     /**
      * Max MSI orientations attempted per one-shot still: 1..4, tried
      * natively in the order upright, upside-down, 90, 270 on the one
-     * converted frame (no rotated copies), first read wins (confirmed
-     * against the opposite direction when that view is tried) — easy stills
-     * never pay for the rotations they don't try. ML Kit and zxing resolve
-     * rotation themselves and are unaffected. Applies to one-shot scans
-     * (`scanBitmap`/`scanFrame`). Live camera aim-box frames always try MSI
-     * upright and upside-down: sideways tags cannot fit the wide box (ML Kit
-     * and zxing still resolve rotation themselves).
+     * converted frame (no rotated copies), first read wins. One-shot stills
+     * always confirm the 0/180 pair, so the effective minimum is two
+     * sweeps; values above 2 add the sideways views. ML Kit and zxing
+     * resolve rotation themselves and are unaffected. Applies to one-shot
+     * scans (`scanBitmap`/`scanFrame`). Live camera aim-box frames always
+     * try MSI upright and upside-down: sideways tags cannot fit the wide box
+     * (ML Kit and zxing still resolve rotation themselves).
      */
     val maxOrientationsTried: Int,
-    /** Per-frame decode timeout; fusion returns best-so-far after this. */
+    /**
+     * Per-frame decode timeout; fusion returns best-so-far after this.
+     *
+     * Cooperative: it is checked between engines (and at engine suspension
+     * points), so a single blocking native MSI still decode runs to
+     * completion past the deadline. The still fallback stack is bounded by
+     * its own pixel caps; set [msiStillFallbacks] false to remove its
+     * worst-case cost entirely.
+     */
     val decodeTimeoutMillis: Long,
     /** Suppress identical results within this window (live mode dedup). */
     val duplicateSuppressionMillis: Long,
@@ -105,6 +113,29 @@ data class ScannerConfig(
      * applies to the emitted payload.
      */
     val msiSymbolLengths: IntRange? = null,
+    /**
+     * Run the still-only native fallbacks: the learned-angle rotation, the
+     * autocontrast+unsharp retry and the 2x/3x agreement ensemble. True
+     * (default) keeps still recall; false restores the plain orientation
+     * sweep (+ contrast stretch) latency profile. Live camera frames never
+     * run these stages (the still-only `stretchRetry` gates them), so this
+     * only affects `scanBitmap`/`scanFrame`.
+     */
+    val msiStillFallbacks: Boolean = true,
+    /**
+     * Live tilt rescue (default true). On a live MSI miss, the same aim-box
+     * crop is re-prepared without the camera contrast stretch, then a
+     * projection-estimated deskew sweep tries up to 14 bicubic
+     * rotate+decode pairs on a fixed ±2…±14° grid; the first
+     * reverse-confirmed read wins. Only the sweep is miss-only: hits and
+     * misses both pay the extra unstretched prepare on a 250 ms cadence, and
+     * the normal decode path itself is unchanged. Sweeps are capped at 1 MP
+     * and throttled to one per 250 ms (cooldown after the previous sweep);
+     * larger frames keep the normal live path. The still path is unaffected.
+     * Set false to keep the strict pre-fallback live profile (no second
+     * prepare and no sweep).
+     */
+    val msiLiveDeskew: Boolean = true,
 ) {
     init {
         require(enabledSymbologies.isNotEmpty()) { "At least one symbology must be enabled" }
@@ -172,6 +203,8 @@ data class ScannerConfig(
         private var msiMinDigits = 3
         private var msiSymbolLengths: IntRange? = null
         private var msiStripCheck = true
+        private var msiStillFallbacksEnabled = true
+        private var msiLiveDeskewEnabled = true
         private var msiOcrChecksum = false
         private var minConf = 0.5f
         private var zxingHarder: Boolean? = null
@@ -201,6 +234,10 @@ data class ScannerConfig(
         fun msiSymbolLengths(range: IntRange?) = apply { msiSymbolLengths = range }
         /** Emit full MSI codewords with checks (see [ScannerConfig.msiStripChecksum]). */
         fun msiStripChecksum(v: Boolean) = apply { msiStripCheck = v }
+        /** Run the still-only native fallback stack (see [ScannerConfig.msiStillFallbacks]). */
+        fun msiStillFallbacks(v: Boolean) = apply { msiStillFallbacksEnabled = v }
+        /** Disable/enable the live tilt rescue (see [ScannerConfig.msiLiveDeskew]). */
+        fun msiLiveDeskew(v: Boolean) = apply { msiLiveDeskewEnabled = v }
         /** Retired, no effect (see field). */
         fun msiOcrRequireChecksum(v: Boolean) = apply { msiOcrChecksum = v }
         fun minConfidence(v: Float) = apply { minConf = v }
@@ -234,6 +271,8 @@ data class ScannerConfig(
                 debugOcrFrameDump = ocrDump,
                 scanRegion = region,
                 msiSymbolLengths = msiSymbolLengths,
+                msiStillFallbacks = msiStillFallbacksEnabled,
+                msiLiveDeskew = msiLiveDeskewEnabled,
             )
         }
     }

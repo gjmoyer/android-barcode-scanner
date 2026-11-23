@@ -3,8 +3,10 @@ package com.barcodescanner.sdk.api
 import android.graphics.Bitmap
 import android.os.Looper
 import androidx.camera.core.SurfaceOrientedMeteringPointFactory
+import com.barcodescanner.sdk.camera.PreparedLiveFrame
 import com.barcodescanner.sdk.data.frame.LumaFrame
 import com.barcodescanner.sdk.data.frame.NativeFrame
+import com.barcodescanner.sdk.domain.decoder.DecodeOutcome
 import com.barcodescanner.sdk.di.ScannerContainer
 import com.barcodescanner.sdk.domain.model.DecodedBarcode
 import com.barcodescanner.sdk.domain.model.ScannerConfig
@@ -53,10 +55,14 @@ class DefaultBarcodeScannerTest {
         ),
     )
 
-    private fun scanner(suppressionMillis: Long): DefaultBarcodeScanner {
-        val config = ScannerConfig.Builder()
+    private fun scanner(
+        suppressionMillis: Long,
+        symbologies: Set<Symbology>? = null,
+    ): DefaultBarcodeScanner {
+        val builder = ScannerConfig.Builder()
             .duplicateSuppressionMillis(suppressionMillis)
-            .build()
+        if (symbologies != null) builder.only(*symbologies.toTypedArray())
+        val config = builder.build()
         return DefaultBarcodeScanner(
             ScannerContainer(RuntimeEnvironment.getApplication(), config),
             config,
@@ -168,7 +174,7 @@ class DefaultBarcodeScannerTest {
         // droppable; only one-shots throw. No engine touched the buffer.
         val scanner = scanner(suppressionMillis = 0)
         scanner.close()
-        assertTrue(scanner.handleLiveFrame(blankFrame()))
+        assertTrue(scanner.handleLiveFrame(PreparedLiveFrame(blankFrame(), null)))
     }
 
     @Test
@@ -179,7 +185,7 @@ class DefaultBarcodeScannerTest {
         val received = mutableListOf<ScanResult>()
         val job = launch(Dispatchers.Unconfined) { scanner.results.collect { received += it } }
         try {
-            scanner.handleLiveFrame(blankFrame())
+            scanner.handleLiveFrame(PreparedLiveFrame(blankFrame(), null))
             yield()
             assertEquals(emptyList<ScanResult>(), received)
             job.cancel()
@@ -221,7 +227,7 @@ class DefaultBarcodeScannerTest {
             val oldSession = scanner.currentCameraSession()
             scanner.stopCamera()
             // Skipped before any engine runs: the buffer stays reusable.
-            assertTrue(scanner.handleLiveFrame(blankFrame(), oldSession))
+            assertTrue(scanner.handleLiveFrame(PreparedLiveFrame(blankFrame(), null), oldSession))
         } finally {
             scanner.close()
         }
@@ -372,6 +378,81 @@ class DefaultBarcodeScannerTest {
             worker.join()
             shadowOf(Looper.getMainLooper()).idle()
             assertEquals(listOf(true), callbackOnMain)
+        } finally {
+            scanner.close()
+        }
+    }
+
+    @Test
+    fun liveFrame_miss_invokesDeskewOnlyWithCopy() = runBlocking {
+        val scanner = scanner(suppressionMillis = 0)
+        try {
+            var calls = 0
+            val prepared = PreparedLiveFrame(blankFrame(), blankFrame())
+            assertTrue(
+                scanner.handleLiveFrame(prepared, scanner.currentCameraSession()) {
+                    calls++
+                    DecodeOutcome.NotFound("fake deskew")
+                },
+            )
+            assertEquals(1, calls)
+
+            var nullCopyCalls = 0
+            scanner.handleLiveFrame(
+                PreparedLiveFrame(blankFrame(), null),
+                scanner.currentCameraSession(),
+            ) {
+                nullCopyCalls++
+                DecodeOutcome.NotFound("fake deskew")
+            }
+            assertEquals(0, nullCopyCalls)
+        } finally {
+            scanner.close()
+        }
+    }
+
+    @Test
+    fun liveFrame_msiDisabled_doesNotRunDeskew() = runBlocking {
+        val scanner = scanner(0, setOf(Symbology.QR_CODE))
+        try {
+            var calls = 0
+            scanner.handleLiveFrame(
+                PreparedLiveFrame(blankFrame(), blankFrame()),
+                scanner.currentCameraSession(),
+            ) {
+                calls++
+                DecodeOutcome.NotFound("fake deskew")
+            }
+            assertEquals(0, calls)
+        } finally {
+            scanner.close()
+        }
+    }
+
+    @Test
+    fun liveFrame_deskewSuccess_emitsAfterStabilityGate() = runBlocking {
+        val scanner = scanner(suppressionMillis = 0)
+        val received = mutableListOf<ScanResult>()
+        val job = launch(Dispatchers.Unconfined) { scanner.results.collect { received += it } }
+        try {
+            val prepared = PreparedLiveFrame(blankFrame(), blankFrame())
+            val hit = DecodeOutcome.Success(
+                listOf(
+                    DecodedBarcode(
+                        rawValue = "096961479",
+                        symbology = Symbology.MSI_PLESSEY,
+                        confidence = 1.0f,
+                        engineName = "MsiNative",
+                    ),
+                ),
+            )
+            repeat(2) {
+                scanner.handleLiveFrame(prepared, scanner.currentCameraSession()) { hit }
+            }
+            yield()
+            assertEquals(1, received.size)
+            assertEquals("096961479", (received.single() as ScanResult.Success).barcode.rawValue)
+            job.cancel()
         } finally {
             scanner.close()
         }

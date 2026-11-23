@@ -72,6 +72,13 @@ class MsiNativeDecoderGuardTest {
         assertTrue("expected NotFound, got $out", out is DecodeOutcome.NotFound)
     }
 
+    @Test
+    fun decodeDeskewLuma_withoutNativeLib_isNotFound() = runBlocking {
+        val decoder = MsiNativeDecoder(requireConsecutiveFrames = 1)
+        val out = decoder.decodeDeskewLuma(LumaFrame(NativeFrame.allocate(64, 32), 64, 32))
+        assertTrue("expected NotFound, got $out", out is DecodeOutcome.NotFound)
+    }
+
     // --- shared acceptance tail (both native entry points) ---------------
 
     private fun shelfDecoder(required: Int = 1) = MsiNativeDecoder(
@@ -146,6 +153,14 @@ class MsiNativeDecoderGuardTest {
         )
         // Unbounded by default.
         assertTrue(shelfDecoder().acceptNativeRead("0115783334|mod1010|3|0", false) is DecodeOutcome.Success)
+    }
+
+    @Test
+    fun liveDeskewDue_atElapsedRealtimeZero_isDue() {
+        // Fresh boot / Robolectric: the initial timestamp must not throttle
+        // the first live frame for 250 ms.
+        val decoder = MsiNativeDecoder(requireConsecutiveFrames = 1)
+        assertTrue(decoder.liveDeskewDue(now = 0L))
     }
 
     @Test

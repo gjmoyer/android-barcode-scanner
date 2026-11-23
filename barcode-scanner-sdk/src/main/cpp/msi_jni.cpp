@@ -63,14 +63,14 @@ Java_com_barcodescanner_sdk_data_frame_NativeFrame_nativePrepare(
 // MSI decode of a prepared upright luma buffer (direct, stride = width), read
 // in place. Returns "digits|policy|votes|relativeRotation" on success, null
 // on failure. maxOrientations / scanTopFraction / minDigits / maxDigits /
-// stretchRetry: see msi::FrameOptions (digit bounds count check digits;
-// 0 = open).
+// stretchRetry / stillFallbacks: see msi::FrameOptions (digit bounds count
+// check digits; 0 = open).
 JNIEXPORT jstring JNICALL
 Java_com_barcodescanner_sdk_data_msi_MsiNativeDecoder_nativeDecodeLuma(
     JNIEnv* env, jobject /*thiz*/,
     jobject gray, jint width, jint height, jint maxOrientations,
     jfloat scanTopFraction, jint requiredPolicy, jint minDigits, jint maxDigits,
-    jboolean stretchRetry) {
+    jboolean stretchRetry, jboolean stillFallbacks) {
 
     if (width <= 0 || height <= 0) return nullptr;
     const uint8_t* px =
@@ -84,6 +84,7 @@ Java_com_barcodescanner_sdk_data_msi_MsiNativeDecoder_nativeDecodeLuma(
     options.minDigits = minDigits;
     options.maxDigits = maxDigits;
     options.stretchRetry = stretchRetry == JNI_TRUE;
+    options.allowStillFallbacks = stillFallbacks == JNI_TRUE;
     // decodeFrame allocates (a full-resolution still needs a ~12 MB rotation
     // scratch); bad_alloc unwinding across JNI would abort the process, so a
     // failed allocation is reported as no read.
@@ -93,6 +94,38 @@ Java_com_barcodescanner_sdk_data_msi_MsiNativeDecoder_nativeDecodeLuma(
         if (!r.decode.ok) return nullptr;
         out = r.decode.digits + "|" + msi::policyName(r.decode.policy) + "|" +
               std::to_string(r.decode.votes) + "|" + std::to_string(r.relativeRotation);
+    } catch (const std::bad_alloc&) {
+        return nullptr;
+    }
+    return env->NewStringUTF(out.c_str());
+}
+
+// Live tilt rescue: decode an unstretched live crop with a projection-deskew
+// bicubic sweep. Same result format as nativeDecodeLuma. Only called after the
+// normal live decode misses (config-gated in Kotlin).
+JNIEXPORT jstring JNICALL
+Java_com_barcodescanner_sdk_data_msi_MsiNativeDecoder_nativeDecodeDeskew(
+    JNIEnv* env, jobject /*thiz*/,
+    jobject gray, jint width, jint height, jint requiredPolicy,
+    jint minDigits, jint maxDigits) {
+
+    if (width <= 0 || height <= 0) return nullptr;
+    const uint8_t* px =
+        msi_jni::directBytes(env, gray, static_cast<int64_t>(width) * static_cast<int64_t>(height));
+    if (px == nullptr) return nullptr;
+    msi::DecodeOptions options;
+    options.required = toRequiredPolicy(requiredPolicy);
+    options.scanTopFraction = 0.0f;
+    options.minDigits = minDigits;
+    options.maxDigits = maxDigits;
+    std::string out;
+    try {
+        int relativeRotation = 0;
+        const msi::DecodeResult r =
+            msi::decodeDeskew(px, width, height, options, &relativeRotation);
+        if (!r.ok) return nullptr;
+        out = r.digits + "|" + msi::policyName(r.policy) + "|" +
+              std::to_string(r.votes) + "|" + std::to_string(relativeRotation);
     } catch (const std::bad_alloc&) {
         return nullptr;
     }

@@ -8,6 +8,7 @@ import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import com.barcodescanner.sdk.camera.CameraScanManager
+import com.barcodescanner.sdk.camera.PreparedLiveFrame
 import com.barcodescanner.sdk.data.frame.LumaFrame
 import com.barcodescanner.sdk.data.frame.NativeFrame
 import com.barcodescanner.sdk.data.msi.MsiNativeDecoder
@@ -186,7 +187,8 @@ internal class DefaultBarcodeScanner(
                 context = container.app,
                 config = config,
                 scope = scope,
-                onFrame = { frame -> handleLiveFrame(frame, session) },
+                onFrame = { prepared -> handleLiveFrame(prepared, session) },
+                liveDeskewDue = { container.msiDecoder.liveDeskewDue() },
                 onError = { t -> reportCameraFailure(session, t) },
                 onStatus = { status -> publishCameraStatus(session, status) },
                 onTorch = { enabled -> publishForSession(session) { _torchEnabled.value = enabled } },
@@ -287,9 +289,13 @@ internal class DefaultBarcodeScanner(
     /**
      * Live-camera frame body; internal for tests. Decodes the one prepared
      * aim-box frame through [ScannerContainer.lumaFusion] — engines read
-     * [frame] in place; nothing here touches pixels. Returns true when
-     * [LumaFrame.buffer] may be rewritten (the camera pool's contract): false
-     * after a timed-out decode, whose ML Kit task may still be reading it.
+     * [PreparedLiveFrame.frame] in place; nothing here touches pixels. When
+     * the live tilt rescue is enabled and the normal decode returns NotFound,
+     * the unstretched [PreparedLiveFrame.deskew] copy is handed to MSI's
+     * projection-deskew sweep. Returns true when the production buffer may be
+     * rewritten (the camera pool's contract): false after a timed-out decode,
+     * whose ML Kit task may still be reading it. The deskew buffer is always
+     * safe to reuse once this returns.
      *
      * Never throws for post-close or decode-internal failures: stop()/close()
      * can win the race against an already-dispatched analyzer callback, and
@@ -299,14 +305,44 @@ internal class DefaultBarcodeScanner(
      * throw to the caller as documented. A frame of a stopped [session] is
      * skipped, and its decode can never publish (see [acceptLiveSuccess]).
      */
-    internal suspend fun handleLiveFrame(frame: LumaFrame, session: Long = currentCameraSession()): Boolean {
+    internal suspend fun handleLiveFrame(
+        prepared: PreparedLiveFrame,
+        session: Long = currentCameraSession(),
+        /**
+         * Test seam for the live deskew trigger; production uses the MSI
+         * decoder. The default is evaluated per call.
+         */
+        deskewDecode: suspend (LumaFrame) -> DecodeOutcome = {
+            container.msiDecoder.decodeDeskewLuma(it)
+        },
+    ): Boolean {
         if (closed.get() || session != currentCameraSession()) return true
         var reusable = false
         try {
-            val live = container.lumaFusion.decode(frame)
+            val live = container.lumaFusion.decode(prepared.frame)
             reusable = live.bufferReusable
+            var outcome = live.outcome
+            // Live tilt rescue: only after every engine missed, only on a
+            // frame whose buffers are settled, and only when enabled. The
+            // MSI-enabled check is defense-in-depth: CameraScanManager only
+            // prepares the deskew copy when MSI is enabled, but this keeps the
+            // invariant local for test frames or future callers.
+            if (outcome is DecodeOutcome.NotFound && reusable &&
+                config.msiLiveDeskew && prepared.deskew != null &&
+                Symbology.MSI_PLESSEY in config.enabledSymbologies &&
+                session == currentCameraSession()
+            ) {
+                val t0 = SystemClock.elapsedRealtime()
+                val deskewed = deskewDecode(prepared.deskew)
+                android.util.Log.d(
+                    TAG,
+                    "live deskew ${if (deskewed is DecodeOutcome.Success) "hit" else "miss"} " +
+                        "ms=${SystemClock.elapsedRealtime() - t0}",
+                )
+                if (deskewed is DecodeOutcome.Success) outcome = deskewed
+            }
             // Upright by construction (native rotate): no rotated candidates.
-            val result = live.outcome.toScanResult(SystemClock.elapsedRealtime(), rotatedCandidate = false)
+            val result = outcome.toScanResult(SystemClock.elapsedRealtime(), rotatedCandidate = false)
             if (result is ScanResult.Success) acceptLiveSuccess(session, result)
         } catch (e: CancellationException) {
             throw e
