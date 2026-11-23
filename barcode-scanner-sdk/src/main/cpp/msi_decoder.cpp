@@ -1594,42 +1594,120 @@ void upsampleProfile2x(std::vector<float>& pr, int head, int n) {
 } // namespace
 
 #if MSI_ANGLE_MODEL
-// Rotate an 8-bit image about its centre into an expanded white canvas.
-static void rotateGrayExpanded(const uint8_t* src, int W, int H, float deg,
-                        std::vector<uint8_t>& out, int& ow, int& oh) {
-    // Match PIL Image.rotate(deg, expand=True) reverse-affine geometry.
+// Reverse-affine geometry shared by the angle fallback and the deskew sweep
+// (both rotate into an expanded white canvas, matching PIL
+// Image.rotate(deg, expand=True)). Map destination (x, y) back to source with
+// sx = m0*x + m1*y + m2, sy = m3*x + m4*y + m5. Keeping the geometry in one
+// place lets the decoded bounding box be mapped back to the source frame.
+struct ExpandedRotation {
+    int srcW = 0, srcH = 0;
+    int outW = 0, outH = 0;
+    float m0 = 1, m1 = 0, m2 = 0, m3 = 0, m4 = 1, m5 = 0;
+};
+
+static ExpandedRotation expandedRotation(int W, int H, float deg) {
+    ExpandedRotation g;
+    g.srcW = W;
+    g.srcH = H;
     const float a = -deg * kDegToRad;
-    const float m0 = cosf(a), m1 = sinf(a), m3 = -sinf(a), m4 = cosf(a);
+    g.m0 = cosf(a);
+    g.m1 = sinf(a);
+    g.m3 = -sinf(a);
+    g.m4 = cosf(a);
     const float cx = 0.5f * W, cy = 0.5f * H;
-    float m2 = -cx * m0 - cy * m1 + cx;
-    float m5 = -cx * m3 - cy * m4 + cy;
+    float m2 = -cx * g.m0 - cy * g.m1 + cx;
+    float m5 = -cx * g.m3 - cy * g.m4 + cy;
     float minx = 1e30f, miny = 1e30f, maxx = -1e30f, maxy = -1e30f;
     for (int k = 0; k < 4; ++k) {
         const float x = (k == 1 || k == 2) ? (float)W : 0.0f;
         const float y = (k >= 2) ? (float)H : 0.0f;
-        const float u = m0 * x + m1 * y + m2;
-        const float v = m3 * x + m4 * y + m5;
+        const float u = g.m0 * x + g.m1 * y + m2;
+        const float v = g.m3 * x + g.m4 * y + m5;
         minx = std::min(minx, u); maxx = std::max(maxx, u);
         miny = std::min(miny, v); maxy = std::max(maxy, v);
     }
-    ow = (int)ceilf(maxx) - (int)floorf(minx);
-    oh = (int)ceilf(maxy) - (int)floorf(miny);
-    if (ow <= 0 || oh <= 0 || (int64_t)ow * (int64_t)oh > (int64_t)64000000) {
-        out.clear(); ow = 0; oh = 0; return;
+    g.outW = (int)ceilf(maxx) - (int)floorf(minx);
+    g.outH = (int)ceilf(maxy) - (int)floorf(miny);
+    if (g.outW <= 0 || g.outH <= 0 ||
+        (int64_t)g.outW * (int64_t)g.outH > (int64_t)64000000) {
+        g.outW = 0;
+        g.outH = 0;
+        return g;
     }
-    const float tx = -(ow - W) * 0.5f, ty = -(oh - H) * 0.5f;
-    m2 = m0 * tx + m1 * ty + m2;
-    m5 = m3 * tx + m4 * ty + m5;
+    const float tx = -(g.outW - W) * 0.5f, ty = -(g.outH - H) * 0.5f;
+    g.m2 = g.m0 * tx + g.m1 * ty + m2;
+    g.m5 = g.m3 * tx + g.m4 * ty + m5;
+    return g;
+}
+
+// Rotate an 8-bit image about its centre into an expanded white canvas.
+static void rotateGrayExpanded(const uint8_t* src, int W, int H, float deg,
+                        std::vector<uint8_t>& out, int& ow, int& oh) {
+    const ExpandedRotation g = expandedRotation(W, H, deg);
+    ow = g.outW;
+    oh = g.outH;
+    if (ow <= 0 || oh <= 0) {
+        out.clear();
+        return;
+    }
     out.assign((size_t)ow * (size_t)oh, 255);
     for (int y = 0; y < oh; ++y) {
         for (int x = 0; x < ow; ++x) {
-            const float sx = m0 * x + m1 * y + m2;
-            const float sy = m3 * x + m4 * y + m5;
+            const float sx = g.m0 * x + g.m1 * y + g.m2;
+            const float sy = g.m3 * x + g.m4 * y + g.m5;
             if (sx < 0 || sy < 0 || sx >= W || sy >= H) continue;
             const int xi = (int)sx, yi = (int)sy;
             out[(size_t)y * ow + x] = src[(size_t)yi * W + xi];
         }
     }
+}
+
+// Map a result's box from an expanded rotated view back to the source frame.
+// [upscale] reverses the NN 2x stage (box still in upscaled coordinates);
+// [reverse] says the box came from the 180-degree view decoded inside
+// confirmReverseView. Unavailable/invalid geometry yields a zero box rather
+// than a wrong one.
+static DecodeResult withExpandedBox(DecodeResult r, const ExpandedRotation& g,
+                                    int upscale, bool reverse) {
+    if (!r.ok || g.outW <= 0 || g.outH <= 0 || upscale < 1) return r;
+    const float inv = 1.0f / (float)upscale;
+    float x0 = r.boxX0 * inv, y0 = r.boxY0 * inv;
+    float x1 = r.boxX1 * inv, y1 = r.boxY1 * inv;
+    if (x1 < x0) std::swap(x0, x1);
+    if (y1 < y0) std::swap(y0, y1);
+    if (reverse) {
+        const float nx0 = (float)g.outW - x1;
+        const float nx1 = (float)g.outW - x0;
+        x0 = nx0;
+        x1 = nx1;
+        const float ny0 = (float)g.outH - y1;
+        const float ny1 = (float)g.outH - y0;
+        y0 = ny0;
+        y1 = ny1;
+    }
+    const float xs[4] = {x0, x1, x0, x1};
+    const float ys[4] = {y0, y0, y1, y1};
+    float minx = 1e30f, miny = 1e30f, maxx = -1e30f, maxy = -1e30f;
+    for (int i = 0; i < 4; ++i) {
+        const float sx = g.m0 * xs[i] + g.m1 * ys[i] + g.m2;
+        const float sy = g.m3 * xs[i] + g.m4 * ys[i] + g.m5;
+        minx = std::min(minx, sx);
+        maxx = std::max(maxx, sx);
+        miny = std::min(miny, sy);
+        maxy = std::max(maxy, sy);
+    }
+    const int bx0 = (int)floorf(minx);
+    const int by0 = (int)floorf(miny);
+    const int bx1 = (int)ceilf(maxx);
+    const int by1 = (int)ceilf(maxy);
+    r.boxX0 = std::max(0, std::min(g.srcW, bx0));
+    r.boxY0 = std::max(0, std::min(g.srcH, by0));
+    r.boxX1 = std::max(r.boxX0, std::min(g.srcW, bx1));
+    r.boxY1 = std::max(r.boxY0, std::min(g.srcH, by1));
+    if (r.boxX1 <= r.boxX0 || r.boxY1 <= r.boxY0) {
+        r.boxX0 = r.boxY0 = r.boxX1 = r.boxY1 = 0;
+    }
+    return r;
 }
 
 
@@ -1773,6 +1851,8 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
             res.votes = v.votes;
             res.leadingQuiet = v.guard.lead;
             res.score = v.avgScore;
+            res.boxX0 = roi.x0; res.boxY0 = roi.y0;
+            res.boxX1 = roi.x1; res.boxY1 = roi.y1;
             if (g_debug) printf("[dbg] ROI %d succeeded: %s (avg score %.3f)\n",
                                 ri, res.digits.c_str(), v.avgScore);
             return res;
@@ -1811,6 +1891,8 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
             res.votes = v.votes;
             res.leadingQuiet = v.guard.lead;
             res.score = v.avgScore;
+            res.boxX0 = rois[si].x0; res.boxY0 = rois[si].y0;
+            res.boxX1 = rois[si].x1; res.boxY1 = rois[si].y1;
             if (g_debug) printf("[dbg] 1D 2x retry succeeded: %s\n", res.digits.c_str());
             return res;
         }
@@ -1875,6 +1957,8 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
                     res.votes = v.votes;
                     res.leadingQuiet = v.guard.lead;
                     res.score = v.avgScore;
+                    res.boxX0 = sroi.x0; res.boxY0 = sroi.y0;
+                    res.boxX1 = sroi.x1; res.boxY1 = sroi.y1;
                     if (g_debug) printf("[dbg] skew retry succeeded: %s (%.1f deg, pass %d)\n",
                                         res.digits.c_str(), deg, pass);
                     return res;
@@ -1889,8 +1973,8 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
     // retry: ahead of it, a first ungated grid cost two +6 degree shelf crops
     // at open lengths that the skew retry reads (0475-1 read as its 8-digit
     // prefix; 0465-1 lost to a chance string).
-    for (const auto& scan : failedScans) {
-        const RoiVote v = voteScanlines(scan, /*grid=*/true);
+    for (size_t gi = 0; gi < failedScans.size(); ++gi) {
+        const RoiVote v = voteScanlines(failedScans[gi], /*grid=*/true);
         if (v.votes > 0) {
             res.ok = true;
             res.digits = v.best.first;
@@ -1898,6 +1982,8 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
             res.votes = v.votes;
             res.leadingQuiet = v.guard.lead;
             res.score = v.avgScore;
+            res.boxX0 = rois[gi].x0; res.boxY0 = rois[gi].y0;
+            res.boxX1 = rois[gi].x1; res.boxY1 = rois[gi].y1;
             if (g_debug) printf("[dbg] grid retry succeeded: %s\n", res.digits.c_str());
             return res;
         }
@@ -1958,7 +2044,12 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
             memcpy(dst1, expanded.data(), (size_t)W2);
         }
         DecodeResult r2 = decodeImpl(up.data(), W2, H2, /*allowUpscale=*/false, scanTopFraction);
-        if (r2.ok) return r2;
+        if (r2.ok) {
+            // Map 2x bounding box back to 1x coordinates.
+            r2.boxX0 /= 2; r2.boxY0 /= 2;
+            r2.boxX1 /= 2; r2.boxY1 /= 2;
+            return r2;
+        }
     }
     res.sawCandidate = sawCandidate;
     res.minModule = minModuleSeen;
@@ -2069,14 +2160,17 @@ DecodeResult decodeAngleFallback(const uint8_t* gray, int width, int height,
     std::vector<uint8_t> up2;
     for (float off : kOffsets) {
         int rw = 0, rh = 0;
-        rotateGrayExpanded(gray, width, height, -(pred + off), rot, rw, rh);
+        const float angle = -(pred + off);
+        rotateGrayExpanded(gray, width, height, angle, rot, rw, rh);
         if (rw <= 0 || rh <= 0) continue;
+        const ExpandedRotation g = expandedRotation(width, height, angle);
+        if (g.outW != rw || g.outH != rh) continue;
         int rel = 0;
         const DecodeResult r = decodeViewSafe(rot.data(), rw, rh, options,
                                              options.allowUpscale, &rel);
         if (r.ok) {
             if (relativeRotation != nullptr) *relativeRotation = rel;
-            return r;
+            return withExpandedBox(r, g, /*upscale=*/1, /*reverse=*/rel == 180);
         }
         stretched = rot;
         // A too-flat histogram leaves `stretched` byte-identical to `rot`;
@@ -2086,7 +2180,7 @@ DecodeResult decodeAngleFallback(const uint8_t* gray, int width, int height,
                                                    options.allowUpscale, &rel);
             if (rs.ok) {
                 if (relativeRotation != nullptr) *relativeRotation = rel;
-                return rs;
+                return withExpandedBox(rs, g, /*upscale=*/1, /*reverse=*/rel == 180);
             }
         }
         if (options.allowUpscale &&
@@ -2102,13 +2196,13 @@ DecodeResult decodeAngleFallback(const uint8_t* gray, int width, int height,
             const DecodeResult ru = decodeViewSafe(up2.data(), W2, H2, options, false, &rel);
             if (ru.ok) {
                 if (relativeRotation != nullptr) *relativeRotation = rel;
-                return ru;
+                return withExpandedBox(ru, g, /*upscale=*/2, /*reverse=*/rel == 180);
             }
             if (stretchGray(up2)) {
                 const DecodeResult rus = decodeViewSafe(up2.data(), W2, H2, options, false, &rel);
                 if (rus.ok) {
                     if (relativeRotation != nullptr) *relativeRotation = rel;
-                    return rus;
+                    return withExpandedBox(rus, g, /*upscale=*/2, /*reverse=*/rel == 180);
                 }
             }
         }
@@ -2124,28 +2218,14 @@ DecodeResult decodeAngleFallback(const uint8_t* gray, int width, int height,
 // label (larger modules, cleaner capture).
 static void rotateGrayBicubic(const uint8_t* src, int W, int H, float deg,
                               std::vector<uint8_t>& out, int& ow, int& oh) {
-    const float a = -deg * kDegToRad;
-    const float m0 = cosf(a), m1 = sinf(a), m3 = -sinf(a), m4 = cosf(a);
-    const float cx = 0.5f * W, cy = 0.5f * H;
-    float m2 = -cx * m0 - cy * m1 + cx;
-    float m5 = -cx * m3 - cy * m4 + cy;
-    float minx = 1e30f, miny = 1e30f, maxx = -1e30f, maxy = -1e30f;
-    for (int k = 0; k < 4; ++k) {
-        const float x = (k == 1 || k == 2) ? (float)W : 0.0f;
-        const float y = (k >= 2) ? (float)H : 0.0f;
-        const float u = m0 * x + m1 * y + m2;
-        const float v = m3 * x + m4 * y + m5;
-        minx = std::min(minx, u); maxx = std::max(maxx, u);
-        miny = std::min(miny, v); maxy = std::max(maxy, v);
-    }
-    ow = (int)ceilf(maxx) - (int)floorf(minx);
-    oh = (int)ceilf(maxy) - (int)floorf(miny);
+    const ExpandedRotation g = expandedRotation(W, H, deg);
+    ow = g.outW;
+    oh = g.outH;
     if (ow <= 0 || oh <= 0 || (int64_t)ow * (int64_t)oh > (int64_t)16000000) {
         out.clear(); ow = 0; oh = 0; return;
     }
-    const float tx = -(ow - W) * 0.5f, ty = -(oh - H) * 0.5f;
-    m2 = m0 * tx + m1 * ty + m2;
-    m5 = m3 * tx + m4 * ty + m5;
+    const float m0 = g.m0, m1 = g.m1, m3 = g.m3, m4 = g.m4;
+    const float m2 = g.m2, m5 = g.m5;
     out.assign((size_t)ow * (size_t)oh, 255);
     const auto wt = [](float x) {
         const float A = -0.5f;
@@ -2207,13 +2287,20 @@ DecodeResult decodeDeskew(const uint8_t* gray, int width, int height,
         int rw = 0, rh = 0;
         rotateGrayBicubic(gray, width, height, angle, rot, rw, rh);
         if (rw <= 0 || rh <= 0) continue;
+        const ExpandedRotation g = expandedRotation(width, height, angle);
+        if (g.outW != rw || g.outH != rh) continue;
+        int rel = 0;
         const DecodeResult r = decodeScoped(rot.data(), rw, rh, options,
                                             options.allowUpscale);
         const DecodeResult confirmed = confirmReverseView(
-            rot.data(), rw, rh, options, options.allowUpscale, r, relativeRotation);
+            rot.data(), rw, rh, options, options.allowUpscale, r, &rel);
         if (g_debug) printf("[deskew] angle %.1f ok=%d score=%.2f votes=%d\n",
                             angle, confirmed.ok, confirmed.score, confirmed.votes);
-        if (confirmed.ok) return confirmed;
+        if (confirmed.ok) {
+            if (relativeRotation != nullptr) *relativeRotation = rel;
+            return withExpandedBox(confirmed, g, /*upscale=*/1,
+                                   /*reverse=*/rel == 180);
+        }
     }
     return DecodeResult{};
 }

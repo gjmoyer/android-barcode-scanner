@@ -57,6 +57,12 @@ emulator image and local fixture photos.
   `MsiNativeDecoder.nativePolicyCode`). The JNI codes are pinned by
   `MsiNativeDecoderGuardTest`; change both sides together. Kotlin still
   re-validates under the policy — keep both layers.
+- `DecodeResult.boxX0..Y1` is the decoded symbol's box in the caller's frame
+  coordinates. `decodeFrame` maps it back through the sensor/relative
+  quarter-turn; the angle/deskew fallbacks map their expanded-canvas box back
+  to their source, and the 2x/3x legs undo their scale. The JNI result format
+  is `digits|policy|votes|relativeRotation|x0|y0|x1|y1`; a missing/invalid box
+  (zeros or unparseable fields) must never reject a verified read.
 - `ScannerConfig.msiSymbolLengths` (codeword length, checks included,
   policy-independent; grocery shelf tags = 9) follows the same path:
   `DecodeOptions::minDigits/maxDigits` skip foreign lengths in

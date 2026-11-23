@@ -25,6 +25,16 @@ msi::ChecksumPolicy toRequiredPolicy(jint code) {
     }
 }
 
+// "digits|policy|votes|relativeRotation|x0|y0|x1|y1". The box is in the
+// decoded frame's pixel coordinates (more precisely: the buffer handed to the
+// native call), half-open and {0,0,0,0} when a fallback could not map it.
+std::string formatResult(const msi::DecodeResult& r, int relativeRotation) {
+    return r.digits + "|" + msi::policyName(r.policy) + "|" +
+           std::to_string(r.votes) + "|" + std::to_string(relativeRotation) + "|" +
+           std::to_string(r.boxX0) + "|" + std::to_string(r.boxY0) + "|" +
+           std::to_string(r.boxX1) + "|" + std::to_string(r.boxY1);
+}
+
 } // namespace
 
 extern "C" {
@@ -61,10 +71,10 @@ Java_com_barcodescanner_sdk_data_frame_NativeFrame_nativePrepare(
 }
 
 // MSI decode of a prepared upright luma buffer (direct, stride = width), read
-// in place. Returns "digits|policy|votes|relativeRotation" on success, null
-// on failure. maxOrientations / scanTopFraction / minDigits / maxDigits /
-// stretchRetry / stillFallbacks: see msi::FrameOptions (digit bounds count
-// check digits; 0 = open).
+// in place. Returns "digits|policy|votes|relativeRotation|x0|y0|x1|y1" on
+// success, null on failure. maxOrientations / scanTopFraction / minDigits /
+// maxDigits / stretchRetry / stillFallbacks: see msi::FrameOptions (digit
+// bounds count check digits; 0 = open).
 JNIEXPORT jstring JNICALL
 Java_com_barcodescanner_sdk_data_msi_MsiNativeDecoder_nativeDecodeLuma(
     JNIEnv* env, jobject /*thiz*/,
@@ -88,21 +98,19 @@ Java_com_barcodescanner_sdk_data_msi_MsiNativeDecoder_nativeDecodeLuma(
     // decodeFrame allocates (a full-resolution still needs a ~12 MB rotation
     // scratch); bad_alloc unwinding across JNI would abort the process, so a
     // failed allocation is reported as no read.
-    std::string out;
     try {
         const msi::FrameResult r = msi::decodeFrame(px, width, height, options);
         if (!r.decode.ok) return nullptr;
-        out = r.decode.digits + "|" + msi::policyName(r.decode.policy) + "|" +
-              std::to_string(r.decode.votes) + "|" + std::to_string(r.relativeRotation);
+        const std::string out = formatResult(r.decode, r.relativeRotation);
+        return env->NewStringUTF(out.c_str());
     } catch (const std::bad_alloc&) {
         return nullptr;
     }
-    return env->NewStringUTF(out.c_str());
 }
 
 // Live tilt rescue: decode an unstretched live crop with a projection-deskew
-// bicubic sweep. Same result format as nativeDecodeLuma. Only called after the
-// normal live decode misses (config-gated in Kotlin).
+// bicubic sweep. Same result format as nativeDecodeLuma (including the box).
+// Only called after the normal live decode misses (config-gated in Kotlin).
 JNIEXPORT jstring JNICALL
 Java_com_barcodescanner_sdk_data_msi_MsiNativeDecoder_nativeDecodeDeskew(
     JNIEnv* env, jobject /*thiz*/,
@@ -118,18 +126,16 @@ Java_com_barcodescanner_sdk_data_msi_MsiNativeDecoder_nativeDecodeDeskew(
     options.scanTopFraction = 0.0f;
     options.minDigits = minDigits;
     options.maxDigits = maxDigits;
-    std::string out;
     try {
         int relativeRotation = 0;
         const msi::DecodeResult r =
             msi::decodeDeskew(px, width, height, options, &relativeRotation);
         if (!r.ok) return nullptr;
-        out = r.digits + "|" + msi::policyName(r.policy) + "|" +
-              std::to_string(r.votes) + "|" + std::to_string(relativeRotation);
+        const std::string out = formatResult(r, relativeRotation);
+        return env->NewStringUTF(out.c_str());
     } catch (const std::bad_alloc&) {
         return nullptr;
     }
-    return env->NewStringUTF(out.c_str());
 }
 
 } // extern "C"

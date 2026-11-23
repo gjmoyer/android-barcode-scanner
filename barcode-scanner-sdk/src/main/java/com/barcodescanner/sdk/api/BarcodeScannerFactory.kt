@@ -137,10 +137,20 @@ internal class DefaultBarcodeScanner(
         // The buffer is per-scan (never pooled), so a timed-out engine still
         // reading it is harmless: bufferReusable does not matter here.
         return container.lumaFusion.decode(still).outcome
-            .toScanResult(frame.timestampMillis, frame.isRotatedCandidate)
+            .toScanResult(
+                frame.timestampMillis,
+                frame.isRotatedCandidate,
+                frameWidth = still.width,
+                frameHeight = still.height,
+            )
     }
 
-    private fun DecodeOutcome.toScanResult(timestampMillis: Long, rotatedCandidate: Boolean): ScanResult =
+    private fun DecodeOutcome.toScanResult(
+        timestampMillis: Long,
+        rotatedCandidate: Boolean,
+        frameWidth: Int = 0,
+        frameHeight: Int = 0,
+    ): ScanResult =
         when (val outcome = this) {
             is DecodeOutcome.Success -> {
                 val best = outcome.barcodes.maxBy { it.confidence }
@@ -148,6 +158,8 @@ internal class DefaultBarcodeScanner(
                     barcode = best,
                     allCandidates = outcome.barcodes,
                     fromRotatedFrame = best.isUpsideDown || rotatedCandidate,
+                    frameWidth = frameWidth,
+                    frameHeight = frameHeight,
                 )
             }
             is DecodeOutcome.NotFound -> ScanResult.NotFound(timestampMillis)
@@ -342,7 +354,12 @@ internal class DefaultBarcodeScanner(
                 if (deskewed is DecodeOutcome.Success) outcome = deskewed
             }
             // Upright by construction (native rotate): no rotated candidates.
-            val result = outcome.toScanResult(SystemClock.elapsedRealtime(), rotatedCandidate = false)
+            val result = outcome.toScanResult(
+                SystemClock.elapsedRealtime(),
+                rotatedCandidate = false,
+                frameWidth = prepared.frame.width,
+                frameHeight = prepared.frame.height,
+            )
             if (result is ScanResult.Success) acceptLiveSuccess(session, result)
         } catch (e: CancellationException) {
             throw e

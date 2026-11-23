@@ -24,7 +24,14 @@ public class JniSmoke {
         ByteBuffer dst = ByteBuffer.allocateDirect(ow * oh * 3 / 2);
         check("prepare ok (stride, unpadded last row, rot 90)", nf.nativePrepare(plane, SW, SH, stride, L, T0, R, B, 90, true, dst));
         String r = md.nativeDecodeLuma(dst, ow, oh, 1, 0f, 0, 0, 0, false, true);
-        check("decodeLuma -> 12345674|mod10|v|0 (got " + r + ")", r != null && r.startsWith("12345674|mod10|") && r.endsWith("|0"));
+        String[] rf = r == null ? new String[0] : r.split("\\|", -1);
+        check("decodeLuma -> 12345674|mod10|v|0|x0|y0|x1|y1 (got " + r + ")",
+              r != null && r.startsWith("12345674|mod10|") && rf.length == 8 && rf[3].equals("0"));
+        check("decodeLuma reports a non-empty box inside the frame",
+              rf.length == 8 && Integer.parseInt(rf[4]) >= 0 && Integer.parseInt(rf[5]) >= 0 &&
+              Integer.parseInt(rf[6]) > Integer.parseInt(rf[4]) &&
+              Integer.parseInt(rf[7]) > Integer.parseInt(rf[5]) &&
+              Integer.parseInt(rf[6]) <= ow && Integer.parseInt(rf[7]) <= oh);
         check("decodeLuma MOD1010 required -> null", md.nativeDecodeLuma(dst, ow, oh, 1, 0f, 2, 0, 0, false, true) == null);
         // Symbol-length bounds (checks included) reach native: 8-digit symbol.
         check("decodeLuma lengths 8..8 -> read", r != null && r.equals(md.nativeDecodeLuma(dst, ow, oh, 1, 0f, 0, 8, 8, false, true)));
@@ -47,7 +54,9 @@ public class JniSmoke {
         check("prepare rot 270 (upside-down view)", nf.nativePrepare(plane, SW, SH, stride, L, T0, R, B, 270, true, flip));
         check("upside-down, 1 orientation -> null", md.nativeDecodeLuma(flip, ow, oh, 1, 0f, 0, 0, 0, false, true) == null);
         String f = md.nativeDecodeLuma(flip, ow, oh, 2, 0f, 0, 0, 0, false, true);
-        check("upside-down, 2 orientations -> relRot 180 (got " + f + ")", f != null && f.startsWith("12345674|") && f.endsWith("|180"));
+        String[] ff = f == null ? new String[0] : f.split("\\|", -1);
+        check("upside-down, 2 orientations -> relRot 180 (got " + f + ")",
+              f != null && f.startsWith("12345674|") && ff.length == 8 && ff[3].equals("180"));
         System.out.println(fails == 0 ? "JNI OK" : "JNI FAILURES=" + fails); System.exit(fails);
     }
 }

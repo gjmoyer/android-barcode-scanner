@@ -248,6 +248,71 @@ int normalizeRotation(int degrees) {
     return r % 90 == 0 ? r : -1;
 }
 
+// Maps a decoded box from a quarter-turn view back to the source buffer.
+// `clockwiseDegrees` is the rotation that produced the view from the source
+// (the same value passed to rotateInto below), so this is its exact inverse.
+// Zeroes the box when it has no usable geometry rather than reporting a
+// rectangle in the wrong coordinate space.
+void mapViewBoxToSourceInPlace(DecodeResult& r, int clockwiseDegrees,
+                               int srcW, int srcH) {
+    if (!r.ok || srcW <= 0 || srcH <= 0) return;
+    const int vx0 = r.boxX0, vy0 = r.boxY0;
+    const int vx1 = r.boxX1, vy1 = r.boxY1;
+    if (vx1 <= vx0 || vy1 <= vy0) {
+        r.boxX0 = r.boxY0 = r.boxX1 = r.boxY1 = 0;
+        return;
+    }
+    int x0 = vx0, y0 = vy0, x1 = vx1, y1 = vy1;
+    switch (normalizeRotation(clockwiseDegrees)) {
+        case 90:
+            // View is source rotated 90 CW: source x = view y,
+            // source y = srcH - view x.
+            x0 = vy0;
+            x1 = vy1;
+            y0 = srcH - vx1;
+            y1 = srcH - vx0;
+            break;
+        case 180:
+            x0 = srcW - vx1;
+            x1 = srcW - vx0;
+            y0 = srcH - vy1;
+            y1 = srcH - vy0;
+            break;
+        case 270:
+            // View is source rotated 270 CW: source x = srcW - view y,
+            // source y = view x.
+            x0 = srcW - vy1;
+            x1 = srcW - vy0;
+            y0 = vx0;
+            y1 = vx1;
+            break;
+        default:
+            break;
+    }
+    r.boxX0 = std::max(0, std::min(srcW, x0));
+    r.boxY0 = std::max(0, std::min(srcH, y0));
+    r.boxX1 = std::max(r.boxX0, std::min(srcW, x1));
+    r.boxY1 = std::max(r.boxY0, std::min(srcH, y1));
+    if (r.boxX1 <= r.boxX0 || r.boxY1 <= r.boxY0) {
+        r.boxX0 = r.boxY0 = r.boxX1 = r.boxY1 = 0;
+    }
+}
+
+// Reverses a nearest-neighbour upscale's box coordinates. The shifted mapping
+// indexes source [(x + 1) / factor]; dividing and clamping is close enough for
+// an overlay rectangle and can never escape the source frame.
+void downscaleBoxInPlace(DecodeResult& r, int factor) {
+    if (!r.ok || factor <= 1) return;
+    if (r.boxX1 <= r.boxX0 || r.boxY1 <= r.boxY0) {
+        r.boxX0 = r.boxY0 = r.boxX1 = r.boxY1 = 0;
+        return;
+    }
+    r.boxX0 /= factor;
+    r.boxY0 /= factor;
+    r.boxX1 = (r.boxX1 + factor - 1) / factor;
+    r.boxY1 = (r.boxY1 + factor - 1) / factor;
+}
+
 int bytesPerPixel(PixelFormat format) {
     switch (format) {
         case PixelFormat::RGBA_8888: return 4;
@@ -501,6 +566,9 @@ FrameResult decodeFrame(const uint8_t* gray, int width, int height, const FrameO
             if (options.stretchRetry && lut != nullptr && !confirmed &&
                 r.score < kStretchedScoreGate)
                 continue;
+            // The box was produced on the view rotated by sensor + relative;
+            // report it in the caller's buffer coordinates.
+            mapViewBoxToSourceInPlace(r, (sensor + relative) % 360, width, height);
             result.decode = std::move(r);
             result.relativeRotation = relative;
             return true;
@@ -540,6 +608,8 @@ FrameResult decodeFrame(const uint8_t* gray, int width, int height, const FrameO
         DecodeResult r = decodeAngleFallback(fallbackGray, fallbackW, fallbackH,
                                              decodeOptions, &relative);
         if (r.ok) {
+            // fallbackGray is the sensor-upright view of the input buffer.
+            mapViewBoxToSourceInPlace(r, sensor, width, height);
             result.decode = std::move(r);
             result.relativeRotation = relative;
         }
@@ -574,7 +644,11 @@ FrameResult decodeFrame(const uint8_t* gray, int width, int height, const FrameO
                 }
             }
 #endif
-            if (sr.decode.ok) result = std::move(sr);
+            if (sr.decode.ok) {
+                // The sharpened frame has fallbackGray's dimensions/orientation.
+                mapViewBoxToSourceInPlace(sr.decode, sensor, width, height);
+                result = std::move(sr);
+            }
         }
     }
 
@@ -622,15 +696,22 @@ FrameResult decodeFrame(const uint8_t* gray, int width, int height, const FrameO
         const auto strong = [](const FrameResult& r) {
             return r.decode.score >= kFallbackScoreGate;
         };
+        // Derived frames are upscaled from fallbackGray; report their boxes in
+        // the caller's buffer coordinates too.
+        const auto acceptScaled = [&](FrameResult& r, int factor) {
+            downscaleBoxInPlace(r.decode, factor);
+            mapViewBoxToSourceInPlace(r.decode, sensor, width, height);
+            result = std::move(r);
+        };
         if (ok2 && ok3) {
             // Two scales must agree.
-            if (r2.decode.digits == r3.decode.digits) result = std::move(r2);
+            if (r2.decode.digits == r3.decode.digits) acceptScaled(r2, 2);
         } else if (ok2) {
             // A single scale is accepted only with strong template evidence;
             // otherwise over-upscaled print can pass the checksum by chance.
-            if (strong(r2)) result = std::move(r2);
+            if (strong(r2)) acceptScaled(r2, 2);
         } else if (ok3) {
-            if (strong(r3)) result = std::move(r3);
+            if (strong(r3)) acceptScaled(r3, 3);
         }
     }
     return result;

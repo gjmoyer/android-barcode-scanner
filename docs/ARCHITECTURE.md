@@ -48,6 +48,10 @@ CameraX / Bitmap
   (always emitted at DEBUG; filter with `adb logcat -s LumaFusion`)
   → live path: MSI bar stability gate (2 consecutive sightings) → per-key
   duplicate suppression → ScanResult.Success
+  → ScanResult.Success carries the winning engine's bounding box / corners in
+  the prepared upright frame's coordinates plus that frame's width/height;
+  hosts map them into the drawn scanRegion for a detection highlight (sample:
+  BarcodeHighlightView)
   → live only, default on (`ScannerConfig.msiLiveDeskew`): after an all-engine
   miss, retry the unstretched aim-box crop through MSI's projection-deskew
   bicubic sweep; successful frames never take this path

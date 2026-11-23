@@ -1,5 +1,7 @@
 package com.barcodescanner.sdk.data.zxingcpp
 
+import android.graphics.Point
+import android.graphics.Rect
 import com.barcodescanner.sdk.data.frame.LumaFrame
 import com.barcodescanner.sdk.domain.decoder.BarcodeDecoder
 import com.barcodescanner.sdk.domain.decoder.DecodeOutcome
@@ -156,12 +158,23 @@ class ZXingCppDecoder(
             if (symbology == Symbology.UNKNOWN && Symbology.UNKNOWN !in supportedSymbologies) continue
             if (symbology != Symbology.UNKNOWN && symbology !in supportedSymbologies) continue
             if (!seen.add("$symbology|$text")) continue
+            // Fixed 0.9 documents the fusion coupling (minConfidence > 0.9 disables ZXing).
             val confidence = if (symbology == Symbology.UNKNOWN) 0.6f else 0.9f
+            val pos = r.position
+            val (box, corners) = if (pos != null) {
+                val pts = listOf(pos.topLeft, pos.topRight, pos.bottomRight, pos.bottomLeft)
+                val xs = pts.map { it.x }
+                val ys = pts.map { it.y }
+                Rect(xs.minOrNull() ?: 0, ys.minOrNull() ?: 0, xs.maxOrNull() ?: 0, ys.maxOrNull() ?: 0) to pts
+            } else {
+                null to null
+            }
             out += DecodedBarcode(
                 rawValue = text,
                 symbology = symbology,
-                // Fixed 0.9 documents the fusion coupling (minConfidence > 0.9 disables ZXing).
                 confidence = confidence,
+                boundingBox = box,
+                cornerPoints = corners,
                 engineName = NAME,
                 isUpsideDown = upsideDown,
             )

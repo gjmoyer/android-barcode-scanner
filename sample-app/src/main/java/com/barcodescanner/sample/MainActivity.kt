@@ -33,6 +33,7 @@ import com.barcodescanner.sdk.api.ScanResult
 import com.barcodescanner.sdk.api.ScannerConfigBuilder
 import com.barcodescanner.sdk.domain.model.Symbology
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -64,6 +65,8 @@ class MainActivity : ComponentActivity() {
 
     private var scanner: BarcodeScannerFacade? = null
     private var collectJob: Job? = null
+    /** Delayed camera stop so the detection highlight stays visible. */
+    private var stopJob: Job? = null
     /** Checksum policy under test (tap to cycle — labels vary by printer). */
     private var msiPolicy = MsiChecksumPolicy.MOD_10
     /**
@@ -93,6 +96,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var togglePolicy: Button
     private lateinit var torchButton: Button
     private lateinit var preview: PreviewView
+    private lateinit var highlight: BarcodeHighlightView
 
     private var toneGenerator: ToneGenerator? = null
 
@@ -116,9 +120,16 @@ class MainActivity : ComponentActivity() {
             widthFraction = VIEWFINDER_W,
             heightFraction = VIEWFINDER_H,
         )
+        highlight = BarcodeHighlightView(
+            this,
+            widthFraction = VIEWFINDER_W,
+            heightFraction = VIEWFINDER_H,
+        )
         val previewStack = android.widget.FrameLayout(this).apply {
             addView(preview, android.widget.FrameLayout.LayoutParams(-1, -1))
             addView(viewfinder, android.widget.FrameLayout.LayoutParams(-1, -1))
+            // Above the dimmed viewfinder: the detection box must stay bright.
+            addView(highlight, android.widget.FrameLayout.LayoutParams(-1, -1))
         }
         scanButton = Button(this).apply { text = "Scan" }
         togglePolicy = Button(this).apply { text = "Checksum: MOD_10" }
@@ -228,6 +239,7 @@ class MainActivity : ComponentActivity() {
                 cameraPermission.launch(Manifest.permission.CAMERA)
                 return@setOnClickListener
             }
+            stopJob?.cancel()
             awaitingScan = true
             clearResultCard()
             scanButton.text = "Scanning… tap a barcode"
@@ -273,6 +285,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun recreateScanner() {
+        stopJob?.cancel()
         collectJob?.cancel()
         scanner?.close()
         val config = ScannerConfigBuilder()
@@ -420,6 +433,9 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun onScanSuccess(result: ScanResult.Success) {
+        // Show the detection box even for a repeat that the armed-scan check
+        // below ignores: it marks the code the decoder actually picked.
+        highlight.show(result)
         // Only beep/vibrate/report while a SCAN is armed — otherwise the live
         // preview would chime on every passing barcode.
         if (!awaitingScan) return
@@ -444,15 +460,26 @@ class MainActivity : ComponentActivity() {
         beep()
         vibrate()
 
-        // One-shot capture complete: disengage the camera until the next Scan.
-        scanner?.stopCamera()
+        // One-shot capture complete. Keep the camera running briefly so the
+        // highlight is visible on the preview, then disengage it.
+        scheduleCameraStop()
 
         status.text = "Scanned ${b.symbology.displayName} via ${b.engineName} — tap Scan for the next code."
         scanButton.text = "Scan Again"
         scanButton.isEnabled = true
     }
 
+    private fun scheduleCameraStop() {
+        stopJob?.cancel()
+        stopJob = lifecycleScope.launch {
+            delay(BarcodeHighlightView.TOTAL_DURATION_MS + HIGHLIGHT_TAIL_MS)
+            // A new Scan cancels this job before restarting the camera.
+            if (!awaitingScan) scanner?.stopCamera()
+        }
+    }
+
     private fun clearResultCard() {
+        highlight.clear()
         resultValue.text = "Value: —"
         resultSymbology.text = "Symbology: —"
         resultMethod.text = "Method: —"
@@ -504,6 +531,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startScanner() {
+        stopJob?.cancel()
         try {
             scanner?.startCamera(this, preview)
         } catch (t: Throwable) {
@@ -515,6 +543,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onPause() {
+        stopJob?.cancel()
         scanner?.stopCamera()
         super.onPause()
     }
@@ -533,6 +562,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        stopJob?.cancel()
         collectJob?.cancel()
         scanner?.close()
         scanner = null
@@ -553,5 +583,7 @@ class MainActivity : ComponentActivity() {
          */
         const val VIEWFINDER_W = 0.9f
         const val VIEWFINDER_H = 0.2f
+        /** Small margin after the overlay finishes fading before camera stop. */
+        const val HIGHLIGHT_TAIL_MS = 100L
     }
 }
