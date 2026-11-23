@@ -20,8 +20,8 @@ android {
         // unlike compileSdk it cannot carry a .2 minor — 37 is the level that
         // actually takes effect at runtime.
         targetSdk = 37
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.1.0"
         // Matches the SDK's ABI filters (ARM devices + x86_64 emulators);
         // strips the 32-bit x86 slices prebuilt AARs (zxing-cpp) would
         // otherwise package.
