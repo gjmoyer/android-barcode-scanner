@@ -72,6 +72,13 @@ class MsiNativeDecoderGuardTest {
         assertTrue("expected NotFound, got $out", out is DecodeOutcome.NotFound)
     }
 
+    @Test
+    fun decodeDeskewLuma_withoutNativeLib_isNotFound() = runBlocking {
+        val decoder = MsiNativeDecoder(requireConsecutiveFrames = 1)
+        val out = decoder.decodeDeskewLuma(LumaFrame(NativeFrame.allocate(64, 32), 64, 32))
+        assertTrue("expected NotFound, got $out", out is DecodeOutcome.NotFound)
+    }
+
     // --- shared acceptance tail (both native entry points) ---------------
 
     private fun shelfDecoder(required: Int = 1) = MsiNativeDecoder(
