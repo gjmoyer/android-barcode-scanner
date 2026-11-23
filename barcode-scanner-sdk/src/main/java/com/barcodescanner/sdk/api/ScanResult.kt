@@ -19,6 +19,18 @@ sealed interface ScanResult {
          * Fixed: previously `confidence < 1f` made every ML Kit (0.95) hit report true.
          */
         val fromRotatedFrame: Boolean = barcode.isUpsideDown,
+        /**
+         * Width in pixels of the prepared upright frame the engines read: the
+         * `scanRegion` crop for live scans, the upright (downscaled only above
+         * 16 MP) still for one-shots. 0 when unknown (e.g. a test/fake result).
+         * Use with [barcode]'s geometry to draw a detection highlight.
+         */
+        val frameWidth: Int = 0,
+        /**
+         * Height in pixels of the prepared upright frame (see [frameWidth]).
+         * 0 when unknown.
+         */
+        val frameHeight: Int = 0,
     ) : ScanResult
 
     data class NotFound(val frameTimestampMillis: Long) : ScanResult

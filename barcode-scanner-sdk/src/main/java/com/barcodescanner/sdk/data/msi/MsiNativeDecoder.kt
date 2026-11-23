@@ -1,5 +1,6 @@
 package com.barcodescanner.sdk.data.msi
 
+import android.graphics.Rect
 import com.barcodescanner.sdk.data.frame.LumaFrame
 import com.barcodescanner.sdk.data.frame.NativeFrame
 import com.barcodescanner.sdk.domain.decoder.BarcodeDecoder
@@ -96,7 +97,7 @@ class MsiNativeDecoder(
     /**
      * Live tilt rescue entry point: whole-frame projection deskew + bicubic
      * sweep on an unstretched live crop. Same return contract as
-     * [nativeDecodeLuma] (`digits|policy|votes|0`).
+     * [nativeDecodeLuma] (`digits|policy|votes|rotation|x0|y0|x1|y1`).
      */
     private external fun nativeDecodeDeskew(
         gray: ByteBuffer,
@@ -245,10 +246,11 @@ class MsiNativeDecoder(
     }
 
     /**
-     * Shared acceptance tail. [raw] is `digits|policy|votes|relRot`; null is
-     * a native miss. [upsideDown] is the orientation of the buffer handed to
-     * native (false for upright luma frames); a relRot 180 read flips it.
-     * Every rejection resets the vote gate.
+     * Shared acceptance tail. [raw] is
+     * `digits|policy|votes|relRot|x0|y0|x1|y1`; null is a native miss.
+     * [upsideDown] is the orientation of the buffer handed to native (false
+     * for upright luma frames); a relRot 180 read flips it. Every rejection
+     * resets the vote gate.
      */
     internal fun acceptNativeRead(raw: String?, upsideDown: Boolean): DecodeOutcome {
         if (raw == null) {
@@ -257,13 +259,24 @@ class MsiNativeDecoder(
             return DecodeOutcome.NotFound("MSI native: no decode")
         }
         val parts = raw.split("|")
-        if (parts.size != 4) {
+        if (parts.size != 8) {
             voteGate.reset()
             return DecodeOutcome.NotFound("MSI native: bad result format")
         }
         val full = parts[0]
         val nativePolicy = parts[1]
         val isUpsideDown = upsideDown != (parts[3] == "180")
+        // Geometry is optional: a malformed/empty box must never turn a valid
+        // checksum-verified read into a miss. Native already clamps it to the
+        // decoded frame; hosts use it for the detection highlight.
+        val box = runCatching {
+            Rect(
+                parts[4].toInt(),
+                parts[5].toInt(),
+                parts[6].toInt(),
+                parts[7].toInt(),
+            )
+        }.getOrNull()?.takeIf { it.width() > 0 && it.height() > 0 }
         if (full.length < minPayloadDigits) {
             voteGate.reset()
             return DecodeOutcome.NotFound("MSI native: payload too short")
@@ -322,6 +335,7 @@ class MsiNativeDecoder(
                     rawValue = payload,
                     symbology = Symbology.MSI_PLESSEY,
                     confidence = 1.0f,
+                    boundingBox = box,
                     engineName = NAME,
                     checksumStripped = stripped,
                     // Same convention as ML Kit / zxing-cpp: a read off a

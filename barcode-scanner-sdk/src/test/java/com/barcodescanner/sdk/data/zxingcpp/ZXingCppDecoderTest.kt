@@ -265,6 +265,11 @@ class ZXingCppDecoderTest {
         val barcode = (out as DecodeOutcome.Success).barcodes.single()
         assertEquals("01987654321", barcode.rawValue)
         assertFalse("prepared frames are upright", barcode.isUpsideDown)
+        assertEquals(Rect(0, 0, 1, 1), barcode.boundingBox)
+        assertEquals(
+            listOf(Point(0, 0), Point(1, 0), Point(1, 1), Point(0, 1)),
+            barcode.cornerPoints,
+        )
         // Exactly the fields zxing-cpp 3.1.1 read(ImageProxy) consumes.
         val p = proxy!!
         assertEquals(ImageFormat.YUV_420_888, p.format)

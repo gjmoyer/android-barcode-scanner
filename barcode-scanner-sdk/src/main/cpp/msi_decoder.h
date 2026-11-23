@@ -49,6 +49,12 @@ struct DecodeResult {
     // text-only frames.
     bool sawCandidate = false;
     float minModule = 0.0f;
+    // Bounding box of the decoded symbol in the input frame's coordinates,
+    // half-open [x0, x1) × [y0, y1). {0,0,0,0} when geometry is unavailable.
+    // Populated from the winning ROI in decodeImpl; decodeFrame unrotates it
+    // through every orientation/derived-frame path, and the angle/deskew
+    // fallbacks map their expanded-canvas box back to their source frame.
+    int boxX0 = 0, boxY0 = 0, boxX1 = 0, boxY1 = 0;
 };
 
 const char* policyName(ChecksumPolicy p);

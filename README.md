@@ -101,6 +101,14 @@ buffer in place). The host owns only the preview surface and the overlay drawing
   is exactly the box being decoded. A barcode outside the drawn box cannot
   decode — keep it generous. Without a `PreviewView`, fractions fall back to
   the sensor crop.
+- Detection highlight: every `ScanResult.Success` carries the decoded frame's
+  size (`frameWidth`/`frameHeight`) and the winning engine's geometry
+  (`barcode.boundingBox` / `barcode.cornerPoints`). Boxes are in that prepared
+  upright frame's pixels — for live scans, the `scanRegion` crop. Map them
+  linearly into the same on-screen scan box to flash a highlight over the
+  code. `sample-app/.../BarcodeHighlightView.kt` is a copyable implementation
+  (green outline, short hold, fade-out); the sample delays its one-shot camera
+  stop by the animation duration so the highlight is actually visible.
 - Camera controls for the live session: `setTorchEnabled(on) { accepted -> }`
   with the actual state on `torchEnabled`, `scaleZoom(gestureScale)` for pinch
   zoom, and `focusAt(previewView.meteringPointFactory.createPoint(x, y))` for

@@ -505,6 +505,44 @@ static Gray rotateAny(const Gray& src, float deg) {
     return out;
 }
 
+// Bounds of the rendered bars (dark pixels) in a synthetic frame. Used to
+// check that a decoded box was mapped back onto the symbol, not merely that
+// it is a non-empty rectangle somewhere in the image.
+struct DarkBounds {
+    int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    bool valid = false;
+};
+
+static DarkBounds darkBounds(const Gray& g) {
+    DarkBounds b{};
+    b.x0 = g.w;
+    b.y0 = g.h;
+    for (int y = 0; y < g.h; ++y) {
+        for (int x = 0; x < g.w; ++x) {
+            if (g.px[(size_t)y * g.w + x] >= 128) continue;
+            b.valid = true;
+            b.x0 = std::min(b.x0, x);
+            b.y0 = std::min(b.y0, y);
+            b.x1 = std::max(b.x1, x);
+            b.y1 = std::max(b.y1, y);
+        }
+    }
+    return b;
+}
+
+static bool boxOnSymbol(const msi::DecodeResult& r, const Gray& src) {
+    if (!r.ok || src.w <= 0 || src.h <= 0) return false;
+    if (r.boxX0 < 0 || r.boxY0 < 0 || r.boxX1 > src.w || r.boxY1 > src.h ||
+        r.boxX1 <= r.boxX0 || r.boxY1 <= r.boxY0) {
+        return false;
+    }
+    const DarkBounds d = darkBounds(src);
+    if (!d.valid) return false;
+    const float cx = 0.5f * (r.boxX0 + r.boxX1);
+    const float cy = 0.5f * (r.boxY0 + r.boxY1);
+    return cx >= d.x0 && cx <= d.x1 && cy >= d.y0 && cy <= d.y1;
+}
+
 static void frameSuite() {
     printf("--- native frame path (msi_frame) ---\n");
     // 1. Stretch parity with the Kotlin transform (mirrored by
@@ -570,6 +608,12 @@ static void frameSuite() {
     msi::FrameResult late = msi::decodeFrame(raw.data(), sensor.w, sensor.h, fo);
     assertTrue("frame decodeFrame(rotationDegrees=90) == prepare-rotated read",
                late.decode.ok && late.decode.digits == fr.decode.digits && late.relativeRotation == 0);
+    Gray rawGray;
+    rawGray.w = sensor.w;
+    rawGray.h = sensor.h;
+    rawGray.px = raw;
+    assertTrue("frame decodeFrame(rotationDegrees=90) maps box back onto the tag",
+               boxOnSymbol(late.decode, rawGray));
 
     // 5. Orientation attempts follow 0, 180, 90, 270 and honour the cap.
     fo.rotationDegrees = 0;
@@ -581,15 +625,21 @@ static void frameSuite() {
     msi::FrameResult f180 = msi::decodeFrame(flipped.px.data(), flipped.w, flipped.h, fo);
     assertTrue("frame upside-down tag: 2 orientations -> relativeRotation 180",
                f180.decode.ok && f180.decode.digits == "12345674" && f180.relativeRotation == 180);
+    assertTrue("frame upside-down read maps box back onto the tag",
+               boxOnSymbol(f180.decode, flipped));
     Gray side = rotateCw(tag, 90);
     fo.maxOrientations = 4;
     msi::FrameResult f270 = msi::decodeFrame(side.px.data(), side.w, side.h, fo);
     assertTrue("frame sideways tag: 4 orientations -> relativeRotation 270",
                f270.decode.ok && f270.decode.digits == "12345674" && f270.relativeRotation == 270);
+    assertTrue("frame sideways read maps box back onto the tag",
+               boxOnSymbol(f270.decode, side));
     fo.maxOrientations = 2;
     msi::FrameResult f0 = msi::decodeFrame(tag.px.data(), tag.w, tag.h, fo);
     assertTrue("frame upright tag: 2 orientations (reverse confirmed) -> relativeRotation 0",
                f0.decode.ok && f0.decode.digits == "12345674" && f0.relativeRotation == 0);
+    assertTrue("frame upright read reports box on the tag",
+               boxOnSymbol(f0.decode, tag));
 
     // 5a. Reversed-phantom regression. The 180-degree view of a blurred,
     // low-contrast tag can decode to a checksum-valid 9-digit phantom, so
@@ -819,6 +869,8 @@ static void frameSuite() {
             tilted.px.data(), tilted.w, tilted.h, d, &rel);
         assertTrue("22-degree tilt: angle fallback itself reads",
                    ar.ok && ar.digits == "011578333" && rel == 0);
+        assertTrue("22-degree tilt: angle fallback maps its box back onto the tag",
+                   boxOnSymbol(ar, tilted));
         // Sign convention: predictAngle returns the correction to apply
         // (negative for a clockwise tilt), so the frame is not upright when
         // the predictor reports zero.
@@ -1598,6 +1650,8 @@ static void liveDeskewSuite() {
                                                 tilted.h, d);
         assertTrue("live deskew: 10-degree crop reads",
                    r.ok && r.digits == "011578333" && r.score >= 0.70f);
+        assertTrue("live deskew: box maps back onto the tilted tag",
+                   boxOnSymbol(r, tilted));
     }
     {
         Gray blank;
