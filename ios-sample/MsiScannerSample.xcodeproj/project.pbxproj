@@ -1,0 +1,486 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		0460F1AB89D46E48D0579615 /* MsiBridge.mm in Sources */ = {isa = PBXBuildFile; fileRef = 0D3803AF24053DA5297C2498 /* MsiBridge.mm */; };
+		1000E4AC0D5CAA0981A7C902 /* MsiChecksum.swift in Sources */ = {isa = PBXBuildFile; fileRef = D026CF847F9130C7660E73F3 /* MsiChecksum.swift */; };
+		18775A1A8C0A06953E224E4C /* MsiScannerSampleApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7625C76B44C887E8BCDECEA1 /* MsiScannerSampleApp.swift */; };
+		4A365DFB6C536CBDCCFB38DB /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B052CBCF20817D3C76C4092 /* ContentView.swift */; };
+		57D22552BF36C0958B495DCD /* MsiCameraController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 727CD271CE443B920576F61B /* MsiCameraController.swift */; };
+		9DD26867422DDE0E7E61B1FA /* msi_frame.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 3AF1FE2F7668E9FDF6A2596F /* msi_frame.cpp */; };
+		AA01B41DF039EE955672CFED /* MsiChecksumTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ECCF69D74722DF0569828A4A /* MsiChecksumTests.swift */; };
+		AFD62DD571E1D4486AC1B424 /* msi_decoder.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 175BA79463F62F3C62C407FB /* msi_decoder.cpp */; };
+		FC0B250C34E5BD792D0E0263 /* CameraView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 611855232FED2544D82C4F30 /* CameraView.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		3625FD4BF561C202BE180B42 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 25A8CFC88E549A371E53ED67 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = F278C3DEEE85397D2032DC49;
+			remoteInfo = MsiScannerSample;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		0D3803AF24053DA5297C2498 /* MsiBridge.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = MsiBridge.mm; sourceTree = "<group>"; };
+		175BA79463F62F3C62C407FB /* msi_decoder.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = msi_decoder.cpp; sourceTree = "<group>"; };
+		3A87B075E082BAEE4F9B6829 /* MsiBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MsiBridge.h; sourceTree = "<group>"; };
+		3AF1FE2F7668E9FDF6A2596F /* msi_frame.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = msi_frame.cpp; sourceTree = "<group>"; };
+		465C7B608A92A861D04F5CAE /* MsiScannerSample.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = MsiScannerSample.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		611855232FED2544D82C4F30 /* CameraView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraView.swift; sourceTree = "<group>"; };
+		6B0AD939FFB6F641FC6072CC /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		727CD271CE443B920576F61B /* MsiCameraController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MsiCameraController.swift; sourceTree = "<group>"; };
+		7625C76B44C887E8BCDECEA1 /* MsiScannerSampleApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MsiScannerSampleApp.swift; sourceTree = "<group>"; };
+		8B052CBCF20817D3C76C4092 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		A4D5E79238289D69F680C453 /* MsiScannerSampleTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = MsiScannerSampleTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		B86CF31150DCDFBCFBA9D539 /* MsiScannerSample-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "MsiScannerSample-Bridging-Header.h"; sourceTree = "<group>"; };
+		D026CF847F9130C7660E73F3 /* MsiChecksum.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MsiChecksum.swift; sourceTree = "<group>"; };
+		ECCF69D74722DF0569828A4A /* MsiChecksumTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MsiChecksumTests.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		0172507C86A6F1DCFB5D56C1 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				465C7B608A92A861D04F5CAE /* MsiScannerSample.app */,
+				A4D5E79238289D69F680C453 /* MsiScannerSampleTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		1F026FC3808305CA764D85B1 /* MsiScannerSampleTests */ = {
+			isa = PBXGroup;
+			children = (
+				ECCF69D74722DF0569828A4A /* MsiChecksumTests.swift */,
+			);
+			path = MsiScannerSampleTests;
+			sourceTree = "<group>";
+		};
+		2DA18149E4E1CE27639FCC05 /* main */ = {
+			isa = PBXGroup;
+			children = (
+				AD2EA97A7161AF752CAAC0CF /* cpp */,
+			);
+			path = main;
+			sourceTree = "<group>";
+		};
+		8B8993084F1C5882523C751F /* src */ = {
+			isa = PBXGroup;
+			children = (
+				2DA18149E4E1CE27639FCC05 /* main */,
+			);
+			path = src;
+			sourceTree = "<group>";
+		};
+		A3E54A128FE53C2F36CAA152 = {
+			isa = PBXGroup;
+			children = (
+				D5D70D7F3CAA3D06E5BB701B /* BarcodeScanner */,
+				E5B1FACD03AC55652DB8C67F /* MsiScannerSample */,
+				1F026FC3808305CA764D85B1 /* MsiScannerSampleTests */,
+				0172507C86A6F1DCFB5D56C1 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		AD2EA97A7161AF752CAAC0CF /* cpp */ = {
+			isa = PBXGroup;
+			children = (
+				175BA79463F62F3C62C407FB /* msi_decoder.cpp */,
+				3AF1FE2F7668E9FDF6A2596F /* msi_frame.cpp */,
+			);
+			path = cpp;
+			sourceTree = "<group>";
+		};
+		C71C41F5CCE7C1C836E33ECE /* barcode-scanner-sdk */ = {
+			isa = PBXGroup;
+			children = (
+				8B8993084F1C5882523C751F /* src */,
+			);
+			path = "barcode-scanner-sdk";
+			sourceTree = "<group>";
+		};
+		D5D70D7F3CAA3D06E5BB701B /* BarcodeScanner */ = {
+			isa = PBXGroup;
+			children = (
+				C71C41F5CCE7C1C836E33ECE /* barcode-scanner-sdk */,
+			);
+			name = BarcodeScanner;
+			path = ..;
+			sourceTree = "<group>";
+		};
+		E5B1FACD03AC55652DB8C67F /* MsiScannerSample */ = {
+			isa = PBXGroup;
+			children = (
+				611855232FED2544D82C4F30 /* CameraView.swift */,
+				8B052CBCF20817D3C76C4092 /* ContentView.swift */,
+				6B0AD939FFB6F641FC6072CC /* Info.plist */,
+				3A87B075E082BAEE4F9B6829 /* MsiBridge.h */,
+				0D3803AF24053DA5297C2498 /* MsiBridge.mm */,
+				727CD271CE443B920576F61B /* MsiCameraController.swift */,
+				D026CF847F9130C7660E73F3 /* MsiChecksum.swift */,
+				B86CF31150DCDFBCFBA9D539 /* MsiScannerSample-Bridging-Header.h */,
+				7625C76B44C887E8BCDECEA1 /* MsiScannerSampleApp.swift */,
+			);
+			path = MsiScannerSample;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		75ACE591E8AD04F0626B7829 /* MsiScannerSampleTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = F3318C9F2CA3F33D92D11647 /* Build configuration list for PBXNativeTarget "MsiScannerSampleTests" */;
+			buildPhases = (
+				138E131537EAA40682112D87 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				07733CBC8857BA3EAC2CAFE1 /* PBXTargetDependency */,
+			);
+			name = MsiScannerSampleTests;
+			packageProductDependencies = (
+			);
+			productName = MsiScannerSampleTests;
+			productReference = A4D5E79238289D69F680C453 /* MsiScannerSampleTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		F278C3DEEE85397D2032DC49 /* MsiScannerSample */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 5317E02C68F8EBB42E61F7AD /* Build configuration list for PBXNativeTarget "MsiScannerSample" */;
+			buildPhases = (
+				15F62B1C64FB6551A9C1102C /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = MsiScannerSample;
+			packageProductDependencies = (
+			);
+			productName = MsiScannerSample;
+			productReference = 465C7B608A92A861D04F5CAE /* MsiScannerSample.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		25A8CFC88E549A371E53ED67 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					75ACE591E8AD04F0626B7829 = {
+						DevelopmentTeam = RQQ8P4P75E;
+						ProvisioningStyle = Automatic;
+					};
+					F278C3DEEE85397D2032DC49 = {
+						DevelopmentTeam = RQQ8P4P75E;
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = 308428676A760B37537D3888 /* Build configuration list for PBXProject "MsiScannerSample" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = A3E54A128FE53C2F36CAA152;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 0172507C86A6F1DCFB5D56C1 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				F278C3DEEE85397D2032DC49 /* MsiScannerSample */,
+				75ACE591E8AD04F0626B7829 /* MsiScannerSampleTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		138E131537EAA40682112D87 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AA01B41DF039EE955672CFED /* MsiChecksumTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		15F62B1C64FB6551A9C1102C /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FC0B250C34E5BD792D0E0263 /* CameraView.swift in Sources */,
+				4A365DFB6C536CBDCCFB38DB /* ContentView.swift in Sources */,
+				0460F1AB89D46E48D0579615 /* MsiBridge.mm in Sources */,
+				57D22552BF36C0958B495DCD /* MsiCameraController.swift in Sources */,
+				1000E4AC0D5CAA0981A7C902 /* MsiChecksum.swift in Sources */,
+				18775A1A8C0A06953E224E4C /* MsiScannerSampleApp.swift in Sources */,
+				AFD62DD571E1D4486AC1B424 /* msi_decoder.cpp in Sources */,
+				9DD26867422DDE0E7E61B1FA /* msi_frame.cpp in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		07733CBC8857BA3EAC2CAFE1 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = F278C3DEEE85397D2032DC49 /* MsiScannerSample */;
+			targetProxy = 3625FD4BF561C202BE180B42 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		19D95E576C7A8286324B972B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CLANG_CXX_LANGUAGE_STANDARD = "c++17";
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CURRENT_PROJECT_VERSION = 1;
+				GCC_ENABLE_CPP_EXCEPTIONS = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(SRCROOT)/../barcode-scanner-sdk/src/main/cpp",
+				);
+				INFOPLIST_FILE = MsiScannerSample/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.barcodescanner.msiscanner;
+				SDKROOT = iphoneos;
+				SWIFT_OBJC_BRIDGING_HEADER = "$(SRCROOT)/MsiScannerSample/MsiScannerSample-Bridging-Header.h";
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		4B7EF60FE3FB6B554599AC1F /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = RQQ8P4P75E;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		7436499EA2F52A247549CC4B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = RQQ8P4P75E;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		7A3566027C779D15770C65BF /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.barcodescanner.msiscanner.tests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/MsiScannerSample.app/MsiScannerSample";
+			};
+			name = Debug;
+		};
+		81D160547E86BFF5B03332BB /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.barcodescanner.msiscanner.tests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/MsiScannerSample.app/MsiScannerSample";
+			};
+			name = Release;
+		};
+		F375FCA8BE24376C53C4A6D1 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CLANG_CXX_LANGUAGE_STANDARD = "c++17";
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CURRENT_PROJECT_VERSION = 1;
+				GCC_ENABLE_CPP_EXCEPTIONS = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(SRCROOT)/../barcode-scanner-sdk/src/main/cpp",
+				);
+				INFOPLIST_FILE = MsiScannerSample/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.barcodescanner.msiscanner;
+				SDKROOT = iphoneos;
+				SWIFT_OBJC_BRIDGING_HEADER = "$(SRCROOT)/MsiScannerSample/MsiScannerSample-Bridging-Header.h";
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		308428676A760B37537D3888 /* Build configuration list for PBXProject "MsiScannerSample" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				4B7EF60FE3FB6B554599AC1F /* Debug */,
+				7436499EA2F52A247549CC4B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		5317E02C68F8EBB42E61F7AD /* Build configuration list for PBXNativeTarget "MsiScannerSample" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				19D95E576C7A8286324B972B /* Debug */,
+				F375FCA8BE24376C53C4A6D1 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		F3318C9F2CA3F33D92D11647 /* Build configuration list for PBXNativeTarget "MsiScannerSampleTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				7A3566027C779D15770C65BF /* Debug */,
+				81D160547E86BFF5B03332BB /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 25A8CFC88E549A371E53ED67 /* Project object */;
+}

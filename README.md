@@ -18,6 +18,10 @@ binarization threshold to tune, survives the blur that defeats width
 measurement). See
 [`docs/MSI_PLESSEY_RESEARCH.md`](docs/MSI_PLESSEY_RESEARCH.md) for the full write-up.
 
+An **MSI-only iOS sample** lives in [`ios-sample/`](ios-sample/README.md). It is
+a SwiftUI/AVFoundation app that compiles the same portable C++ decoder directly
+from the Android SDK module — no Android code, ML Kit, or fusion layer.
+
 ## Requirements
 
 - Android Studio with **SDK 37** (compileSdk 37; sample app targetSdk 37)
@@ -182,7 +186,8 @@ barcode-scanner-sdk/          # the reusable library (only depend on this)
     camera/                   # CameraX frame producer (single-flight, conflated)
     di/                       # manual DI (internal)
   src/test/                   # unit tests (Robolectric + JUnit)
-sample-app/                   # demo host app
+sample-app/                   # Android demo host app
+ios-sample/                   # MSI-only iOS demo (shares the portable C++ core)
 docs/                         # ARCHITECTURE.md, MSI_PLESSEY_RESEARCH.md
 ```
 
