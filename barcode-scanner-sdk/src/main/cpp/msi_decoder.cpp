@@ -1973,6 +1973,11 @@ static DecodeResult confirmReverseView(const uint8_t* img, int w, int h,
                                        const DecodeResult& r, int* relativeRotation) {
     if (relativeRotation != nullptr) *relativeRotation = 0;
     if (!r.ok) return r;
+    // Cost note: every candidate pays this reverse decode before the score
+    // gate is considered — the gate only applies when the reverse fails, and
+    // a confirming reverse can accept a lower-score read. A candidate-heavy
+    // live sweep therefore costs up to two decodes per angle; the 1 MP cap
+    // and 250 ms cooldown bound that path.
     std::vector<uint8_t> reverse((size_t)w * (size_t)h);
     for (int y = 0; y < h; ++y) {
         const uint8_t* row = img + (size_t)(h - 1 - y) * w;

@@ -80,7 +80,10 @@ orientation goes through the same 180° reverse confirmation as the still
 angle fallback: a reverse-failing read needs the fallback score gate
 (≥0.70), and a conflicting reverse read is arbitrated on leading quiet zone.
 Sweeps are capped at 1 MP and throttled to one per 250 ms measured from the
-previous sweep's end; the unstretched copy is prepared on the same cadence.
+previous sweep's end; the unstretched copy is prepared on the same shared
+250 ms interval. Candidates pay the reverse decode before the score gate is
+considered (the gate only applies when the reverse fails), so a candidate-heavy
+sweep can cost up to twice the angle decodes; the cap and cooldown bound it.
 It runs only after the normal live decode misses and is on by default (`ScannerConfig.msiLiveDeskew`; set false to
 disable). The normal decode path and the still path are unchanged; hits pay
 one unstretched prepare on the 250 ms cadence, and misses additionally pay the

@@ -32,6 +32,7 @@ import com.barcodescanner.sdk.api.CameraStatus
 import com.barcodescanner.sdk.data.frame.LumaBufferPool
 import com.barcodescanner.sdk.data.frame.LumaFrame
 import com.barcodescanner.sdk.data.frame.NativeFrame
+import com.barcodescanner.sdk.data.msi.MsiNativeDecoder
 import com.barcodescanner.sdk.domain.model.ScannerConfig
 import com.barcodescanner.sdk.domain.model.Symbology
 import kotlinx.coroutines.CoroutineScope
@@ -141,8 +142,12 @@ internal class CameraScanManager(
     /**
      * Do not pay for the second (unstretched) prepare on every frame: the
      * deskew sweep is itself throttled in MsiNativeDecoder, so preparing a
-     * copy more often than that is wasted work. 250 ms still gives several
-     * prepared frames per second for the two-sighting live gate.
+     * copy more often than that is wasted work. The interval is the decoder's
+     * own cooldown constant so tuning one cannot leave the other behind.
+     *
+     * The clocks are independent (prepare from prepare time, cooldown from
+     * sweep end), so during a long sweep a prepared copy can be discarded as
+     * throttled. That is bounded to <=4/sec of a <=1 MP crop and negligible.
      */
     private var lastDeskewPrepareMs = 0L
 
@@ -490,7 +495,7 @@ internal class CameraScanManager(
                              maxOrientations = LIVE_ORIENTATIONS, scanTopFraction = 0f)
         val now = android.os.SystemClock.elapsedRealtime()
         val wantDeskew = liveDeskewWanted &&
-            now - lastDeskewPrepareMs >= DESKEW_PREPARE_INTERVAL_MS
+            now - lastDeskewPrepareMs >= MsiNativeDecoder.LIVE_DESKEW_MIN_INTERVAL_MS
         if (wantDeskew) lastDeskewPrepareMs = now
         val deskew = if (wantDeskew) {
             val rawBuffer = deskewPool.take(width, height)
@@ -517,8 +522,6 @@ internal class CameraScanManager(
         /** Logcat tag; filter with `adb logcat -s CameraScanManager`. */
         const val TAG = "CameraScanManager"
 
-        /** Unstretched-copy prepare interval for the live deskew rescue. */
-        private const val DESKEW_PREPARE_INTERVAL_MS = 250L
         /**
          * Analysis target (~1080p). Lower-then-higher fallback: never above
          * the preview-class sizes every device streams next to a preview.

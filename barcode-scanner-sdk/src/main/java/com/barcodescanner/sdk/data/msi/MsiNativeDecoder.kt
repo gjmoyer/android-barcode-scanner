@@ -330,7 +330,11 @@ class MsiNativeDecoder(
         /** Band-search skip for whole images (see `msi::DecodeOptions`). */
         internal const val FULL_FRAME_SCAN_TOP = 0.25f
 
-        /** Cooldown after a live deskew sweep (see [decodeDeskewLuma]). */
+        /**
+         * Cooldown after a live deskew sweep (see [decodeDeskewLuma]); also
+         * the live unstretched-prepare cadence in CameraScanManager, so the
+         * two cannot drift when one is tuned.
+         */
         internal const val LIVE_DESKEW_MIN_INTERVAL_MS = 250L
 
         /**
