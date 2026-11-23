@@ -55,10 +55,14 @@ class DefaultBarcodeScannerTest {
         ),
     )
 
-    private fun scanner(suppressionMillis: Long): DefaultBarcodeScanner {
-        val config = ScannerConfig.Builder()
+    private fun scanner(
+        suppressionMillis: Long,
+        symbologies: Set<Symbology>? = null,
+    ): DefaultBarcodeScanner {
+        val builder = ScannerConfig.Builder()
             .duplicateSuppressionMillis(suppressionMillis)
-            .build()
+        if (symbologies != null) builder.only(*symbologies.toTypedArray())
+        val config = builder.build()
         return DefaultBarcodeScanner(
             ScannerContainer(RuntimeEnvironment.getApplication(), config),
             config,
@@ -402,6 +406,24 @@ class DefaultBarcodeScannerTest {
                 DecodeOutcome.NotFound("fake deskew")
             }
             assertEquals(0, nullCopyCalls)
+        } finally {
+            scanner.close()
+        }
+    }
+
+    @Test
+    fun liveFrame_msiDisabled_doesNotRunDeskew() = runBlocking {
+        val scanner = scanner(0, setOf(Symbology.QR_CODE))
+        try {
+            var calls = 0
+            scanner.handleLiveFrame(
+                PreparedLiveFrame(blankFrame(), blankFrame()),
+                scanner.currentCameraSession(),
+            ) {
+                calls++
+                DecodeOutcome.NotFound("fake deskew")
+            }
+            assertEquals(0, calls)
         } finally {
             scanner.close()
         }

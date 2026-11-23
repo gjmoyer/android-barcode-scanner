@@ -324,9 +324,12 @@ internal class DefaultBarcodeScanner(
             var outcome = live.outcome
             // Live tilt rescue: only after every engine missed, only on a
             // frame whose buffers are settled, and only when enabled. The
-            // normal path above is byte-for-byte the old behavior.
+            // MSI-enabled check is defense-in-depth: CameraScanManager only
+            // prepares the deskew copy when MSI is enabled, but this keeps the
+            // invariant local for test frames or future callers.
             if (outcome is DecodeOutcome.NotFound && reusable &&
                 config.msiLiveDeskew && prepared.deskew != null &&
+                Symbology.MSI_PLESSEY in config.enabledSymbologies &&
                 session == currentCameraSession()
             ) {
                 val t0 = SystemClock.elapsedRealtime()
