@@ -2061,8 +2061,13 @@ DecodeResult decodeAngleFallback(const uint8_t* gray, int width, int height,
     if (!std::isfinite(pred) || std::fabs(pred) > 60.0f) pred = 0.0f;
     if (g_debug) printf("[dbg] angle fallback %.2f deg\n", pred);
     static const float kOffsets[] = {0.0f, -0.35f, 0.35f, -0.7f, 0.7f, -1.0f, 1.0f, -1.4f, 1.4f};
+    // Hoisted across the nine offsets: their canvas sizes differ only slightly,
+    // so vector capacity is reused instead of re-allocating up to three
+    // full-frame buffers per probe.
+    std::vector<uint8_t> rot;
+    std::vector<uint8_t> stretched;
+    std::vector<uint8_t> up2;
     for (float off : kOffsets) {
-        std::vector<uint8_t> rot;
         int rw = 0, rh = 0;
         rotateGrayExpanded(gray, width, height, -(pred + off), rot, rw, rh);
         if (rw <= 0 || rh <= 0) continue;
@@ -2073,7 +2078,7 @@ DecodeResult decodeAngleFallback(const uint8_t* gray, int width, int height,
             if (relativeRotation != nullptr) *relativeRotation = rel;
             return r;
         }
-        std::vector<uint8_t> stretched = rot;
+        stretched = rot;
         // A too-flat histogram leaves `stretched` byte-identical to `rot`;
         // re-decoding it would buy nothing, so the retry is skipped.
         if (stretchGray(stretched)) {
@@ -2088,7 +2093,7 @@ DecodeResult decodeAngleFallback(const uint8_t* gray, int width, int height,
             std::max(width, height) >= 330 && std::max(rw, rh) <= 1800) {
             const int W2 = rw * 2, H2 = rh * 2;
             if ((int64_t)W2 * (int64_t)H2 > 4000000) continue;
-            std::vector<uint8_t> up2((size_t)W2 * (size_t)H2);
+            up2.resize((size_t)W2 * (size_t)H2);
             for (int y = 0; y < H2; ++y) {
                 const uint8_t* row = rot.data() + (size_t)(y / 2) * rw;
                 uint8_t* dst = &up2[(size_t)y * W2];
@@ -2196,8 +2201,9 @@ DecodeResult decodeDeskew(const uint8_t* gray, int width, int height,
     // exits the sweep. 0 is skipped (the normal live decode already tried it).
     static const float kAngles[] = {-2.f, 2.f, -4.f, 4.f, -6.f, 6.f, -8.f, 8.f,
                                     -10.f, 10.f, -12.f, 12.f, -14.f, 14.f};
+    // Reuse the canvas across angles; sizes vary only slightly.
+    std::vector<uint8_t> rot;
     for (float angle : kAngles) {
-        std::vector<uint8_t> rot;
         int rw = 0, rh = 0;
         rotateGrayBicubic(gray, width, height, angle, rot, rw, rh);
         if (rw <= 0 || rh <= 0) continue;
