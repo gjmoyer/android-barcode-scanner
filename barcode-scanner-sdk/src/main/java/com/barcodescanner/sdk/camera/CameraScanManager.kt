@@ -154,7 +154,8 @@ internal class CameraScanManager(
      * The decoder's liveDeskewDue() is checked too, so a copy is never
      * prepared only to be dropped as throttled by the sweep's cooldown.
      */
-    private var lastDeskewPrepareMs = 0L
+    private var lastDeskewPrepareMs =
+        -MsiNativeDecoder.LIVE_DESKEW_MIN_INTERVAL_MS
 
     /** CameraX LiveData registrations; added and removed on the main thread only. */
     @Volatile

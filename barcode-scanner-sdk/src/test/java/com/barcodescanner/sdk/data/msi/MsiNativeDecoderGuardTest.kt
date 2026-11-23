@@ -149,6 +149,14 @@ class MsiNativeDecoderGuardTest {
     }
 
     @Test
+    fun liveDeskewDue_atElapsedRealtimeZero_isDue() {
+        // Fresh boot / Robolectric: the initial timestamp must not throttle
+        // the first live frame for 250 ms.
+        val decoder = MsiNativeDecoder(requireConsecutiveFrames = 1)
+        assertTrue(decoder.liveDeskewDue(now = 0L))
+    }
+
+    @Test
     fun accept_voteGateNeedsTwoAgreeingReads() {
         val d = shelfDecoder(required = 2)
         assertTrue(d.acceptNativeRead("011578333|mod1010|3|0", false) is DecodeOutcome.NotFound)

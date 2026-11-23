@@ -120,10 +120,12 @@ class MsiNativeDecoder(
      * Live deskew cooldown: at most one sweep per [LIVE_DESKEW_MIN_INTERVAL_MS],
      * measured from the END of the previous sweep. The camera is single-flight,
      * so without this a long sweep would start again on the very next frame
-     * and collapse the scan rate while the user is aiming.
+     * and collapse the scan rate while the user is aiming. The negative
+     * initial value keeps the first frame due when elapsedRealtime() is still
+     * near 0 (Robolectric, fresh boot).
      */
     @Volatile
-    private var lastDeskewEndMs = 0L
+    private var lastDeskewEndMs = -LIVE_DESKEW_MIN_INTERVAL_MS
 
     /**
      * True when the live deskew cooldown has elapsed. CameraScanManager
