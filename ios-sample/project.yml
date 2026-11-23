@@ -1,0 +1,66 @@
+name: MsiScannerSample
+options:
+  bundleIdPrefix: com.barcodescanner
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "26.0"
+    TARGETED_DEVICE_FAMILY: "1"
+    DEVELOPMENT_TEAM: RQQ8P4P75E
+    CODE_SIGN_STYLE: Automatic
+targets:
+  MsiScannerSample:
+    type: application
+    platform: iOS
+    sources:
+      - path: MsiScannerSample
+      # Deliberately reference the canonical Android SDK sources by path.
+      # They are portable C++17; only the JNI bridge lives under the SDK.
+      - path: ../barcode-scanner-sdk/src/main/cpp/msi_decoder.cpp
+      - path: ../barcode-scanner-sdk/src/main/cpp/msi_frame.cpp
+    info:
+      path: MsiScannerSample/Info.plist
+      properties:
+        CFBundleDisplayName: MSI Scanner
+        NSCameraUsageDescription: This sample scans MSI Plessey barcodes.
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.barcodescanner.msiscanner
+        SWIFT_OBJC_BRIDGING_HEADER: $(SRCROOT)/MsiScannerSample/MsiScannerSample-Bridging-Header.h
+        HEADER_SEARCH_PATHS:
+          - $(SRCROOT)/../barcode-scanner-sdk/src/main/cpp
+        CLANG_CXX_LANGUAGE_STANDARD: c++17
+        GCC_ENABLE_CPP_EXCEPTIONS: YES
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+  MsiScannerSampleTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: MsiScannerSampleTests
+    dependencies:
+      - target: MsiScannerSample
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.barcodescanner.msiscanner.tests
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  MsiScannerSample:
+    build:
+      targets:
+        MsiScannerSample: all
+        MsiScannerSampleTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - MsiScannerSampleTests
