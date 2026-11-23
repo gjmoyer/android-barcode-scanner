@@ -127,7 +127,9 @@ data class ScannerConfig(
      * same aim-box crop without the camera contrast stretch, deskew it with a
      * bicubic sweep around the projection angle, and decode once. Only runs
      * after the normal live decode misses; successful frames take exactly
-     * today's path. The still path is unaffected. Set false to keep the
+     * today's path. Sweeps are capped at 1 MP and throttled to one per
+     * 250 ms (cooldown after the previous sweep); larger frames keep the
+     * normal live path. The still path is unaffected. Set false to keep the
      * strict pre-fallback live profile (e.g. on a device whose latency budget
      * cannot absorb the miss-only sweep).
      */

@@ -138,6 +138,14 @@ internal class CameraScanManager(
     private val liveDeskewWanted: Boolean =
         config.msiLiveDeskew && Symbology.MSI_PLESSEY in config.enabledSymbologies
 
+    /**
+     * Do not pay for the second (unstretched) prepare on every frame: the
+     * deskew sweep is itself throttled in MsiNativeDecoder, so preparing a
+     * copy more often than that is wasted work. 250 ms still gives several
+     * prepared frames per second for the two-sighting live gate.
+     */
+    private var lastDeskewPrepareMs = 0L
+
     /** CameraX LiveData registrations; added and removed on the main thread only. */
     @Volatile
     private var observers: CameraObservers? = null
@@ -476,7 +484,11 @@ internal class CameraScanManager(
         }
         val live = LumaFrame(buffer, width, height,
                              maxOrientations = LIVE_ORIENTATIONS, scanTopFraction = 0f)
-        val deskew = if (liveDeskewWanted) {
+        val now = android.os.SystemClock.elapsedRealtime()
+        val wantDeskew = liveDeskewWanted &&
+            now - lastDeskewPrepareMs >= DESKEW_PREPARE_INTERVAL_MS
+        if (wantDeskew) lastDeskewPrepareMs = now
+        val deskew = if (wantDeskew) {
             val rawBuffer = deskewPool.take(width, height)
             val rawOk = NativeFrame.prepare(
                 luma.buffer, proxy.width, proxy.height, luma.rowStride,
@@ -500,6 +512,9 @@ internal class CameraScanManager(
     companion object {
         /** Logcat tag; filter with `adb logcat -s CameraScanManager`. */
         const val TAG = "CameraScanManager"
+
+        /** Unstretched-copy prepare interval for the live deskew rescue. */
+        private const val DESKEW_PREPARE_INTERVAL_MS = 250L
         /**
          * Analysis target (~1080p). Lower-then-higher fallback: never above
          * the preview-class sizes every device streams next to a preview.

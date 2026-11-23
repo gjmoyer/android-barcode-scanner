@@ -1614,6 +1614,14 @@ static void liveDeskewSuite() {
         }
         r = msi::decodeDeskew(noise.px.data(), noise.w, noise.h, d);
         assertTrue("live deskew: noise crop declines", !r.ok);
+
+        // Live cap: a still-sized frame must decline before any sweep work.
+        Gray big;
+        big.w = 1200;
+        big.h = 1000;
+        big.px.assign(1200 * 1000, 255);
+        r = msi::decodeDeskew(big.px.data(), big.w, big.h, d);
+        assertTrue("live deskew: >1MP crop declines", !r.ok);
     }
 }
 

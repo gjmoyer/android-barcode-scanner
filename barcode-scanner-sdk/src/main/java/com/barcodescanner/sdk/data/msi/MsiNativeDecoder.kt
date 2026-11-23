@@ -117,6 +117,15 @@ class MsiNativeDecoder(
     private val voteGate = MsiVoteGate(requireConsecutiveFrames)
 
     /**
+     * Live deskew cooldown: at most one sweep per [LIVE_DESKEW_MIN_INTERVAL_MS],
+     * measured from the END of the previous sweep. The camera is single-flight,
+     * so without this a long sweep would start again on the very next frame
+     * and collapse the scan rate while the user is aiming.
+     */
+    @Volatile
+    private var lastDeskewEndMs = 0L
+
+    /**
      * Standalone bitmap decode (hosts using the engine directly; the facade
      * never calls this). The bitmap is converted to gray natively
      * ([NativeFrame.prepareStill]: no rotation — the pixel layout
@@ -174,6 +183,11 @@ class MsiNativeDecoder(
      * Same validation, vote gate and payload contract as [decode].
      */
     internal suspend fun decodeDeskewLuma(frame: LumaFrame): DecodeOutcome = withContext(dispatcher) {
+        if (android.os.SystemClock.elapsedRealtime() - lastDeskewEndMs <
+            LIVE_DESKEW_MIN_INTERVAL_MS
+        ) {
+            return@withContext DecodeOutcome.NotFound("MSI live deskew throttled")
+        }
         try {
             if (!nativeAvailable) {
                 return@withContext DecodeOutcome.NotFound("MSI native library not loaded")
@@ -192,6 +206,8 @@ class MsiNativeDecoder(
         } catch (t: Throwable) {
             android.util.Log.w(NAME, "decodeDeskewLuma failed: ${t.javaClass.simpleName}: ${t.message}")
             DecodeOutcome.Error(DecoderException("MSI deskew decode failed", t), recoverable = true)
+        } finally {
+            lastDeskewEndMs = android.os.SystemClock.elapsedRealtime()
         }
     }
 
@@ -313,6 +329,9 @@ class MsiNativeDecoder(
 
         /** Band-search skip for whole images (see `msi::DecodeOptions`). */
         internal const val FULL_FRAME_SCAN_TOP = 0.25f
+
+        /** Cooldown after a live deskew sweep (see [decodeDeskewLuma]). */
+        internal const val LIVE_DESKEW_MIN_INTERVAL_MS = 250L
 
         /**
          * Stable JNI code for the required scheme; must mirror

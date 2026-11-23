@@ -2168,7 +2168,11 @@ DecodeResult decodeDeskew(const uint8_t* gray, int width, int height,
                           const DecodeOptions& options, int* relativeRotation) {
     if (relativeRotation != nullptr) *relativeRotation = 0;
     if (gray == nullptr || width < 64 || height < 32) return DecodeResult{};
-    if ((int64_t)width * (int64_t)height > 4000000) return DecodeResult{};
+    // Live aim-box scale only. The deskew sweep costs 14 bicubic rotations +
+    // 14 decodes; a still-sized 4 MP frame measured multiple seconds on a
+    // slow host, and this runs while the user is aiming. Larger frames keep
+    // the normal live path (and the still stack for one-shots).
+    if ((int64_t)width * (int64_t)height > 1000000) return DecodeResult{};
     // Reject clutter before paying for rotations: the projection gain is the
     // same signal the in-ROI skew retry uses (a clean tilted crop measured
     // 1.40 here; random band structure stays flatter).

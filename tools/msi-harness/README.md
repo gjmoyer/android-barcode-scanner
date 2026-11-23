@@ -72,9 +72,11 @@ change the exit code unless explicitly enforced.
    controlled. The all-failure correctness assertion (no read) is always
    enforced.
 7. **Live tilt rescue** (`liveDeskewSuite`): a 972×252 5 px/module crop
-   rotated 10° must read through `msi::decodeDeskew`; flat and noise crops
-   must decline. Exercises the live path
-   (`ScannerConfig.msiLiveDeskew`, default on; set false to disable).
+   rotated 10° must read through `msi::decodeDeskew`; flat, noise and >1 MP
+   crops must decline. Exercises the live path
+   (`ScannerConfig.msiLiveDeskew`, default on; set false to disable). Sweeps
+   are capped at 1 MP and throttled to one per 250 ms after the previous
+   sweep, so a miss cannot run the full sweep on every frame.
 
 ## A/B behavior checks
 

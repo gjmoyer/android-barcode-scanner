@@ -79,6 +79,8 @@ coarse **bicubic** rotation sweep on the **unstretched** crop. Each winning
 orientation goes through the same 180° reverse confirmation as the still
 angle fallback: a reverse-failing read needs the fallback score gate
 (≥0.70), and a conflicting reverse read is arbitrated on leading quiet zone.
+Sweeps are capped at 1 MP and throttled to one per 250 ms measured from the
+previous sweep's end; the unstretched copy is prepared on the same cadence.
 It runs only after the normal live decode misses and is on by default (`ScannerConfig.msiLiveDeskew`; set false to
 disable). Successful live frames and the still path are unchanged; the extra
 work is one unstretched crop per frame plus a sweep on misses.
@@ -112,7 +114,7 @@ phantom.
 
 ## Guardrails
 
-- `tools/msi-harness`: **185 assertions pass, 0 fail** (166 public, 185 with
+- `tools/msi-harness`: **186 assertions pass, 0 fail** (167 public, 186 with
   the local fixture photos).
 - Fast path: 486 µs mean / 494 µs worst synthetic 1280×720; 524 µs / 631 µs
   on the fixture shelf photo (Apple M2 Max).

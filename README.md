@@ -151,9 +151,10 @@ val config = ScannerConfigBuilder()
   recall; live frames never run these stages.
 - `msiLiveDeskew` (default true): on a live MSI miss, re-prepare the same
   aim-box crop without the camera contrast stretch and retry MSI with a
-  projection-deskew bicubic sweep. Only runs after a miss; successful live
-  frames and the still path are unchanged. Set false to keep the strict
-  pre-fallback live profile if a device cannot absorb the miss-only sweep.
+  projection-deskew bicubic sweep. Only runs after a miss; sweeps are capped
+  at 1 MP and throttled to one per 250 ms, and successful live frames plus
+  the still path are unchanged. Set false to keep the strict pre-fallback
+  live profile if a device cannot absorb the miss-only sweep.
 - Duplicate suppression only affects the live `results` flow; one-shot
   `scanBitmap`/`scanFrame` always return the decode result.
 

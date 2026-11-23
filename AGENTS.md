@@ -105,8 +105,10 @@ emulator image and local fixture photos.
     run through `msi::decodeDeskew`: projection estimate (gain ≥1.3), coarse
     bicubic rotation sweep, then the shared 180° reverse confirmation
     (`confirmReverseView`; score ≥0.70 only when the reverse fails, quiet-zone
-    arbitration on conflict). Successful live frames and the still path are
-    untouched. Measured on a 972x252 Pixel crop: the MLP predicted +17.9° for
+    arbitration on conflict). Sweeps are capped at 1 MP and throttled to one
+    per 250 ms from the previous sweep's end; the unstretched copy is
+    prepared on the same cadence. Successful live frames and the still path
+    are untouched. Measured on a 972x252 Pixel crop: the MLP predicted +17.9° for
     a ~-6° tilt; the projection/bicubic sweep read it.
   Default open-length stills get only the direction-safe angle fallback;
   sharpened/scale retries are shelf-configuration only.
@@ -114,7 +116,7 @@ emulator image and local fixture photos.
   RAII `DepthGuard`s so `bad_alloc` cannot poison a worker thread. Do not
   widen these gates without re-running the full augmented suite, the negative
   sets (currently 412 ms mean / 596 ms p95 / 743 ms max per all-failure
-  frame on the host) and the harness (185 assertions). The safety pass holds
+  frame on the host) and the harness (186 assertions). The safety pass holds
   2,286/2,440 augmented positives with no new wrong reads.
 - The orientation regressor is the only learned MSI component: a 32x32 →
   128 → 64 → 1 MLP in `msi_angle_model.h`, trained offline on synthetic
