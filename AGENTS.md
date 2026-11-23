@@ -103,9 +103,11 @@ emulator image and local fixture photos.
   - Live tilt rescue: on by default via `ScannerConfig.msiLiveDeskew` (set false to disable).
     On a live MSI miss, the same aim-box crop is re-prepared unstretched and
     run through `msi::decodeDeskew`: projection estimate (gain ≥1.3), coarse
-    bicubic rotation sweep, fallback score ≥0.70. Successful live frames and
-    the still path are untouched. Measured on a 972x252 Pixel crop: the MLP
-    predicted +17.9° for a ~-6° tilt; the projection/bicubic sweep read it.
+    bicubic rotation sweep, then the shared 180° reverse confirmation
+    (`confirmReverseView`; score ≥0.70 only when the reverse fails, quiet-zone
+    arbitration on conflict). Successful live frames and the still path are
+    untouched. Measured on a 972x252 Pixel crop: the MLP predicted +17.9° for
+    a ~-6° tilt; the projection/bicubic sweep read it.
   Default open-length stills get only the direction-safe angle fallback;
   sharpened/scale retries are shelf-configuration only.
   Recursion guards are `t_sharpenDepth` and `t_scaleEnsembleDepth`, held by

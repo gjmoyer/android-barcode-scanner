@@ -155,10 +155,15 @@ DecodeResult decodeAngleFallback(const uint8_t* gray, int width, int height,
 // ~-6 deg tilt), so this uses the projection estimate (estimateSkew) and a
 // coarse bicubic rotation sweep instead. Intended only after the normal live
 // decode misses; the caller gates it to live frames. Requires a strong
-// projection gain, rotates the whole frame (no ROI needed), and requires the
-// fallback score gate. Returns the read with relativeRotation 0, or {} if the
-// projection is weak or no angle reads. Does not retain `gray`. Thread-safe.
+// projection gain and rotates the whole frame (no ROI needed). Each winning
+// orientation goes through the same 180-degree reverse confirmation as
+// decodeAngleFallback (shared confirmReverseView): a reverse-failing read
+// needs the fallback score gate, and a conflicting reverse read is arbitrated
+// on leading quiet zone (undecidable = no read). Returns the read with
+// relativeRotation 0/180, or {} if the projection is weak or no angle reads.
+// Does not retain `gray`. Thread-safe.
 DecodeResult decodeDeskew(const uint8_t* gray, int width, int height,
-                          const DecodeOptions& options);
+                          const DecodeOptions& options,
+                          int* relativeRotation = nullptr);
 
 } // namespace msi

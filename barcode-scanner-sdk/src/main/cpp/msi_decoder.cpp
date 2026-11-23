@@ -1962,6 +1962,47 @@ DecodeResult decodeImpl(const uint8_t* gray, int width, int height, bool allowUp
     return res;
 }
 
+// Shared reverse-view confirmation. `r` is a decoded upright view of `img`;
+// returns the accepted read (the reverse result when it wins, with
+// relativeRotation=180), or {} when the reverse view fails below the score
+// gate or two conflicting reads are undecidable. Used by both the still
+// angle fallback and the live deskew rescue so the 180-degree rule cannot
+// drift between them.
+static DecodeResult confirmReverseView(const uint8_t* img, int w, int h,
+                                       const DecodeOptions& options, bool allowUpscale,
+                                       const DecodeResult& r, int* relativeRotation) {
+    if (relativeRotation != nullptr) *relativeRotation = 0;
+    if (!r.ok) return r;
+    std::vector<uint8_t> reverse((size_t)w * (size_t)h);
+    for (int y = 0; y < h; ++y) {
+        const uint8_t* row = img + (size_t)(h - 1 - y) * w;
+        uint8_t* dst = &reverse[(size_t)y * w];
+        for (int x = 0; x < w; ++x) dst[x] = row[w - 1 - x];
+    }
+    const DecodeResult rr = decodeScoped(reverse.data(), w, h, options, allowUpscale);
+    if (g_debug && !allowUpscale && r.ok) {
+        printf("[dbg] nested candidate %s votes=%d lead=%.2f score=%.3f reverse=%s revlead=%.2f\n",
+               r.digits.c_str(), r.votes, r.leadingQuiet, r.score,
+               rr.ok ? rr.digits.c_str() : "-", rr.leadingQuiet);
+    }
+    if (!rr.ok) {
+        // A derived view with no reverse confirmation must clear a real
+        // template-correlation bar. Votes are not enough here: clean
+        // reversed phantoms can agree on 10 rows with score ~0.68, while
+        // true angle-fallback reads measured 0.79-0.89.
+        if (r.score < kFallbackScoreGate) return DecodeResult{};
+    }
+    if (rr.ok && rr.digits != r.digits) {
+        const int pick = pickDirection(r, rr);
+        if (pick == 0) return DecodeResult{};
+        if (pick < 0) {
+            if (relativeRotation != nullptr) *relativeRotation = 180;
+            return rr;
+        }
+    }
+    return r;
+}
+
 #if MSI_ANGLE_MODEL
 // Contrast-stretches `img` in place (2%/98%, the same table the frame decoder
 // builds). Returns false when the histogram is too flat to stretch, leaving
@@ -1994,38 +2035,9 @@ static bool stretchGray(std::vector<uint8_t>& img) {
 static DecodeResult decodeViewSafe(const uint8_t* img, int w, int h,
                                    const DecodeOptions& options, bool allowUpscale,
                                    int* relativeRotation) {
-    if (relativeRotation != nullptr) *relativeRotation = 0;
     if (img == nullptr || w <= 0 || h <= 0) return DecodeResult{};
-    DecodeResult r = decodeScoped(img, w, h, options, allowUpscale);
-    if (!r.ok) return r;
-    std::vector<uint8_t> reverse((size_t)w * (size_t)h);
-    for (int y = 0; y < h; ++y) {
-        const uint8_t* row = img + (size_t)(h - 1 - y) * w;
-        uint8_t* dst = &reverse[(size_t)y * w];
-        for (int x = 0; x < w; ++x) dst[x] = row[w - 1 - x];
-    }
-    const DecodeResult rr = decodeScoped(reverse.data(), w, h, options, allowUpscale);
-    if (g_debug && !allowUpscale && r.ok) {
-        printf("[dbg] nested candidate %s votes=%d lead=%.2f score=%.3f reverse=%s revlead=%.2f\n",
-               r.digits.c_str(), r.votes, r.leadingQuiet, r.score,
-               rr.ok ? rr.digits.c_str() : "-", rr.leadingQuiet);
-    }
-    if (!rr.ok) {
-        // A derived view with no reverse confirmation must clear a real
-        // template-correlation bar. Votes are not enough here: clean
-        // reversed phantoms can agree on 10 rows with score ~0.68, while
-        // true angle-fallback reads measured 0.79-0.89.
-        if (r.score < kFallbackScoreGate) return DecodeResult{};
-    }
-    if (rr.ok && rr.digits != r.digits) {
-        const int pick = pickDirection(r, rr);
-        if (pick == 0) return DecodeResult{};
-        if (pick < 0) {
-            if (relativeRotation != nullptr) *relativeRotation = 180;
-            return rr;
-        }
-    }
-    return r;
+    const DecodeResult r = decodeScoped(img, w, h, options, allowUpscale);
+    return confirmReverseView(img, w, h, options, allowUpscale, r, relativeRotation);
 }
 
 DecodeResult decodeAngleFallback(const uint8_t* gray, int width, int height,
@@ -2153,7 +2165,8 @@ static void rotateGrayBicubic(const uint8_t* src, int W, int H, float deg,
 }
 
 DecodeResult decodeDeskew(const uint8_t* gray, int width, int height,
-                          const DecodeOptions& options) {
+                          const DecodeOptions& options, int* relativeRotation) {
+    if (relativeRotation != nullptr) *relativeRotation = 0;
     if (gray == nullptr || width < 64 || height < 32) return DecodeResult{};
     if ((int64_t)width * (int64_t)height > 4000000) return DecodeResult{};
     // Reject clutter before paying for rotations: the projection gain is the
@@ -2176,10 +2189,13 @@ DecodeResult decodeDeskew(const uint8_t* gray, int width, int height,
         int rw = 0, rh = 0;
         rotateGrayBicubic(gray, width, height, angle, rot, rw, rh);
         if (rw <= 0 || rh <= 0) continue;
-        const DecodeResult r = decode(rot.data(), rw, rh, options);
+        const DecodeResult r = decodeScoped(rot.data(), rw, rh, options,
+                                            options.allowUpscale);
+        const DecodeResult confirmed = confirmReverseView(
+            rot.data(), rw, rh, options, options.allowUpscale, r, relativeRotation);
         if (g_debug) printf("[deskew] angle %.1f ok=%d score=%.2f votes=%d\n",
-                            angle, r.ok, r.score, r.votes);
-        if (r.ok && r.score >= kFallbackScoreGate) return r;
+                            angle, confirmed.ok, confirmed.score, confirmed.votes);
+        if (confirmed.ok) return confirmed;
     }
     return DecodeResult{};
 }

@@ -75,9 +75,11 @@ sharpening and the ensemble while keeping the plain/stretch sweeps.
 Live aim-box crops have no full-label context for `predictAngle`: a 972×252
 Pixel crop measured **+17.9°** for a true ~−6° tilt. `msi::decodeDeskew`
 therefore uses the projection estimate (`estimateSkew`, gain ≥1.3) and a
-coarse **bicubic** rotation sweep on the **unstretched** crop, requiring the
-fallback score gate (≥0.70). It runs only after the normal live decode
-misses and is on by default (`ScannerConfig.msiLiveDeskew`; set false to
+coarse **bicubic** rotation sweep on the **unstretched** crop. Each winning
+orientation goes through the same 180° reverse confirmation as the still
+angle fallback: a reverse-failing read needs the fallback score gate
+(≥0.70), and a conflicting reverse read is arbitrated on leading quiet zone.
+It runs only after the normal live decode misses and is on by default (`ScannerConfig.msiLiveDeskew`; set false to
 disable). Successful live frames and the still path are unchanged; the extra
 work is one unstretched crop per frame plus a sweep on misses.
 

@@ -120,10 +120,12 @@ Java_com_barcodescanner_sdk_data_msi_MsiNativeDecoder_nativeDecodeDeskew(
     options.maxDigits = maxDigits;
     std::string out;
     try {
-        const msi::DecodeResult r = msi::decodeDeskew(px, width, height, options);
+        int relativeRotation = 0;
+        const msi::DecodeResult r =
+            msi::decodeDeskew(px, width, height, options, &relativeRotation);
         if (!r.ok) return nullptr;
         out = r.digits + "|" + msi::policyName(r.policy) + "|" +
-              std::to_string(r.votes) + "|0";
+              std::to_string(r.votes) + "|" + std::to_string(relativeRotation);
     } catch (const std::bad_alloc&) {
         return nullptr;
     }
