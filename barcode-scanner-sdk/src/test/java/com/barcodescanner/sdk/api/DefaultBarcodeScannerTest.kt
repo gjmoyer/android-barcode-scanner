@@ -6,6 +6,7 @@ import androidx.camera.core.SurfaceOrientedMeteringPointFactory
 import com.barcodescanner.sdk.camera.PreparedLiveFrame
 import com.barcodescanner.sdk.data.frame.LumaFrame
 import com.barcodescanner.sdk.data.frame.NativeFrame
+import com.barcodescanner.sdk.domain.decoder.DecodeOutcome
 import com.barcodescanner.sdk.di.ScannerContainer
 import com.barcodescanner.sdk.domain.model.DecodedBarcode
 import com.barcodescanner.sdk.domain.model.ScannerConfig
@@ -373,6 +374,63 @@ class DefaultBarcodeScannerTest {
             worker.join()
             shadowOf(Looper.getMainLooper()).idle()
             assertEquals(listOf(true), callbackOnMain)
+        } finally {
+            scanner.close()
+        }
+    }
+
+    @Test
+    fun liveFrame_miss_invokesDeskewOnlyWithCopy() = runBlocking {
+        val scanner = scanner(suppressionMillis = 0)
+        try {
+            var calls = 0
+            val prepared = PreparedLiveFrame(blankFrame(), blankFrame())
+            assertTrue(
+                scanner.handleLiveFrame(prepared, scanner.currentCameraSession()) {
+                    calls++
+                    DecodeOutcome.NotFound("fake deskew")
+                },
+            )
+            assertEquals(1, calls)
+
+            var nullCopyCalls = 0
+            scanner.handleLiveFrame(
+                PreparedLiveFrame(blankFrame(), null),
+                scanner.currentCameraSession(),
+            ) {
+                nullCopyCalls++
+                DecodeOutcome.NotFound("fake deskew")
+            }
+            assertEquals(0, nullCopyCalls)
+        } finally {
+            scanner.close()
+        }
+    }
+
+    @Test
+    fun liveFrame_deskewSuccess_emitsAfterStabilityGate() = runBlocking {
+        val scanner = scanner(suppressionMillis = 0)
+        val received = mutableListOf<ScanResult>()
+        val job = launch(Dispatchers.Unconfined) { scanner.results.collect { received += it } }
+        try {
+            val prepared = PreparedLiveFrame(blankFrame(), blankFrame())
+            val hit = DecodeOutcome.Success(
+                listOf(
+                    DecodedBarcode(
+                        rawValue = "096961479",
+                        symbology = Symbology.MSI_PLESSEY,
+                        confidence = 1.0f,
+                        engineName = "MsiNative",
+                    ),
+                ),
+            )
+            repeat(2) {
+                scanner.handleLiveFrame(prepared, scanner.currentCameraSession()) { hit }
+            }
+            yield()
+            assertEquals(1, received.size)
+            assertEquals("096961479", (received.single() as ScanResult.Success).barcode.rawValue)
+            job.cancel()
         } finally {
             scanner.close()
         }

@@ -304,7 +304,17 @@ internal class DefaultBarcodeScanner(
      * throw to the caller as documented. A frame of a stopped [session] is
      * skipped, and its decode can never publish (see [acceptLiveSuccess]).
      */
-    internal suspend fun handleLiveFrame(prepared: PreparedLiveFrame, session: Long = currentCameraSession()): Boolean {
+    internal suspend fun handleLiveFrame(
+        prepared: PreparedLiveFrame,
+        session: Long = currentCameraSession(),
+        /**
+         * Test seam for the live deskew trigger; production uses the MSI
+         * decoder. The default is evaluated per call.
+         */
+        deskewDecode: suspend (LumaFrame) -> DecodeOutcome = {
+            container.msiDecoder.decodeDeskewLuma(it)
+        },
+    ): Boolean {
         if (closed.get() || session != currentCameraSession()) return true
         var reusable = false
         try {
@@ -319,7 +329,7 @@ internal class DefaultBarcodeScanner(
                 session == currentCameraSession()
             ) {
                 val t0 = SystemClock.elapsedRealtime()
-                val deskewed = container.msiDecoder.decodeDeskewLuma(prepared.deskew)
+                val deskewed = deskewDecode(prepared.deskew)
                 android.util.Log.d(
                     TAG,
                     "live deskew ${if (deskewed is DecodeOutcome.Success) "hit" else "miss"} " +

@@ -123,15 +123,17 @@ data class ScannerConfig(
      */
     val msiStillFallbacks: Boolean = true,
     /**
-     * Live tilt rescue (default true). On a live MSI miss, re-prepare the
-     * same aim-box crop without the camera contrast stretch, deskew it with a
-     * bicubic sweep around the projection angle, and decode once. Only runs
-     * after the normal live decode misses; successful frames take exactly
-     * today's path. Sweeps are capped at 1 MP and throttled to one per
-     * 250 ms (cooldown after the previous sweep); larger frames keep the
-     * normal live path. The still path is unaffected. Set false to keep the
-     * strict pre-fallback live profile (e.g. on a device whose latency budget
-     * cannot absorb the miss-only sweep).
+     * Live tilt rescue (default true). On a live MSI miss, the same aim-box
+     * crop is re-prepared without the camera contrast stretch, then a
+     * projection-estimated deskew sweep tries up to 14 bicubic
+     * rotate+decode pairs on a fixed ±2…±14° grid; the first
+     * reverse-confirmed read wins. Only the sweep is miss-only: hits and
+     * misses both pay the extra unstretched prepare on a 250 ms cadence, and
+     * the normal decode path itself is unchanged. Sweeps are capped at 1 MP
+     * and throttled to one per 250 ms (cooldown after the previous sweep);
+     * larger frames keep the normal live path. The still path is unaffected.
+     * Set false to keep the strict pre-fallback live profile (no second
+     * prepare and no sweep).
      */
     val msiLiveDeskew: Boolean = true,
 ) {

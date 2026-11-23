@@ -428,15 +428,19 @@ internal class CameraScanManager(
             }
             scope.launch {
                 var reusable = false
+                var completed = false
                 try {
                     reusable = stopped || onFrame(prepared)
+                    completed = true
                 } finally {
                     // Return to the pool BEFORE opening the gate so the next
                     // frame finds it; an in-use (or cancelled) buffer is dropped.
                     if (reusable) pool.release(prepared.frame.buffer)
-                    // The deskew copy is read only by the synchronous MSI
-                    // rescue inside onFrame: always reusable afterwards.
-                    prepared.deskew?.let { deskewPool.release(it.buffer) }
+                    // Drop the deskew copy too when onFrame did not complete:
+                    // a cancelled scope may have a native deskew call still
+                    // unwinding, and rewriting the buffer under it is the same
+                    // hazard as the production buffer's timeout contract.
+                    if (completed) prepared.deskew?.let { deskewPool.release(it.buffer) }
                     decodeInFlight.set(false)
                 }
             }

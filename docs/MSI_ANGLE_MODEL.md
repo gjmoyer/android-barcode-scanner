@@ -82,8 +82,9 @@ angle fallback: a reverse-failing read needs the fallback score gate
 Sweeps are capped at 1 MP and throttled to one per 250 ms measured from the
 previous sweep's end; the unstretched copy is prepared on the same cadence.
 It runs only after the normal live decode misses and is on by default (`ScannerConfig.msiLiveDeskew`; set false to
-disable). Successful live frames and the still path are unchanged; the extra
-work is one unstretched crop per frame plus a sweep on misses.
+disable). The normal decode path and the still path are unchanged; hits pay
+one unstretched prepare on the 250 ms cadence, and misses additionally pay the
+sweep.
 
 ## Validation
 
