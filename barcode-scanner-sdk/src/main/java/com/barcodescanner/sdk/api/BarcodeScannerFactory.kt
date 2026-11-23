@@ -188,6 +188,7 @@ internal class DefaultBarcodeScanner(
                 config = config,
                 scope = scope,
                 onFrame = { prepared -> handleLiveFrame(prepared, session) },
+                liveDeskewDue = { container.msiDecoder.liveDeskewDue() },
                 onError = { t -> reportCameraFailure(session, t) },
                 onStatus = { status -> publishCameraStatus(session, status) },
                 onTorch = { enabled -> publishForSession(session) { _torchEnabled.value = enabled } },

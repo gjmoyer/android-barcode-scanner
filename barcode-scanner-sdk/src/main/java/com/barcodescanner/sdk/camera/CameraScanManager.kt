@@ -93,6 +93,12 @@ internal class CameraScanManager(
      */
     private val onFrame: suspend (PreparedLiveFrame) -> Boolean,
     /**
+     * True when the MSI decoder's live deskew cooldown has elapsed. Checked
+     * before preparing the unstretched copy so a frame cannot be prepared
+     * just before the sweep gate and then dropped as throttled.
+     */
+    private val liveDeskewDue: () -> Boolean = { false },
+    /**
      * Called (on the main thread) when camera binding fails — e.g. no back
      * camera, camera in use, or the lifecycle is already destroyed. Without
      * this, [ProcessCameraProvider.bindToLifecycle] throws asynchronously
@@ -145,9 +151,8 @@ internal class CameraScanManager(
      * copy more often than that is wasted work. The interval is the decoder's
      * own cooldown constant so tuning one cannot leave the other behind.
      *
-     * The clocks are independent (prepare from prepare time, cooldown from
-     * sweep end), so during a long sweep a prepared copy can be discarded as
-     * throttled. That is bounded to <=4/sec of a <=1 MP crop and negligible.
+     * The decoder's liveDeskewDue() is checked too, so a copy is never
+     * prepared only to be dropped as throttled by the sweep's cooldown.
      */
     private var lastDeskewPrepareMs = 0L
 
@@ -495,7 +500,8 @@ internal class CameraScanManager(
                              maxOrientations = LIVE_ORIENTATIONS, scanTopFraction = 0f)
         val now = android.os.SystemClock.elapsedRealtime()
         val wantDeskew = liveDeskewWanted &&
-            now - lastDeskewPrepareMs >= MsiNativeDecoder.LIVE_DESKEW_MIN_INTERVAL_MS
+            now - lastDeskewPrepareMs >= MsiNativeDecoder.LIVE_DESKEW_MIN_INTERVAL_MS &&
+            liveDeskewDue()
         if (wantDeskew) lastDeskewPrepareMs = now
         val deskew = if (wantDeskew) {
             val rawBuffer = deskewPool.take(width, height)

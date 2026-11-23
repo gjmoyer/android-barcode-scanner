@@ -126,6 +126,15 @@ class MsiNativeDecoder(
     private var lastDeskewEndMs = 0L
 
     /**
+     * True when the live deskew cooldown has elapsed. CameraScanManager
+     * checks this before preparing the unstretched copy, so a prepared frame
+     * cannot arrive just before the sweep gate and be dropped as throttled.
+     */
+    internal fun liveDeskewDue(
+        now: Long = android.os.SystemClock.elapsedRealtime(),
+    ): Boolean = now - lastDeskewEndMs >= LIVE_DESKEW_MIN_INTERVAL_MS
+
+    /**
      * Standalone bitmap decode (hosts using the engine directly; the facade
      * never calls this). The bitmap is converted to gray natively
      * ([NativeFrame.prepareStill]: no rotation — the pixel layout
@@ -183,9 +192,7 @@ class MsiNativeDecoder(
      * Same validation, vote gate and payload contract as [decode].
      */
     internal suspend fun decodeDeskewLuma(frame: LumaFrame): DecodeOutcome = withContext(dispatcher) {
-        if (android.os.SystemClock.elapsedRealtime() - lastDeskewEndMs <
-            LIVE_DESKEW_MIN_INTERVAL_MS
-        ) {
+        if (!liveDeskewDue()) {
             return@withContext DecodeOutcome.NotFound("MSI live deskew throttled")
         }
         try {

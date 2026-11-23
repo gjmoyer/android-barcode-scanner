@@ -107,8 +107,9 @@ emulator image and local fixture photos.
     (`confirmReverseView`; score ≥0.70 only when the reverse fails, quiet-zone
     arbitration on conflict). Sweeps are capped at 1 MP and throttled to one
     per 250 ms from the previous sweep's end; the unstretched copy is
-    prepared on the same cadence, so hits pay it too; the normal decode path
-    and the still path are untouched. Measured on a 972x252 Pixel crop: the MLP predicted +17.9° for
+    prepared on the same cadence and only when the decoder's cooldown has
+    elapsed, so hits pay it too but no copy is dropped as throttled. The
+    normal decode path and the still path are untouched. Measured on a 972x252 Pixel crop: the MLP predicted +17.9° for
     a ~-6° tilt; the projection/bicubic sweep read it.
   Default open-length stills get only the direction-safe angle fallback;
   sharpened/scale retries are shelf-configuration only.
