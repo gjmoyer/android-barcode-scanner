@@ -117,7 +117,7 @@ emulator image and local fixture photos.
   RAII `DepthGuard`s so `bad_alloc` cannot poison a worker thread. Do not
   widen these gates without re-running the full augmented suite, the negative
   sets (currently 412 ms mean / 596 ms p95 / 743 ms max per all-failure
-  frame on the host) and the harness (186 assertions). The safety pass holds
+  frame on the host) and the harness (189 assertions). The safety pass holds
   2,286/2,440 augmented positives with no new wrong reads.
 - The orientation regressor is the only learned MSI component: a 32x32 →
   128 → 64 → 1 MLP in `msi_angle_model.h`, trained offline on synthetic

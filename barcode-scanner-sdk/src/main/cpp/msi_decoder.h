@@ -134,10 +134,11 @@ DecodeResult decode(const uint8_t* gray, int width, int height,
 #if MSI_ANGLE_MODEL
 // Predicts the in-plane rotation of the tag in `gray` from a 32x32
 // area-averaged view of it (degrees; sign matches decodeAngleFallback's
-// rotation). Exposed for the host harness, which pins the committed weights
-// with golden vectors — msi_angle_model.h is generated and not reproducible
-// from this repo, so a stray edit must fail a test rather than silently
-// change what the fallback rescues.
+// rotation). Returns 0 for null input or dimensions below 32 px, where the
+// bins degenerate. Exposed for the host harness, which pins the committed
+// weights with golden vectors — msi_angle_model.h is generated and not
+// reproducible from this repo, so a stray edit must fail a test rather than
+// silently change what the fallback rescues.
 float predictAngle(const uint8_t* gray, int width, int height);
 
 // Experimental fallback: predict tag rotation, rotate the original frame,

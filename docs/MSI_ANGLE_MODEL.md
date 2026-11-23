@@ -120,7 +120,7 @@ phantom.
 
 ## Guardrails
 
-- `tools/msi-harness`: **186 assertions pass, 0 fail** (167 public, 186 with
+- `tools/msi-harness`: **189 assertions pass, 0 fail** (170 public, 189 with
   the local fixture photos).
 - Fast path: 486 µs mean / 494 µs worst synthetic 1280×720; 524 µs / 631 µs
   on the fixture shelf photo (Apple M2 Max).

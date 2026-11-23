@@ -1634,7 +1634,10 @@ static void rotateGrayExpanded(const uint8_t* src, int W, int H, float deg,
 
 
 // Predict the in-plane rotation of the tag from a 32x32 area-averaged view.
+// Invalid input returns 0 (upright): this is a public symbol, and W/H below
+// 32 makes the binning degenerate (zero-area bins -> NaN).
 float predictAngle(const uint8_t* src, int W, int H) {
+    if (src == nullptr || W < 32 || H < 32) return 0.0f;
     float x[kAngleInput];
     int k = 0;
     for (int oy = 0; oy < 32; ++oy) {

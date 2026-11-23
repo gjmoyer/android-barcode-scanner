@@ -854,6 +854,15 @@ static void frameSuite() {
         assertTrue("angle golden: flat frame predicts ~0",
                    close(msi::predictAngle(blank.px.data(), blank.w, blank.h),
                          0.152f, 0.75f));
+        Gray px;
+        px.w = 64;
+        px.h = 64;
+        px.px.assign(64 * 64, 255);
+        assertTrue("predictAngle rejects null", msi::predictAngle(nullptr, 64, 64) == 0.0f);
+        assertTrue("predictAngle rejects width < 32",
+                   msi::predictAngle(px.px.data(), 31, 64) == 0.0f);
+        assertTrue("predictAngle rejects height < 32",
+                   msi::predictAngle(px.px.data(), 64, 31) == 0.0f);
     }
 #endif
     // 5a-5. Small-module still path: a blurred 9-digit tag downscaled to
